@@ -75,19 +75,23 @@ pick a generation + game and scrub/play through the recorded board states (snake
 bodies, heads, food, health, who won). "Follow latest" auto-jumps to the newest
 replays as training advances.
 
-## Build & test
+## Make targets
 
-```bash
-# Rust core
-cargo test -p snek-core
-cargo bench -p snek-core         # step throughput
+Everything is wrapped in a `Makefile` (`make` or `make help` lists it):
 
-# Python boundary (in a venv)
-python -m venv .venv && source .venv/bin/activate
-pip install maturin numpy pytest
-maturin develop --release        # builds the `snek` module
-python -m pytest python/tests -q
+```text
+make venv        # create .venv + install deps (incl. PyTorch; TORCH_INDEX overridable)
+make build       # compile the Rust extension into the venv
+make test        # Rust + Python tests
+make train       # train; writes runs/<id>/  (override GENERATIONS, SAMPLES, RUN_ID, ARGS...)
+make dashboard   # serve the live dashboard (PORT, default 8050)
+make serve       # run the Battlesnake server (CKPT=..., matching FILTERS/BLOCKS)
+make audit       # full end-to-end audit script
+make bench lint fmt clean clean-all
 ```
+
+Typical first run: `make venv && make build && make test`, then
+`make train RUN_ID=myrun` in one terminal and `make dashboard` in another.
 
 ## Engine fidelity notes
 
