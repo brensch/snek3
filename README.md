@@ -47,7 +47,7 @@ packages, so no `PYTHONPATH` juggling is needed.
 
 ```bash
 # Train (writes runs/<run_id>/ckpt/best.pt on each eval improvement)
-python -m azsnek.train --generations 50 --samples 20000 \
+python -m azsnek.train --generations 50 --samples 50000 \
     --depth 2 --filters 64 --blocks 6 --eval-every 1
 
 # Serve (filters/blocks must match the checkpoint)
@@ -64,7 +64,7 @@ precomputed.
 
 ```bash
 # In one terminal: train (add --run-id to name the run)
-python -m azsnek.train --generations 50 --samples 20000 --eval-every 1 --run-id myrun
+python -m azsnek.train --generations 50 --samples 50000 --eval-every 1 --run-id myrun
 
 # In another: the dashboard, then open http://127.0.0.1:8050
 SNEK_RUNS_DIR=runs uvicorn dashboard.app:app --port 8050

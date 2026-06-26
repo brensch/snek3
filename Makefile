@@ -20,13 +20,16 @@ CKPT        ?=
 
 # Training defaults (all overridable)
 GENERATIONS ?= 30
-SAMPLES     ?= 12000
+SAMPLES     ?= 50000
 COUNT       ?= 32
 DEPTH       ?= 2
 TAU         ?= 30
 ITERS       ?= 120
 EVAL_BATCH_SIZE ?= 8192
 SEARCH_THREADS ?= $(shell nproc 2>/dev/null || python3 -c 'import os; print(os.cpu_count() or 1)')
+TRAIN_STEPS ?= 1024
+BATCH_SIZE  ?= 2048
+BUFFER_SIZE ?= 500000
 FILTERS     ?= 64
 BLOCKS      ?= 6
 EVAL_EVERY  ?= 1
@@ -46,7 +49,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: GENERATIONS SAMPLES COUNT DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS FILTERS BLOCKS EVAL_EVERY EVAL_GAMES MAX_TURNS RECORD_GAMES RECORD_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
+	@echo "Vars: GENERATIONS SAMPLES COUNT DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS BATCH_SIZE BUFFER_SIZE FILTERS BLOCKS EVAL_EVERY EVAL_GAMES MAX_TURNS RECORD_GAMES RECORD_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
@@ -82,6 +85,8 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 		--depth $(DEPTH) --tau $(TAU) --iters $(ITERS) \
 		--eval-batch-size $(EVAL_BATCH_SIZE) \
 		--search-threads $(SEARCH_THREADS) \
+		--train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) \
+		--buffer-size $(BUFFER_SIZE) \
 		--filters $(FILTERS) --blocks $(BLOCKS) \
 		--eval-every $(EVAL_EVERY) --eval-games $(EVAL_GAMES) \
 		--max-turns $(MAX_TURNS) \
@@ -91,7 +96,8 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 overnight: build ## Start a background overnight training run. Override TAU, GENERATIONS, SAMPLES, RUN_ID...
 	TAU=$(TAU) GENERATIONS=$(GENERATIONS) SAMPLES=$(SAMPLES) COUNT=$(COUNT) \
 	DEPTH=$(DEPTH) ITERS=$(ITERS) EVAL_BATCH_SIZE=$(EVAL_BATCH_SIZE) \
-	SEARCH_THREADS=$(SEARCH_THREADS) \
+	SEARCH_THREADS=$(SEARCH_THREADS) TRAIN_STEPS=$(TRAIN_STEPS) BATCH_SIZE=$(BATCH_SIZE) \
+	BUFFER_SIZE=$(BUFFER_SIZE) \
 	FILTERS=$(FILTERS) BLOCKS=$(BLOCKS) \
 	EVAL_EVERY=$(EVAL_EVERY) EVAL_GAMES=$(EVAL_GAMES) MAX_TURNS=$(MAX_TURNS) \
 	RECORD_GAMES=$(RECORD_GAMES) RECORD_EVERY=$(RECORD_EVERY) \

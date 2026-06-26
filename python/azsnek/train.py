@@ -74,7 +74,7 @@ def policy_target_stats(pol: np.ndarray) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--generations", type=int, default=50)
-    ap.add_argument("--samples", type=int, default=20_000)
+    ap.add_argument("--samples", type=int, default=50_000)
     ap.add_argument("--count", type=int, default=32)
     ap.add_argument("--depth", type=int, default=2)
     ap.add_argument("--tau", type=float, default=30.0)
@@ -92,8 +92,9 @@ def main():
         help="Rayon threads for Rust search/encoding (default: all visible CPUs; 0 leaves Rayon default)",
     )
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--train-steps", type=int, default=256, help="SGD steps per generation")
-    ap.add_argument("--buffer-size", type=int, default=150_000, help="replay buffer capacity (samples)")
+    ap.add_argument("--train-steps", type=int, default=1024, help="SGD steps per generation")
+    ap.add_argument("--batch-size", type=int, default=2048, help="SGD minibatch size")
+    ap.add_argument("--buffer-size", type=int, default=500_000, help="replay buffer capacity (samples)")
     ap.add_argument("--max-turns", type=int, default=0, help="0 plays until terminal; positive values cap games as draws")
     ap.add_argument("--eval-every", type=int, default=1)
     ap.add_argument("--eval-games", type=int, default=32)
@@ -146,6 +147,9 @@ def main():
             "search_threads": args.search_threads,
             "generations": args.generations,
             "samples_per_gen": args.samples,
+            "train_steps": args.train_steps,
+            "batch_size": args.batch_size,
+            "buffer_size": args.buffer_size,
             "device": str(device),
         },
     )
@@ -219,7 +223,10 @@ def main():
 
         t1 = time.time()
         # Train on a window of recent games, not just this generation's samples.
-        losses = train_on_samples(net, opt, buffer.dataset(), device, steps=args.train_steps)
+        losses = train_on_samples(
+            net, opt, buffer.dataset(), device,
+            steps=args.train_steps, batch_size=args.batch_size,
+        )
         t_train = time.time() - t1
 
         turns_per_sec = samples.turns / max(t_gen, 1e-9)
