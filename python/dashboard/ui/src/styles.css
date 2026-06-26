@@ -79,6 +79,36 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
 .board-meta .turn { margin-left: auto; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .board-snakes { display: flex; gap: 12px; margin-top: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; }
 canvas { display: block; background: #0b0e13; border-radius: 8px; max-width: 100%; }
+.chart-wrap { position: relative; width: 100%; }
+.chart-tooltip {
+  position: absolute;
+  z-index: 1;
+  min-width: 178px;
+  padding: 8px 10px;
+  pointer-events: none;
+  background: rgba(13, 17, 23, .96);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .28);
+  color: var(--fg);
+  font-size: 12px;
+}
+.chart-tooltip b {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 12px;
+}
+.chart-tooltip span {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.chart-tooltip em {
+  color: var(--muted);
+  font-style: normal;
+}
+.chart-tooltip strong { font-weight: 650; }
 .controls { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
 #scrub { flex: 1; min-width: 140px; accent-color: var(--accent); }
 input[type="range"] { accent-color: var(--accent); }
