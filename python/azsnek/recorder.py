@@ -35,11 +35,18 @@ def record_games(
     max_turns = 2 * board * board
     batch = snek.GameBatch(board, board, 2, count=n_games, seed=seed)
     frames: list[list[dict]] = [[] for _ in range(n_games)]
+    # Stop recording a game once we've captured its terminal frame, so finished
+    # games aren't padded with frozen frames up to the longest game's length.
+    recorded_terminal = [False] * n_games
 
     for _ in range(max_turns):
+        done = batch.done().astype(bool)
         for g in range(n_games):
-            frames[g].append(json.loads(batch.snapshot(g)))
-        if np.all(batch.done()):
+            if not recorded_terminal[g]:
+                frames[g].append(json.loads(batch.snapshot(g)))
+                if done[g]:
+                    recorded_terminal[g] = True  # this was the final frame
+        if all(recorded_terminal):
             break
         policy = run_search(batch, net, device, depth, tau, iters)
         agent = greedy_actions(policy)[:, 0]

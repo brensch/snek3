@@ -24,7 +24,7 @@ def test_generate_train_eval_pipeline():
     # Value targets are in {-1, 0, 1}.
     assert set(samples.z.tolist()) <= {-1.0, 0.0, 1.0}
 
-    losses = train_on_samples(net, opt, samples, device, epochs=1, batch_size=64)
+    losses = train_on_samples(net, opt, samples, device, steps=5, batch_size=64)
     assert losses["policy_loss"] >= 0.0
     assert losses["value_loss"] >= 0.0
 

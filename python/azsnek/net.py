@@ -102,4 +102,21 @@ class AZNet(nn.Module):
 
 
 def device_auto() -> torch.device:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if dev.type == "cuda":
+        # TF32 matmul/conv. NOTE: do NOT enable cudnn.benchmark here — the search
+        # leaf count (and thus batch size) varies every step, so benchmark mode
+        # would re-autotune constantly and get slower. bf16 autocast is the win.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    return dev
+
+
+# Dtype for autocast inference/training forward passes (bf16 is stable and needs
+# no gradient scaler). Used by the search bridge and the trainer.
+AUTOCAST_DTYPE = torch.bfloat16
+
+
+def autocast(device: torch.device):
+    """Mixed-precision context for a forward pass; a no-op on CPU."""
+    return torch.autocast(device.type, dtype=AUTOCAST_DTYPE, enabled=(device.type == "cuda"))

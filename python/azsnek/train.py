@@ -19,10 +19,10 @@ import torch
 import torch.nn.functional as F
 
 from .evaluate import evaluate
-from .net import AZNet, NetConfig, device_auto
+from .net import AZNet, NetConfig, autocast as net_autocast, device_auto
 from .recorder import record_games
 from .runlog import RunWriter
-from .selfplay import SelfPlayConfig, generate
+from .selfplay import ReplayBuffer, SelfPlayConfig, generate
 
 
 def train_on_samples(
@@ -30,35 +30,34 @@ def train_on_samples(
     opt: torch.optim.Optimizer,
     samples,
     device: torch.device,
-    epochs: int = 1,
+    steps: int = 256,
     batch_size: int = 1024,
     value_weight: float = 1.0,
 ) -> dict:
+    """Run `steps` SGD updates on minibatches drawn uniformly (with replacement)
+    from `samples` — a replay buffer's worth of recent positions."""
     obs = torch.from_numpy(samples.obs).to(device)
     pol = torch.from_numpy(samples.pol).to(device)
     z = torch.from_numpy(samples.z).to(device)
     n = obs.shape[0]
 
     net.train()
-    last = {"policy_loss": 0.0, "value_loss": 0.0}
-    for _ in range(epochs):
-        perm = torch.randperm(n, device=device)
-        for start in range(0, n, batch_size):
-            idx = perm[start : start + batch_size]
+    pl = vl = 0.0
+    for _ in range(steps):
+        idx = torch.randint(0, n, (min(batch_size, n),), device=device)
+        with net_autocast(device):
             logits, value = net(obs[idx])
             logp = F.log_softmax(logits, dim=1)
-            # Soft-target cross-entropy; illegal moves have target 0 (no penalty).
+            # Soft-target cross-entropy; illegal moves have target 0.
             policy_loss = -(pol[idx] * logp).sum(dim=1).mean()
             value_loss = F.mse_loss(value, z[idx])
             loss = policy_loss + value_weight * value_loss
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-            last = {
-                "policy_loss": float(policy_loss.item()),
-                "value_loss": float(value_loss.item()),
-            }
-    return last
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+        pl += float(policy_loss.item())
+        vl += float(value_loss.item())
+    return {"policy_loss": pl / steps, "value_loss": vl / steps}
 
 
 def main():
@@ -70,7 +69,8 @@ def main():
     ap.add_argument("--tau", type=float, default=6.0)
     ap.add_argument("--iters", type=int, default=120)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--train-steps", type=int, default=256, help="SGD steps per generation")
+    ap.add_argument("--buffer-size", type=int, default=150_000, help="replay buffer capacity (samples)")
     ap.add_argument("--eval-every", type=int, default=5)
     ap.add_argument("--eval-games", type=int, default=200)
     ap.add_argument("--filters", type=int, default=64)
@@ -169,13 +169,17 @@ def main():
         {"generation": start_gen - 1, "running": True, "total_generations": args.generations}
     )
 
+    buffer = ReplayBuffer(args.buffer_size)
+
     for gen in range(start_gen, args.generations):
         t0 = time.time()
         samples = generate(net, device, sp, seed=1000 + gen)
+        buffer.add(samples)
         t_gen = time.time() - t0
 
         t1 = time.time()
-        losses = train_on_samples(net, opt, samples, device, epochs=args.epochs)
+        # Train on a window of recent games, not just this generation's samples.
+        losses = train_on_samples(net, opt, buffer.dataset(), device, steps=args.train_steps)
         t_train = time.time() - t1
 
         turns_per_sec = samples.turns / max(t_gen, 1e-9)
@@ -183,6 +187,7 @@ def main():
         metric = {
             "gen": gen,
             "samples": int(samples.obs.shape[0]),
+            "buffer": len(buffer),
             "policy_loss": round(losses["policy_loss"], 4),
             "value_loss": round(losses["value_loss"], 4),
             "gen_seconds": round(t_gen, 1),

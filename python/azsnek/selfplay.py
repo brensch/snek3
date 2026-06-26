@@ -8,6 +8,7 @@ that game's recorded positions.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -28,6 +29,8 @@ class SelfPlayConfig:
     iters: int = 120
     samples_per_gen: int = 20_000
     max_turns: int = 400  # safety cap per game
+    dirichlet_frac: float = 0.25  # root exploration noise mix (0 disables)
+    dirichlet_alpha: float = 0.3
 
 
 @dataclass
@@ -37,6 +40,53 @@ class Samples:
     z: np.ndarray  # [K] float32
     turns: int = 0  # total board-turns stepped (for throughput)
     games: int = 0  # total games finished
+
+
+class ReplayBuffer:
+    """Sliding window of recent self-play samples (AlphaZero trains on a window
+    of recent games, not just the latest generation)."""
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self._obs: deque[np.ndarray] = deque()
+        self._pol: deque[np.ndarray] = deque()
+        self._z: deque[np.ndarray] = deque()
+        self._n = 0
+
+    def add(self, s: Samples) -> None:
+        self._obs.append(s.obs)
+        self._pol.append(s.pol)
+        self._z.append(s.z)
+        self._n += len(s.z)
+        while self._n > self.capacity and len(self._z) > 1:
+            self._n -= len(self._z[0])
+            self._obs.popleft()
+            self._pol.popleft()
+            self._z.popleft()
+
+    def __len__(self) -> int:
+        return self._n
+
+    def dataset(self) -> Samples:
+        return Samples(
+            obs=np.concatenate(self._obs, axis=0),
+            pol=np.concatenate(self._pol, axis=0),
+            z=np.concatenate(self._z, axis=0),
+        )
+
+
+def add_root_noise(policy: np.ndarray, rng: np.random.Generator, frac: float, alpha: float) -> np.ndarray:
+    """Mix Dirichlet noise into the root policy over each agent's *legal* moves
+    (the nonzero entries), per AlphaZero, to keep self-play exploring."""
+    if frac <= 0:
+        return policy
+    out = policy.copy().reshape(-1, policy.shape[-1])
+    for row in out:
+        legal = row > 0
+        k = int(legal.sum())
+        if k >= 2:
+            row[legal] = (1 - frac) * row[legal] + frac * rng.dirichlet([alpha] * k)
+    return out.reshape(policy.shape)
 
 
 @dataclass
@@ -82,7 +132,10 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
             slots[g].alive.append(alive[g])
             slots[g].turns += 1
 
-        actions = sample_actions(policy, rng)
+        # Explore: mix Dirichlet noise into the root policy before sampling the
+        # action to play (the stored policy target stays the clean search policy).
+        play_policy = add_root_noise(policy, rng, cfg.dirichlet_frac, cfg.dirichlet_alpha)
+        actions = sample_actions(play_policy, rng)
         # Force-terminate games that overrun the turn cap so slots flush.
         batch.step(actions)
         done = batch.done()

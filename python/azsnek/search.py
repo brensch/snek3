@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from .net import AZNet
+from .net import AZNet, autocast as net_autocast
 
 
 @torch.no_grad()
@@ -39,7 +39,8 @@ def run_search(
 
     net.eval()
     obs_t = torch.from_numpy(obs).to(device, non_blocking=True)
-    _, value = net(obs_t)  # value: [M] in [-1, 1]
+    with net_autocast(device):
+        _, value = net(obs_t)  # value: [M] in [-1, 1]
     values = value.detach().to("cpu", dtype=torch.float32).numpy()
     return batch.backup_search(values, tau, iters)
 
