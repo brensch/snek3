@@ -22,7 +22,7 @@ export default function MiniBoard({ game, tick }) {
       <div className="board-meta">
         <span className="type">{type}</span>
         <span className={"badge " + cls}>{r}</span>
-        <span className="muted turn">t{fr ? fr.turn : 0} · {frame + 1}/{n}</span>
+        <span className="muted turn">{frame + 1}/{n}</span>
       </div>
       <div className="board-snakes">
         {game.frames[0].snakes.map((_, i) => (

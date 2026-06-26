@@ -57,10 +57,11 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
 .board-grid { flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
 .board-cell { background: #0d1117; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
 .board-cell canvas { width: 100%; height: auto; }
-.board-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; }
-.board-meta .type { color: var(--fg); }
-.board-meta .turn { margin-left: auto; font-variant-numeric: tabular-nums; }
-.board-snakes { display: flex; gap: 12px; margin-top: 4px; font-size: 11px; color: var(--muted); }
+.board-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; flex-wrap: nowrap; white-space: nowrap; }
+.board-meta .type { color: var(--fg); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.board-meta .badge { flex-shrink: 0; }
+.board-meta .turn { margin-left: auto; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.board-snakes { display: flex; gap: 12px; margin-top: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; }
 canvas { display: block; background: #0b0e13; border-radius: 8px; max-width: 100%; }
 .controls { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
 #scrub { flex: 1; min-width: 140px; accent-color: var(--accent); }
