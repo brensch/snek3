@@ -48,7 +48,7 @@ packages, so no `PYTHONPATH` juggling is needed.
 ```bash
 # Train (writes checkpoints/best.pt on each eval improvement)
 python -m azsnek.train --generations 50 --samples 20000 \
-    --depth 3 --filters 64 --blocks 6 --eval-every 5
+    --depth 2 --filters 64 --blocks 6 --eval-every 5
 
 # Serve (filters/blocks must match the checkpoint)
 SNEK_CKPT=checkpoints/best.pt SNEK_FILTERS=64 SNEK_BLOCKS=6 \
