@@ -22,4 +22,6 @@ checkpoints/
 # Editor / OS
 .DS_Store
 .idea/
-.vscode/
+# Track the shared VS Code/Cursor settings (venv interpreter), ignore the rest.
+.vscode/*
+!.vscode/settings.json
