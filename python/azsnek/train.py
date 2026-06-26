@@ -8,7 +8,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import random
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -79,13 +81,14 @@ def main():
     ap.add_argument("--record-games", type=int, default=3, help="replays per opponent per recording")
     ap.add_argument("--record-every", type=int, default=1, help="record replays every N generations")
     ap.add_argument("--keep-games", type=int, default=40, help="keep this many recent game files")
+    ap.add_argument("--resume", action="store_true", help="resume runs/<run-id> from its state.pt")
     args = ap.parse_args()
+
+    if args.resume and not args.run_id:
+        ap.error("--resume requires --run-id (the run directory to continue)")
 
     device = device_auto()
     print(f"device: {device}")
-    cfg = NetConfig(channels=snek.CHANNELS, filters=args.filters, blocks=args.blocks)
-    net = AZNet(cfg).to(device)
-    opt = torch.optim.Adam(net.parameters(), lr=args.lr, weight_decay=1e-4)
 
     sp = SelfPlayConfig(
         count=args.count,
@@ -96,7 +99,6 @@ def main():
     )
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    best_win = -1.0
 
     run = RunWriter(
         args.runs_dir,
@@ -114,10 +116,61 @@ def main():
             "device": str(device),
         },
     )
-    print(f"run dir: {run.dir}", flush=True)
-    run.write_status({"generation": -1, "running": True, "total_generations": args.generations})
 
-    for gen in range(args.generations):
+    # Resume from a previous run's full state, or start fresh.
+    resume = None
+    if args.resume and run.has_state():
+        resume = torch.load(run.state_path, map_location=device, weights_only=False)
+        cfg = NetConfig(**resume["net_cfg"])
+    else:
+        cfg = NetConfig(channels=snek.CHANNELS, filters=args.filters, blocks=args.blocks)
+
+    net = AZNet(cfg).to(device)
+    opt = torch.optim.Adam(net.parameters(), lr=args.lr, weight_decay=1e-4)
+    start_gen, best_win = 0, -1.0
+
+    if resume is not None:
+        net.load_state_dict(resume["net"])
+        opt.load_state_dict(resume["opt"])
+        start_gen = resume["gen"] + 1
+        best_win = resume["best_win"]
+        try:  # best-effort RNG restore
+            torch.set_rng_state(resume["torch_rng"].cpu())
+            if resume.get("cuda_rng") is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all([s.cpu() for s in resume["cuda_rng"]])
+            np.random.set_state(resume["np_rng"])
+            random.setstate(resume["py_rng"])
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: could not fully restore RNG state: {e}")
+        print(f"resumed run {run.run_id} at generation {start_gen}", flush=True)
+    else:
+        if args.resume:
+            print(f"--resume set but no state.pt in {run.dir}; starting fresh", flush=True)
+        print(f"run dir: {run.dir}", flush=True)
+
+    def save_state(gen: int):
+        run.save_state(
+            lambda p: torch.save(
+                {
+                    "gen": gen,
+                    "best_win": best_win,
+                    "net_cfg": asdict(cfg),
+                    "net": net.state_dict(),
+                    "opt": opt.state_dict(),
+                    "torch_rng": torch.get_rng_state(),
+                    "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                    "np_rng": np.random.get_state(),
+                    "py_rng": random.getstate(),
+                },
+                p,
+            )
+        )
+
+    run.write_status(
+        {"generation": start_gen - 1, "running": True, "total_generations": args.generations}
+    )
+
+    for gen in range(start_gen, args.generations):
         t0 = time.time()
         samples = generate(net, device, sp, seed=1000 + gen)
         t_gen = time.time() - t0
@@ -179,6 +232,7 @@ def main():
             run.prune_games(keep=args.keep_games)
 
         run.append_metric(metric)
+        save_state(gen)  # full resumable state, every generation (atomic write)
         run.write_status(
             {
                 "generation": gen,

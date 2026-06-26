@@ -93,6 +93,22 @@ make bench lint fmt clean clean-all
 Typical first run: `make venv && make build && make test`, then
 `make train RUN_ID=myrun` in one terminal and `make dashboard` in another.
 
+### Resuming a run
+
+Each generation, the trainer atomically writes full training state (model +
+optimizer + generation counter + best win-rate + RNG) to `runs/<run-id>/state.pt`.
+To continue a stopped run, pass the same `--run-id` plus `--resume`:
+
+```bash
+make train RUN_ID=myrun RESUME=1 GENERATIONS=100   # picks up where it left off
+# or: python -m azsnek.train --run-id myrun --resume --generations 100
+```
+
+Resume restores the net architecture from the saved state, continues the
+generation numbering, and appends to the same `metrics.jsonl`/`games/`. The
+weights-only `latest.pt`/`best.pt` in `--ckpt-dir` are for serving; `state.pt` is
+the one used for resuming.
+
 ## Engine fidelity notes
 
 The `step` pipeline matches `BattlesnakeOfficial/rules` ordering:

@@ -27,9 +27,21 @@ class RunWriter:
         self.games_dir = self.dir / "games"
         self.games_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_path = self.dir / "metrics.jsonl"
+        self.state_path = self.dir / "state.pt"  # full resumable training state
         self.started = time.time()
         if meta is not None:
             self.write_json("meta.json", {"run_id": self.run_id, **meta})
+
+    def save_state(self, save_fn) -> None:
+        """Atomically persist resumable state. `save_fn(path)` does the write
+        (e.g. ``lambda p: torch.save(obj, p)``); the temp file is renamed into
+        place so a reader/resumer never sees a half-written checkpoint."""
+        tmp = self.state_path.with_suffix(".pt.tmp")
+        save_fn(tmp)
+        tmp.replace(self.state_path)
+
+    def has_state(self) -> bool:
+        return self.state_path.exists()
 
     def write_json(self, name: str, obj) -> None:
         path = self.dir / name
