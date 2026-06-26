@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import time
@@ -24,6 +25,7 @@ from .net import AZNet, NetConfig, autocast as net_autocast, device_auto
 from .recorder import record_games
 from .runlog import RunWriter
 from .selfplay import ReplayBuffer, SelfPlayConfig, generate
+from .autotune import TuneLimits, TuneSettings, tune_next
 
 
 def train_on_samples(
@@ -106,6 +108,14 @@ def main():
     ap.add_argument("--record-games", type=int, default=8, help="replays per opponent per recording")
     ap.add_argument("--record-every", type=int, default=1, help="record replays every N generations")
     ap.add_argument("--keep-games", type=int, default=40, help="keep this many recent game files")
+    ap.add_argument("--adaptive", action="store_true", help="adapt samples/train_steps/eval_games/tau during this run")
+    ap.add_argument("--adaptive-every", type=int, default=4, help="retune every N generations")
+    ap.add_argument("--min-train-steps", type=int, default=64)
+    ap.add_argument("--max-train-steps", type=int, default=512)
+    ap.add_argument("--min-samples", type=int, default=24_000)
+    ap.add_argument("--max-samples", type=int, default=120_000)
+    ap.add_argument("--target-buffer-epochs", type=float, default=1.5)
+    ap.add_argument("--max-new-sample-epochs", type=float, default=12.0)
     ap.add_argument("--fresh", action="store_true", help="ignore saved state and restart this run-id from scratch")
     ap.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)  # deprecated: resume is the default
     args = ap.parse_args()
@@ -150,6 +160,8 @@ def main():
             "train_steps": args.train_steps,
             "batch_size": args.batch_size,
             "buffer_size": args.buffer_size,
+            "adaptive": args.adaptive,
+            "adaptive_every": args.adaptive_every,
             "device": str(device),
         },
     )
@@ -213,6 +225,71 @@ def main():
     )
 
     buffer = ReplayBuffer(args.buffer_size)
+    metrics_history = []
+    if run.metrics_path.exists() and not args.fresh:
+        for line in run.metrics_path.read_text().splitlines():
+            if line.strip():
+                try:
+                    metrics_history.append(json.loads(line))
+                except ValueError:
+                    pass
+
+    tune_limits = TuneLimits(
+        min_samples=args.min_samples,
+        max_samples=args.max_samples,
+        min_train_steps=args.min_train_steps,
+        max_train_steps=args.max_train_steps,
+        target_buffer_epochs=args.target_buffer_epochs,
+        max_new_sample_epochs=args.max_new_sample_epochs,
+    )
+
+    def retune(gen: int):
+        if not args.adaptive or not args.adaptive_every or (gen + 1) % args.adaptive_every != 0:
+            return
+        settings = TuneSettings(
+            samples=args.samples,
+            count=args.count,
+            depth=args.depth,
+            tau=args.tau,
+            iters=args.iters,
+            eval_batch_size=args.eval_batch_size,
+            search_threads=args.search_threads,
+            train_steps=args.train_steps,
+            batch_size=args.batch_size,
+            buffer_size=args.buffer_size,
+            filters=args.filters,
+            blocks=args.blocks,
+            eval_games=args.eval_games,
+            max_turns=args.max_turns,
+            record_games=args.record_games,
+            record_every=args.record_every,
+        )
+        tuned, reasons = tune_next(settings, tune_limits, metrics_history)
+        args.samples = tuned.samples
+        args.train_steps = tuned.train_steps
+        args.eval_games = tuned.eval_games
+        args.tau = tuned.tau
+        sp.samples_per_gen = tuned.samples
+        sp.tau = tuned.tau
+        meta = run.read_json("meta.json")
+        meta.update(
+            {
+                "tau": args.tau,
+                "samples_per_gen": args.samples,
+                "train_steps": args.train_steps,
+                "eval_games": args.eval_games,
+                "adaptive_last_gen": gen,
+                "adaptive_last_reasons": reasons,
+            }
+        )
+        run.write_json("meta.json", meta)
+        print(
+            "adaptive tune | "
+            f"samples {args.samples} train_steps {args.train_steps} "
+            f"eval_games {args.eval_games} tau {args.tau} | "
+            + "; ".join(reasons),
+            flush=True,
+        )
 
     for gen in range(start_gen, args.generations):
         t0 = time.time()
@@ -289,6 +366,7 @@ def main():
             run.prune_games(keep=args.keep_games)
 
         run.append_metric(metric)
+        metrics_history.append(metric)
         save_state(gen)  # full resumable state, every generation (atomic write)
         run.write_status(
             {
@@ -300,6 +378,7 @@ def main():
             }
         )
         print(msg, flush=True)
+        retune(gen)
 
     run.write_status(
         {

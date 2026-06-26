@@ -1,9 +1,8 @@
-"""Adaptive training controller.
+"""Adaptive training helpers and launcher.
 
-Runs ``azsnek.train`` in short resumable chunks, reads the run metrics after
-each chunk, and adjusts high-level knobs for the next chunk. This is an outer
-loop: the trainer remains simple and resumable, while this controller can back
-off over-training or gather more data when a run stalls.
+The tuning rules live here so they can be tested in isolation. The actual
+adaptive run happens inside ``azsnek.train`` so the in-memory replay buffer is
+preserved while samples/train_steps/eval/tau are adjusted.
 """
 
 from __future__ import annotations
@@ -158,13 +157,13 @@ def read_metrics(runs_dir: Path, run_id: str) -> list[dict]:
     return rows
 
 
-def build_train_command(args, settings: TuneSettings, generations: int, fresh: bool) -> list[str]:
+def build_train_command(args, settings: TuneSettings, fresh: bool) -> list[str]:
     cmd = [
         sys.executable,
         "-m",
         "azsnek.train",
         "--generations",
-        str(generations),
+        str(args.total_generations),
         "--samples",
         str(settings.samples),
         "--count",
@@ -199,6 +198,21 @@ def build_train_command(args, settings: TuneSettings, generations: int, fresh: b
         str(settings.record_games),
         "--record-every",
         str(settings.record_every),
+        "--adaptive",
+        "--adaptive-every",
+        str(args.adaptive_every),
+        "--min-train-steps",
+        str(args.min_train_steps),
+        "--max-train-steps",
+        str(args.max_train_steps),
+        "--min-samples",
+        str(args.min_samples),
+        "--max-samples",
+        str(args.max_samples),
+        "--target-buffer-epochs",
+        str(args.target_buffer_epochs),
+        "--max-new-sample-epochs",
+        str(args.max_new_sample_epochs),
         "--runs-dir",
         str(args.runs_dir),
         "--run-id",
@@ -214,7 +228,7 @@ def main() -> None:
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--runs-dir", default="runs")
     ap.add_argument("--total-generations", type=int, default=2500)
-    ap.add_argument("--chunk-generations", type=int, default=4)
+    ap.add_argument("--adaptive-every", type=int, default=4)
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--samples", type=int, default=50_000)
@@ -261,44 +275,24 @@ def main() -> None:
         record_games=args.record_games,
         record_every=args.record_every,
     )
-    limits = TuneLimits(
-        min_samples=args.min_samples,
-        max_samples=args.max_samples,
-        min_train_steps=args.min_train_steps,
-        max_train_steps=args.max_train_steps,
-        target_buffer_epochs=args.target_buffer_epochs,
-        max_new_sample_epochs=args.max_new_sample_epochs,
-    )
 
     print(f"adaptive run: {args.run_id}", flush=True)
-    fresh = args.fresh
-    while True:
-        rows = read_metrics(args.runs_dir, args.run_id)
-        current_gen = int(rows[-1]["gen"]) + 1 if rows else 0
-        if current_gen >= args.total_generations:
-            print(f"done: reached generation {current_gen}", flush=True)
-            return
-
-        settings, reasons = tune_next(settings, limits, rows)
-        next_total = min(args.total_generations, current_gen + args.chunk_generations)
-        print(
-            json.dumps(
-                {
-                    "from_gen": current_gen,
-                    "to_generation": next_total,
-                    "settings": asdict(settings),
-                    "reasons": reasons,
-                },
-                sort_keys=True,
-            ),
-            flush=True,
-        )
-        cmd = build_train_command(args, settings, next_total, fresh=fresh)
-        print("command:", " ".join(cmd), flush=True)
-        if args.dry_run:
-            return
-        subprocess.run(cmd, check=True)
-        fresh = False
+    print(
+        json.dumps(
+            {
+                "adaptive_every": args.adaptive_every,
+                "settings": asdict(settings),
+                "total_generations": args.total_generations,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    cmd = build_train_command(args, settings, fresh=args.fresh)
+    print("command:", " ".join(cmd), flush=True)
+    if args.dry_run:
+        return
+    subprocess.run(cmd, check=True)
 
 
 if __name__ == "__main__":

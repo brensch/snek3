@@ -5,7 +5,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 RUN_ID="${RUN_ID:-adaptive-$(date +%Y%m%d-%H%M%S)}"
 TOTAL_GENERATIONS="${TOTAL_GENERATIONS:-2500}"
-CHUNK_GENERATIONS="${CHUNK_GENERATIONS:-4}"
+ADAPTIVE_EVERY="${ADAPTIVE_EVERY:-${CHUNK_GENERATIONS:-4}}"
 SAMPLES="${SAMPLES:-50000}"
 COUNT="${COUNT:-32}"
 DEPTH="${DEPTH:-2}"
@@ -28,18 +28,12 @@ ARGS="${ARGS:-}"
 
 mkdir -p "$LOG_DIR"
 log="$LOG_DIR/${RUN_ID}.adaptive.log"
-pid_file="$LOG_DIR/${RUN_ID}.adaptive.pid"
-
-if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
-  echo "adaptive run already active: $RUN_ID pid $(cat "$pid_file")"
-  exit 1
-fi
 
 cmd=(
   .venv/bin/python -m azsnek.autotune
   --run-id "$RUN_ID"
   --total-generations "$TOTAL_GENERATIONS"
-  --chunk-generations "$CHUNK_GENERATIONS"
+  --adaptive-every "$ADAPTIVE_EVERY"
   --samples "$SAMPLES"
   --count "$COUNT"
   --depth "$DEPTH"
@@ -71,12 +65,9 @@ fi
 echo "starting adaptive $RUN_ID"
 echo "log: $log"
 echo "dashboard run dir: runs/$RUN_ID"
+echo "press Ctrl-C to stop"
 printf 'command:'
 printf ' %q' "${cmd[@]}"
 printf '\n'
 
-nohup "${cmd[@]}" >"$log" 2>&1 &
-pid="$!"
-echo "$pid" > "$pid_file"
-echo "pid: $pid"
-echo "watch: tail -f $log"
+"${cmd[@]}" 2>&1 | tee -a "$log"
