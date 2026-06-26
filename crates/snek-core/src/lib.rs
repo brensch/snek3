@@ -33,6 +33,7 @@ pub const SNAKE_MAX_HEALTH: i16 = 100;
 pub const SNAKE_START_HEALTH: i16 = 100;
 
 use arrayvec::ArrayVec;
+use rand::Rng;
 
 /// A board coordinate. Stored as signed bytes so a head can transiently step
 /// out of bounds (to -1 or `width`) before the elimination step removes it.
@@ -129,6 +130,10 @@ pub struct Board {
     pub hazards: Vec<Point>,
     /// Damage applied to a snake whose head sits on a hazard (0 disables hazards).
     pub hazard_damage: i16,
+    /// Food the board is topped up to each turn (official default 1).
+    pub min_food: i32,
+    /// Percent chance per turn to spawn one extra food once at/above min (15).
+    pub food_spawn_chance: i32,
 }
 
 impl Board {
@@ -141,6 +146,8 @@ impl Board {
             food: Vec::new(),
             hazards: Vec::new(),
             hazard_damage: 14,
+            min_food: 1,
+            food_spawn_chance: 15,
         }
     }
 
@@ -194,6 +201,70 @@ impl Board {
         self.turn += 1;
     }
 
+    /// Like [`Board::step`] but also spawns food (the official `SpawnFoodStandard`
+    /// behavior). Use this to advance a *real* game; the search uses the plain
+    /// deterministic `step` so its lookahead transitions don't branch on random
+    /// food appearing.
+    pub fn step_and_spawn<R: Rng>(&mut self, moves: &[Move], rng: &mut R) {
+        self.step(moves);
+        self.spawn_food(rng);
+    }
+
+    /// Top up to `min_food`, otherwise spawn one food with `food_spawn_chance`%.
+    fn spawn_food<R: Rng>(&mut self, rng: &mut R) {
+        let cur = self.food.len() as i32;
+        if cur < self.min_food {
+            self.place_food_randomly(self.min_food - cur, rng);
+        } else if self.food_spawn_chance > 0 && rng.gen_range(0..100) < self.food_spawn_chance {
+            self.place_food_randomly(1, rng);
+        }
+    }
+
+    fn place_food_randomly<R: Rng>(&mut self, count: i32, rng: &mut R) {
+        for _ in 0..count {
+            let pts = self.unoccupied_points();
+            if !pts.is_empty() {
+                self.food.push(pts[rng.gen_range(0..pts.len())]);
+            }
+        }
+    }
+
+    /// Cells not occupied by a body, existing food, or adjacent to a live head
+    /// (matches the official `GetUnoccupiedPoints(b, false, false)`).
+    fn unoccupied_points(&self) -> Vec<Point> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let mut occ = vec![false; w * h];
+        let mark = |occ: &mut [bool], x: i8, y: i8| {
+            if x >= 0 && x < self.width && y >= 0 && y < self.height {
+                occ[y as usize * w + x as usize] = true;
+            }
+        };
+        for &f in &self.food {
+            mark(&mut occ, f.x, f.y);
+        }
+        for s in &self.snakes {
+            if !s.alive() {
+                continue;
+            }
+            for p in s.body.iter() {
+                mark(&mut occ, p.x, p.y);
+            }
+            let head = s.head();
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                mark(&mut occ, head.x + dx, head.y + dy);
+            }
+        }
+        let mut pts = Vec::new();
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if !occ[y as usize * w + x as usize] {
+                    pts.push(Point::new(x, y));
+                }
+            }
+        }
+        pts
+    }
+
     fn move_snakes(&mut self, moves: &[Move]) {
         for (i, snake) in self.snakes.iter_mut().enumerate() {
             if snake.eliminated.is_some() {
@@ -203,6 +274,7 @@ impl Board {
             snake.body.advance(new_head);
         }
     }
+
 
     fn reduce_health(&mut self) {
         for snake in self.snakes.iter_mut() {
@@ -327,6 +399,50 @@ impl Board {
 
         for (i, cause) in eliminations {
             self.snakes[i].eliminated = Some(cause);
+        }
+    }
+}
+
+#[cfg(test)]
+mod food_tests {
+    use super::*;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn food_is_replenished_during_play() {
+        let mut b = Board::new(11, 11);
+        b.add_snake(&[Point::new(5, 5), Point::new(5, 4), Point::new(5, 3)]);
+        b.food.clear(); // start with none
+        let mut rng = StdRng::seed_from_u64(1);
+        // min_food default 1, so within a few turns food should appear and persist.
+        let mut seen_food = false;
+        for _ in 0..10 {
+            b.step_and_spawn(&[Move::Up], &mut rng);
+            if !b.food.is_empty() {
+                seen_food = true;
+            }
+        }
+        assert!(seen_food, "food should spawn to maintain the minimum");
+        assert!(b.food.len() >= 1);
+    }
+
+    #[test]
+    fn food_never_spawns_on_a_snake_or_next_to_a_head() {
+        let mut b = Board::new(7, 7);
+        b.add_snake(&[Point::new(3, 3), Point::new(3, 2)]);
+        b.food.clear();
+        b.min_food = 5; // force several placements
+        let mut rng = StdRng::seed_from_u64(7);
+        b.step_and_spawn(&[Move::Up], &mut rng);
+        let head = b.snakes[0].head();
+        for &f in &b.food {
+            assert!(b.in_bounds(f));
+            // not on a body cell
+            assert!(!b.snakes[0].body.iter().any(|p| p == f));
+            // not orthogonally adjacent to the head
+            let adj = (f.x - head.x).abs() + (f.y - head.y).abs() == 1;
+            assert!(!adj, "food spawned adjacent to head");
         }
     }
 }

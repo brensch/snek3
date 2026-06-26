@@ -123,15 +123,19 @@ impl GameBatch {
                 self.num_snakes
             )));
         }
-        let mut moves: Vec<Move> = vec![Move::Up; self.num_snakes];
+        let n = self.num_snakes;
+        let mut moves: Vec<Move> = vec![Move::Up; n];
+        // Advance the real games with food spawning. `rng` and `boards` are
+        // disjoint fields, so we can borrow both at once.
+        let rng = &mut self.rng;
         for (g, board) in self.boards.iter_mut().enumerate() {
             if board.is_terminal() {
                 continue;
             }
-            for s in 0..self.num_snakes {
+            for s in 0..n {
                 moves[s] = move_from_u8(a[[g, s]]);
             }
-            board.step(&moves);
+            board.step_and_spawn(&moves, rng);
         }
         Ok(())
     }
