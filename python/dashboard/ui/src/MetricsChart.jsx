@@ -39,7 +39,7 @@ export default function MetricsChart({ metrics }) {
       ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
       ctx.fillText((1 - i / 4).toFixed(2), 6, yy + 3);
     }
-    const losses = metrics.flatMap((m) => [m.policy_loss, m.value_loss]).filter((v) => v != null);
+    const losses = metrics.flatMap((m) => [m.policy_loss, m.value_loss, m.target_entropy]).filter((v) => v != null);
     const lmax = Math.max(0.001, ...losses);
     const yU = (v) => padT + (H - padT - padB) * (1 - v);
     const yL = (v) => padT + (H - padT - padB) * (1 - v / lmax);
@@ -54,6 +54,7 @@ export default function MetricsChart({ metrics }) {
     };
     line(metrics.filter((m) => m.policy_loss != null).map((m) => [x(m.gen), yL(m.policy_loss)]), "#f59e0b", true);
     line(metrics.filter((m) => m.value_loss != null).map((m) => [x(m.gen), yL(m.value_loss)]), "#60a5fa", true);
+    line(metrics.filter((m) => m.target_entropy != null).map((m) => [x(m.gen), yL(m.target_entropy)]), "#ec4899", false);
     line(metrics.filter((m) => m.win_rate != null).map((m) => [x(m.gen), yU(m.win_rate)]), "#34d399", false);
     ctx.fillStyle = "#8b949e";
     ctx.fillText("gen " + gmin, padL, H - 7);
@@ -67,6 +68,7 @@ export default function MetricsChart({ metrics }) {
         <span><i className="swatch" style={{ background: "#34d399" }} />win-rate vs baseline (0–1)</span>
         <span><i className="swatch" style={{ background: "#f59e0b" }} />policy loss</span>
         <span><i className="swatch" style={{ background: "#60a5fa" }} />value loss</span>
+        <span><i className="swatch" style={{ background: "#ec4899" }} />target entropy</span>
       </div>
     </div>
   );

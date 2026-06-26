@@ -61,6 +61,16 @@ def train_on_samples(
     return {"policy_loss": pl / steps, "value_loss": vl / steps}
 
 
+def policy_target_stats(pol: np.ndarray) -> dict:
+    """Information content of the search policy targets."""
+    p = np.clip(pol, 1e-9, 1.0)
+    entropy = -(pol * np.log(p)).sum(axis=1)
+    return {
+        "target_entropy": float(entropy.mean()),
+        "target_max_prob": float(pol.max(axis=1).mean()),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--generations", type=int, default=50)
@@ -202,6 +212,7 @@ def main():
     for gen in range(start_gen, args.generations):
         t0 = time.time()
         samples = generate(net, device, sp, seed=1000 + gen)
+        target_stats = policy_target_stats(samples.pol)
         buffer.add(samples)
         t_gen = time.time() - t0
 
@@ -218,6 +229,8 @@ def main():
             "buffer": len(buffer),
             "policy_loss": round(losses["policy_loss"], 4),
             "value_loss": round(losses["value_loss"], 4),
+            "target_entropy": round(target_stats["target_entropy"], 4),
+            "target_max_prob": round(target_stats["target_max_prob"], 4),
             "gen_seconds": round(t_gen, 1),
             "train_seconds": round(t_train, 1),
             "turns_per_sec": round(turns_per_sec, 0),
@@ -227,6 +240,7 @@ def main():
         msg = (
             f"gen {gen:3d} | samples {metric['samples']:6d} "
             f"| pol {metric['policy_loss']:.4f} val {metric['value_loss']:.4f} "
+            f"| Hπ {metric['target_entropy']:.4f} maxπ {metric['target_max_prob']:.3f} "
             f"| {turns_per_sec:5.0f} turns/s {games_per_sec:4.1f} games/s "
             f"| gen {t_gen:5.1f}s train {t_train:4.1f}s"
         )

@@ -79,6 +79,8 @@ export default function App() {
             <Stat value={num(m.turns_per_sec)} label="turns / sec" />
             <Stat value={m.games_per_sec != null ? m.games_per_sec.toFixed(1) : "—"} label="games / sec" />
             <Stat value={m.policy_loss != null ? m.policy_loss.toFixed(3) : "—"} label="policy loss" />
+            <Stat value={m.target_entropy != null ? m.target_entropy.toFixed(3) : "—"} label="target entropy" />
+            <Stat value={m.target_max_prob != null ? m.target_max_prob.toFixed(3) : "—"} label="target max prob" />
             <Stat value={m.value_loss != null ? m.value_loss.toFixed(3) : "—"} label="value loss" />
             <Stat value={num(m.samples)} label="samples/gen" />
             <Stat value={num(m.buffer)} label="replay buffer" />
