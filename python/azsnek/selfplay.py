@@ -25,7 +25,7 @@ class SelfPlayConfig:
     num_snakes: int = 2
     count: int = 128  # parallel games
     depth: int = 2
-    tau: float = 6.0
+    tau: float = 30.0
     iters: int = 120
     samples_per_gen: int = 20_000
     max_turns: int = 400  # safety cap per game

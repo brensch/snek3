@@ -86,3 +86,7 @@ class GameBatch:
 def encode_move_request(body: str) -> tuple[np.ndarray, int, np.ndarray]:
     """Parse a `/move` request -> (obs [channels,H,W], me_index, legal_mask [4])."""
     ...
+
+def set_search_threads(threads: int) -> bool:
+    """Configure Rust search/encoding threads; false if already initialized."""
+    ...

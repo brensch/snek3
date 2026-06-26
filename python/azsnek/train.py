@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import time
 from dataclasses import asdict
@@ -66,8 +67,14 @@ def main():
     ap.add_argument("--samples", type=int, default=20_000)
     ap.add_argument("--count", type=int, default=128)
     ap.add_argument("--depth", type=int, default=2)
-    ap.add_argument("--tau", type=float, default=6.0)
+    ap.add_argument("--tau", type=float, default=30.0)
     ap.add_argument("--iters", type=int, default=120)
+    ap.add_argument(
+        "--search-threads",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="Rayon threads for Rust search/encoding (default: all visible CPUs; 0 leaves Rayon default)",
+    )
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--train-steps", type=int, default=256, help="SGD steps per generation")
     ap.add_argument("--buffer-size", type=int, default=150_000, help="replay buffer capacity (samples)")
@@ -85,8 +92,17 @@ def main():
     ap.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)  # deprecated: resume is the default
     args = ap.parse_args()
 
+    if args.search_threads:
+        os.environ["RAYON_NUM_THREADS"] = str(args.search_threads)
+        search_threads_configured = snek.set_search_threads(args.search_threads)
+    else:
+        search_threads_configured = False
+
     device = device_auto()
     print(f"device: {device}")
+    if args.search_threads:
+        status = "configured" if search_threads_configured else "already initialized"
+        print(f"search threads: {args.search_threads} ({status})", flush=True)
 
     sp = SelfPlayConfig(
         count=args.count,
@@ -109,6 +125,7 @@ def main():
             "depth": args.depth,
             "tau": args.tau,
             "iters": args.iters,
+            "search_threads": args.search_threads,
             "generations": args.generations,
             "samples_per_gen": args.samples,
             "device": str(device),

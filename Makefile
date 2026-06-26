@@ -25,6 +25,7 @@ COUNT       ?= 128
 DEPTH       ?= 2
 TAU         ?= 30
 ITERS       ?= 120
+SEARCH_THREADS ?= $(shell nproc 2>/dev/null || python3 -c 'import os; print(os.cpu_count() or 1)')
 FILTERS     ?= 64
 BLOCKS      ?= 6
 EVAL_EVERY  ?= 5
@@ -43,7 +44,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: GENERATIONS SAMPLES COUNT DEPTH TAU ITERS FILTERS BLOCKS EVAL_EVERY EVAL_GAMES RECORD_GAMES RECORD_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
+	@echo "Vars: GENERATIONS SAMPLES COUNT DEPTH TAU ITERS SEARCH_THREADS FILTERS BLOCKS EVAL_EVERY EVAL_GAMES RECORD_GAMES RECORD_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
@@ -77,6 +78,7 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 	$(PY) -m azsnek.train \
 		--generations $(GENERATIONS) --samples $(SAMPLES) --count $(COUNT) \
 		--depth $(DEPTH) --tau $(TAU) --iters $(ITERS) \
+		--search-threads $(SEARCH_THREADS) \
 		--filters $(FILTERS) --blocks $(BLOCKS) \
 		--eval-every $(EVAL_EVERY) --eval-games $(EVAL_GAMES) \
 		--record-games $(RECORD_GAMES) --record-every $(RECORD_EVERY) \
@@ -84,7 +86,8 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 
 overnight: build ## Start a background overnight training run. Override TAU, GENERATIONS, SAMPLES, RUN_ID...
 	TAU=$(TAU) GENERATIONS=$(GENERATIONS) SAMPLES=$(SAMPLES) COUNT=$(COUNT) \
-	DEPTH=$(DEPTH) ITERS=$(ITERS) FILTERS=$(FILTERS) BLOCKS=$(BLOCKS) \
+	DEPTH=$(DEPTH) ITERS=$(ITERS) SEARCH_THREADS=$(SEARCH_THREADS) \
+	FILTERS=$(FILTERS) BLOCKS=$(BLOCKS) \
 	EVAL_EVERY=$(EVAL_EVERY) EVAL_GAMES=$(EVAL_GAMES) \
 	RECORD_GAMES=$(RECORD_GAMES) RECORD_EVERY=$(RECORD_EVERY) \
 	RUN_ID="$(RUN_ID)" FRESH="$(FRESH)" bash scripts/overnight_train.sh
