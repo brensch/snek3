@@ -75,6 +75,10 @@ class GameBatch:
         """Search phase 2: root equilibrium policies float32 [count, num_snakes, 4]."""
         ...
 
+    def snapshot(self, i: int) -> str:
+        """JSON board state of game `i` for replay recording."""
+        ...
+
     def reset_done(self) -> int:
         """Reset finished games to a fresh start; returns how many were reset."""
         ...

@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>snek3 · training dashboard</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --muted:#8b949e; --accent:#3b82f6; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial; }
+  header { display:flex; align-items:center; gap:16px; padding:12px 18px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:2; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:650; letter-spacing:.3px; }
+  header h1 .dot { color:var(--accent); }
+  .grow { flex:1; }
+  select, button { background:#0d1117; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 9px; font-size:13px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .pill { padding:3px 9px; border-radius:999px; border:1px solid var(--line); font-size:12px; color:var(--muted); }
+  .pill.live { color:#34d399; border-color:#10532f; }
+  .pill.done { color:var(--muted); }
+  main { display:grid; grid-template-columns: 1fr 460px; gap:16px; padding:16px; align-items:start; }
+  @media (max-width: 980px){ main{ grid-template-columns:1fr; } }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .card h2 { margin:0 0 10px; font-size:13px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.6px; }
+  .stats { display:flex; gap:18px; flex-wrap:wrap; margin-bottom:10px; }
+  .stat b { display:block; font-size:20px; }
+  .stat span { color:var(--muted); font-size:12px; }
+  canvas { display:block; background:#0b0e13; border-radius:8px; }
+  .controls { display:flex; align-items:center; gap:10px; margin-top:10px; flex-wrap:wrap; }
+  .controls input[type=range]{ flex:1; min-width:160px; accent-color:var(--accent); }
+  .legend { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--muted); }
+  .swatch { display:inline-block; width:10px; height:10px; border-radius:3px; vertical-align:middle; margin-right:5px; }
+  .muted { color:var(--muted); }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  label.chk { color:var(--muted); font-size:12px; display:flex; align-items:center; gap:5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>snek3<span class="dot">·</span>training</h1>
+  <select id="runSel" title="run"></select>
+  <span id="statusPill" class="pill">—</span>
+  <div class="grow"></div>
+  <span id="metaPill" class="pill">—</span>
+</header>
+
+<main>
+  <section class="card" id="metricsCard">
+    <h2>Training metrics</h2>
+    <div class="stats" id="statsRow"></div>
+    <canvas id="chart" width="900" height="320"></canvas>
+    <div class="legend">
+      <span><i class="swatch" style="background:#34d399"></i>win-rate vs baseline (0–1)</span>
+      <span><i class="swatch" style="background:#f59e0b"></i>policy loss</span>
+      <span><i class="swatch" style="background:#60a5fa"></i>value loss</span>
+    </div>
+  </section>
+
+  <section class="card" id="gameCard">
+    <h2>Game viewer</h2>
+    <div class="row">
+      <select id="genSel" title="generation"></select>
+      <select id="gameSel" title="game"></select>
+      <label class="chk"><input type="checkbox" id="followLatest" checked> follow latest</label>
+    </div>
+    <canvas id="board" width="432" height="432"></canvas>
+    <div class="controls">
+      <button id="playBtn">▶ Play</button>
+      <button id="stepBack">⟨</button>
+      <button id="stepFwd">⟩</button>
+      <input type="range" id="scrub" min="0" max="0" value="0" />
+      <span id="frameLbl" class="muted">—</span>
+    </div>
+    <div id="gameInfo" class="muted" style="margin-top:8px"></div>
+  </section>
+</main>
+
+<script>
+const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ec4899','#a78bfa','#f87171','#2dd4bf','#facc15'];
+const state = { run:null, runs:[], metrics:[], gamesIndex:[], gameFile:null, gameData:null, gameIdx:0, frame:0, playing:false, timer:null };
+
+async function getJSON(url){ const r = await fetch(url); if(!r.ok) throw new Error(url+' '+r.status); return r.json(); }
+
+// ---------- runs / status / metrics ----------
+async function loadRuns(){
+  const { runs } = await getJSON('/api/runs');
+  state.runs = runs;
+  const sel = document.getElementById('runSel');
+  sel.innerHTML = runs.map(r=>`<option>${r}</option>`).join('') || '<option>(no runs)</option>';
+  if(!state.run || !runs.includes(state.run)) state.run = runs[0] || null;
+  sel.value = state.run || '';
+}
+
+async function refresh(){
+  await loadRuns();
+  if(!state.run) return;
+  const [status, metrics, meta] = await Promise.all([
+    getJSON(`/api/runs/${state.run}/status`).catch(()=>({})),
+    getJSON(`/api/runs/${state.run}/metrics`).catch(()=>({metrics:[]})),
+    getJSON(`/api/runs/${state.run}/meta`).catch(()=>({})),
+  ]);
+  state.metrics = metrics.metrics || [];
+  renderStatus(status, meta);
+  renderStats(status);
+  drawChart();
+  await loadGamesIndex();
+}
+
+function renderStatus(status, meta){
+  const pill = document.getElementById('statusPill');
+  const running = status.running;
+  const gen = status.generation, total = status.total_generations;
+  pill.className = 'pill ' + (running ? 'live' : 'done');
+  pill.textContent = (gen==null) ? 'no data'
+    : `${running ? '● live' : '■ done'} · gen ${gen+1}/${total ?? '?'}`;
+  const mp = document.getElementById('metaPill');
+  mp.textContent = meta.board ? `${meta.board}×${meta.board} · ${meta.filters}f/${meta.blocks}b · depth ${meta.depth} · ${meta.device||''}` : '—';
+}
+
+function renderStats(status){
+  const m = (status && status.last) || {};
+  const best = status && status.best_win_rate;
+  const stat = (b,s)=>`<div class="stat"><b>${b}</b><span>${s}</span></div>`;
+  document.getElementById('statsRow').innerHTML =
+    stat(m.gen!=null?m.gen:'—','generation') +
+    stat(m.win_rate!=null?m.win_rate.toFixed(3):'—','win-rate') +
+    stat(best!=null?best.toFixed(3):'—','best win-rate') +
+    stat(m.policy_loss!=null?m.policy_loss.toFixed(3):'—','policy loss') +
+    stat(m.value_loss!=null?m.value_loss.toFixed(3):'—','value loss');
+}
+
+// ---------- metrics chart ----------
+function drawChart(){
+  const c = document.getElementById('chart'), ctx = c.getContext('2d');
+  const W=c.width, H=c.height, padL=42, padR=12, padT=14, padB=26;
+  ctx.clearRect(0,0,W,H);
+  const M = state.metrics;
+  if(!M.length){ ctx.fillStyle='#8b949e'; ctx.fillText('no metrics yet', padL, H/2); return; }
+  const gens = M.map(m=>m.gen);
+  const gmin = Math.min(...gens), gmax = Math.max(...gens, gmin+1);
+  const x = g => padL + (W-padL-padR) * (g-gmin)/((gmax-gmin)||1);
+  // grid + axes
+  ctx.strokeStyle='#21262d'; ctx.fillStyle='#8b949e'; ctx.lineWidth=1; ctx.font='11px ui-sans-serif';
+  for(let i=0;i<=4;i++){ const yy=padT+(H-padT-padB)*i/4; ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
+    ctx.fillText((1-i/4).toFixed(2), 6, yy+3); }
+  // loss scale (normalize by max loss)
+  const losses = M.flatMap(m=>[m.policy_loss, m.value_loss]).filter(v=>v!=null);
+  const lmax = Math.max(0.001, ...losses);
+  const yUnit = v => padT + (H-padT-padB) * (1 - v);            // for 0..1 values
+  const yLoss = v => padT + (H-padT-padB) * (1 - v/lmax);       // normalized losses
+  const line = (pts, color, dashed) => {
+    if(pts.length<1) return; ctx.strokeStyle=color; ctx.lineWidth=2; ctx.setLineDash(dashed?[4,4]:[]);
+    ctx.beginPath(); pts.forEach((p,i)=> i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1])); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle=color;
+    pts.forEach(p=>{ ctx.beginPath(); ctx.arc(p[0],p[1],2.5,0,7); ctx.fill(); });
+  };
+  line(M.filter(m=>m.policy_loss!=null).map(m=>[x(m.gen), yLoss(m.policy_loss)]), '#f59e0b', true);
+  line(M.filter(m=>m.value_loss!=null).map(m=>[x(m.gen), yLoss(m.value_loss)]), '#60a5fa', true);
+  line(M.filter(m=>m.win_rate!=null).map(m=>[x(m.gen), yUnit(m.win_rate)]), '#34d399', false);
+  ctx.fillStyle='#8b949e'; ctx.fillText('gen '+gmin, padL, H-8); ctx.fillText('gen '+gmax, W-padR-44, H-8);
+}
+
+// ---------- games ----------
+async function loadGamesIndex(){
+  const { files } = await getJSON(`/api/runs/${state.run}/games`).catch(()=>({files:[]}));
+  state.gamesIndex = files;
+  const genSel = document.getElementById('genSel');
+  const prev = genSel.value;
+  genSel.innerHTML = files.map(f=>`<option value="${f.file}">gen ${f.gen}</option>`).join('') || '<option>(no games yet)</option>';
+  const follow = document.getElementById('followLatest').checked;
+  if(files.length){
+    if(follow && !state.playing) genSel.value = files[0].file;
+    else if(files.some(f=>f.file===prev)) genSel.value = prev;
+    if(genSel.value !== state.gameFile) await loadGenFile(genSel.value);
+  }
+}
+
+async function loadGenFile(fileName){
+  if(!fileName) return;
+  state.gameFile = fileName;
+  const data = await getJSON(`/api/runs/${state.run}/games/${fileName}`);
+  state.gameData = data;
+  const gameSel = document.getElementById('gameSel');
+  gameSel.innerHTML = data.games.map((g,i)=>{
+    const res = g.winner===0?'WIN':(g.winner===1?'loss':(g.winner===-1?'draw':'?'));
+    return `<option value="${i}">${g.opponent} · ${res} · ${g.num_turns}t</option>`;
+  }).join('');
+  state.gameIdx = 0; gameSel.value = '0';
+  selectGame(0);
+}
+
+function selectGame(idx){
+  state.gameIdx = idx; state.frame = 0;
+  const g = state.gameData.games[idx];
+  document.getElementById('scrub').max = Math.max(0, g.frames.length-1);
+  document.getElementById('scrub').value = 0;
+  const res = g.winner===0?'snake 0 (net) wins':(g.winner===1?'snake 1 ('+g.opponent+') wins':(g.winner===-1?'draw':'unfinished'));
+  document.getElementById('gameInfo').textContent = `opponent: ${g.opponent} · ${g.frames.length} turns · result: ${res}`;
+  drawBoard();
+}
+
+function curFrame(){ const g = state.gameData?.games?.[state.gameIdx]; return g ? g.frames[state.frame] : null; }
+
+function drawBoard(){
+  const c = document.getElementById('board'), ctx = c.getContext('2d');
+  const fr = curFrame();
+  ctx.clearRect(0,0,c.width,c.height);
+  if(!fr){ ctx.fillStyle='#8b949e'; ctx.fillText('no game loaded', 20, 30); return; }
+  const W=fr.width, H=fr.height, cell=Math.floor(Math.min(c.width, c.height)/Math.max(W,H));
+  const px = x => x*cell, py = y => (H-1-y)*cell;   // flip y: (0,0) bottom-left
+  // grid
+  ctx.fillStyle='#0b0e13'; ctx.fillRect(0,0,W*cell,H*cell);
+  ctx.strokeStyle='#161b22'; ctx.lineWidth=1;
+  for(let i=0;i<=W;i++){ ctx.beginPath(); ctx.moveTo(i*cell,0); ctx.lineTo(i*cell,H*cell); ctx.stroke(); }
+  for(let j=0;j<=H;j++){ ctx.beginPath(); ctx.moveTo(0,j*cell); ctx.lineTo(W*cell,j*cell); ctx.stroke(); }
+  // food
+  (fr.food||[]).forEach(([x,y])=>{ ctx.fillStyle='#ef4444'; ctx.beginPath(); ctx.arc(px(x)+cell/2, py(y)+cell/2, cell*0.22, 0, 7); ctx.fill(); });
+  // hazards
+  (fr.hazards||[]).forEach(([x,y])=>{ ctx.fillStyle='rgba(234,179,8,0.12)'; ctx.fillRect(px(x),py(y),cell,cell); });
+  // snakes
+  fr.snakes.forEach((s,si)=>{
+    const col = COLORS[si % COLORS.length];
+    ctx.globalAlpha = s.alive ? 1 : 0.22;
+    s.body.forEach(([x,y],bi)=>{
+      ctx.fillStyle = col;
+      const pad = cell*0.12;
+      roundRect(ctx, px(x)+pad, py(y)+pad, cell-2*pad, cell-2*pad, cell*0.2); ctx.fill();
+      if(bi===0){ // head marker
+        ctx.fillStyle='rgba(255,255,255,0.85)';
+        ctx.beginPath(); ctx.arc(px(x)+cell/2, py(y)+cell/2, cell*0.13, 0, 7); ctx.fill();
+      }
+    });
+    ctx.globalAlpha = 1;
+  });
+  // HUD
+  document.getElementById('frameLbl').textContent =
+    `turn ${fr.turn} · frame ${state.frame+1}/${(state.gameData.games[state.gameIdx].frames.length)}` +
+    '  ' + fr.snakes.map((s,i)=>`S${i}:${s.alive?('hp'+s.health):'✕'}`).join('  ');
+}
+
+function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+function setFrame(i){
+  const g = state.gameData?.games?.[state.gameIdx]; if(!g) return;
+  state.frame = Math.max(0, Math.min(g.frames.length-1, i));
+  document.getElementById('scrub').value = state.frame;
+  drawBoard();
+}
+
+function togglePlay(){
+  state.playing = !state.playing;
+  document.getElementById('playBtn').textContent = state.playing ? '⏸ Pause' : '▶ Play';
+  if(state.playing){
+    state.timer = setInterval(()=>{
+      const g = state.gameData?.games?.[state.gameIdx]; if(!g){ return; }
+      if(state.frame >= g.frames.length-1){ setFrame(0); }
+      else setFrame(state.frame+1);
+    }, 180);
+  } else { clearInterval(state.timer); }
+}
+
+// ---------- wiring ----------
+document.getElementById('runSel').addEventListener('change', e=>{ state.run=e.target.value; state.gameFile=null; refresh(); });
+document.getElementById('genSel').addEventListener('change', e=>loadGenFile(e.target.value));
+document.getElementById('gameSel').addEventListener('change', e=>selectGame(+e.target.value));
+document.getElementById('scrub').addEventListener('input', e=>setFrame(+e.target.value));
+document.getElementById('playBtn').addEventListener('click', togglePlay);
+document.getElementById('stepFwd').addEventListener('click', ()=>setFrame(state.frame+1));
+document.getElementById('stepBack').addEventListener('click', ()=>setFrame(state.frame-1));
+
+refresh();
+setInterval(()=>{ refresh().catch(()=>{}); }, 2500);   // live polling
+</script>
+</body>
+</html>

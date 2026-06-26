@@ -277,6 +277,35 @@ impl GameBatch {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// JSON snapshot of game `i`'s board state, for recording replays:
+    /// `{turn, width, height, food: [[x,y]], hazards: [[x,y]],
+    ///   snakes: [{alive, health, body: [[x,y]]}]}` (body is head-first).
+    fn snapshot(&self, i: usize) -> PyResult<String> {
+        let board = self
+            .boards
+            .get(i)
+            .ok_or_else(|| PyValueError::new_err("game index out of range"))?;
+        let food: Vec<[i8; 2]> = board.food.iter().map(|p| [p.x, p.y]).collect();
+        let hazards: Vec<[i8; 2]> = board.hazards.iter().map(|p| [p.x, p.y]).collect();
+        let snakes: Vec<serde_json::Value> = board
+            .snakes
+            .iter()
+            .map(|s| {
+                let body: Vec<[i8; 2]> = s.body.iter().map(|p| [p.x, p.y]).collect();
+                serde_json::json!({"alive": s.alive(), "health": s.health, "body": body})
+            })
+            .collect();
+        let v = serde_json::json!({
+            "turn": board.turn,
+            "width": board.width,
+            "height": board.height,
+            "food": food,
+            "hazards": hazards,
+            "snakes": snakes,
+        });
+        Ok(v.to_string())
+    }
+
     /// Reset every finished game to a fresh standard start. Returns how many
     /// games were reset.
     fn reset_done(&mut self) -> usize {

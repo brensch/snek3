@@ -55,6 +55,26 @@ SNEK_CKPT=checkpoints/best.pt SNEK_FILTERS=64 SNEK_BLOCKS=6 \
     uvicorn server.main:app --host 0.0.0.0 --port 8000
 ```
 
+## Live dashboard
+
+Training streams progress to `runs/<run_id>/` as it goes: `metrics.jsonl` (per
+generation), `status.json` (latest), and `games/gen_XXXX.json` (recorded replays
+— self-play *and* vs-baseline). The dashboard reads those files; nothing is
+precomputed.
+
+```bash
+# In one terminal: train (add --run-id to name the run)
+python -m azsnek.train --generations 50 --samples 20000 --eval-every 5 --run-id myrun
+
+# In another: the dashboard, then open http://127.0.0.1:8050
+SNEK_RUNS_DIR=runs uvicorn dashboard.app:app --port 8050
+```
+
+It shows the win-rate / loss curves updating live and a game viewer where you can
+pick a generation + game and scrub/play through the recorded board states (snake
+bodies, heads, food, health, who won). "Follow latest" auto-jumps to the newest
+replays as training advances.
+
 ## Build & test
 
 ```bash

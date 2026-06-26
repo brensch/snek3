@@ -18,6 +18,8 @@ import torch.nn.functional as F
 
 from .evaluate import evaluate
 from .net import AZNet, NetConfig, device_auto
+from .recorder import record_games
+from .runlog import RunWriter
 from .selfplay import SelfPlayConfig, generate
 
 
@@ -72,6 +74,9 @@ def main():
     ap.add_argument("--filters", type=int, default=64)
     ap.add_argument("--blocks", type=int, default=6)
     ap.add_argument("--ckpt-dir", type=str, default="checkpoints")
+    ap.add_argument("--runs-dir", type=str, default="runs", help="dashboard run root")
+    ap.add_argument("--run-id", type=str, default=None, help="run dir name (default: timestamp)")
+    ap.add_argument("--record-games", type=int, default=2, help="replays per opponent per eval")
     args = ap.parse_args()
 
     device = device_auto()
@@ -91,6 +96,25 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_win = -1.0
 
+    run = RunWriter(
+        args.runs_dir,
+        run_id=args.run_id,
+        meta={
+            "board": sp.board,
+            "num_snakes": sp.num_snakes,
+            "filters": args.filters,
+            "blocks": args.blocks,
+            "depth": args.depth,
+            "tau": args.tau,
+            "iters": args.iters,
+            "generations": args.generations,
+            "samples_per_gen": args.samples,
+            "device": str(device),
+        },
+    )
+    print(f"run dir: {run.dir}", flush=True)
+    run.write_status({"generation": -1, "running": True, "total_generations": args.generations})
+
     for gen in range(args.generations):
         t0 = time.time()
         samples = generate(net, device, sp, seed=1000 + gen)
@@ -100,15 +124,30 @@ def main():
         losses = train_on_samples(net, opt, samples, device, epochs=args.epochs)
         t_train = time.time() - t1
 
+        metric = {
+            "gen": gen,
+            "samples": int(samples.obs.shape[0]),
+            "policy_loss": round(losses["policy_loss"], 4),
+            "value_loss": round(losses["value_loss"], 4),
+            "gen_seconds": round(t_gen, 1),
+            "train_seconds": round(t_train, 1),
+            "win_rate": None,
+        }
         msg = (
-            f"gen {gen:3d} | samples {samples.obs.shape[0]:6d} "
-            f"| pol {losses['policy_loss']:.4f} val {losses['value_loss']:.4f} "
+            f"gen {gen:3d} | samples {metric['samples']:6d} "
+            f"| pol {metric['policy_loss']:.4f} val {metric['value_loss']:.4f} "
             f"| gen {t_gen:5.1f}s train {t_train:4.1f}s"
         )
 
         if args.eval_every and (gen + 1) % args.eval_every == 0:
             res = evaluate(
                 net, device, games=args.eval_games, depth=args.depth, tau=args.tau, iters=args.iters
+            )
+            metric.update(
+                win_rate=round(res["win_rate"], 3),
+                wins=res["wins"],
+                losses_count=res["losses"],
+                draws=res["draws"],
             )
             msg += f" | vs baseline win_rate {res['win_rate']:.3f} ({res['wins']}/{res['losses']}/{res['draws']})"
             torch.save(net.state_dict(), ckpt_dir / "latest.pt")
@@ -117,7 +156,40 @@ def main():
                 torch.save(net.state_dict(), ckpt_dir / "best.pt")
                 msg += " *best*"
 
+            # Record replays to watch in the dashboard.
+            if args.record_games > 0:
+                games = record_games(
+                    net, device, board=sp.board, n_games=args.record_games,
+                    depth=args.depth, tau=args.tau, iters=args.iters,
+                    opponent="baseline", seed=7000 + gen,
+                )
+                games += record_games(
+                    net, device, board=sp.board, n_games=args.record_games,
+                    depth=args.depth, tau=args.tau, iters=args.iters,
+                    opponent="net", seed=9000 + gen,
+                )
+                run.save_games(gen, games)
+
+        run.append_metric(metric)
+        run.write_status(
+            {
+                "generation": gen,
+                "running": gen < args.generations - 1,
+                "total_generations": args.generations,
+                "best_win_rate": None if best_win < 0 else round(best_win, 3),
+                "last": metric,
+            }
+        )
         print(msg, flush=True)
+
+    run.write_status(
+        {
+            "generation": args.generations - 1,
+            "running": False,
+            "total_generations": args.generations,
+            "best_win_rate": None if best_win < 0 else round(best_win, 3),
+        }
+    )
 
 
 if __name__ == "__main__":
