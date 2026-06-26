@@ -57,6 +57,22 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
 .board-grid { flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
 .board-cell { background: #0d1117; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
 .board-cell canvas { width: 100%; height: auto; }
+.replay-controls { display: grid; grid-template-columns: 28px 1fr; align-items: center; gap: 8px; margin-top: 8px; }
+.replay-play {
+  width: 28px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+}
+.replay-scrub {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--accent);
+}
 .board-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; flex-wrap: nowrap; white-space: nowrap; }
 .board-meta .type { color: var(--fg); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .board-meta .badge { flex-shrink: 0; }
