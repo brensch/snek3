@@ -95,11 +95,11 @@ def main():
     ap.add_argument("--train-steps", type=int, default=256, help="SGD steps per generation")
     ap.add_argument("--buffer-size", type=int, default=150_000, help="replay buffer capacity (samples)")
     ap.add_argument("--max-turns", type=int, default=0, help="0 plays until terminal; positive values cap games as draws")
-    ap.add_argument("--eval-every", type=int, default=5)
+    ap.add_argument("--eval-every", type=int, default=1)
     ap.add_argument("--eval-games", type=int, default=32)
     ap.add_argument("--filters", type=int, default=64)
     ap.add_argument("--blocks", type=int, default=6)
-    ap.add_argument("--ckpt-dir", type=str, default="checkpoints")
+    ap.add_argument("--ckpt-dir", type=str, default=None, help="serving weights dir (default: runs/<run-id>/ckpt)")
     ap.add_argument("--runs-dir", type=str, default="runs", help="dashboard run root")
     ap.add_argument("--run-id", type=str, default=None, help="run dir name (default: timestamp)")
     ap.add_argument("--record-games", type=int, default=8, help="replays per opponent per recording")
@@ -130,9 +130,6 @@ def main():
         samples_per_gen=args.samples,
         max_turns=args.max_turns,
     )
-    ckpt_dir = Path(args.ckpt_dir)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-
     run = RunWriter(
         args.runs_dir,
         run_id=args.run_id,
@@ -152,6 +149,10 @@ def main():
             "device": str(device),
         },
     )
+    ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else run.dir / "ckpt"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    print(f"serving checkpoints: {ckpt_dir}", flush=True)
+    run.write_json("meta.json", {**run.read_json("meta.json"), "ckpt_dir": str(ckpt_dir)})
 
     # Resume automatically when this run-id has saved state, unless --fresh.
     resume = None
