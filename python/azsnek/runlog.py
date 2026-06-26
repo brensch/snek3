@@ -50,3 +50,12 @@ class RunWriter:
 
     def save_games(self, gen: int, games: list[dict]) -> None:
         self.write_json(f"games/gen_{gen:04d}.json", {"gen": gen, "games": games})
+
+    def prune_games(self, keep: int) -> None:
+        """Keep only the `keep` most recent game files to bound disk usage."""
+        files = sorted(self.games_dir.glob("gen_*.json"))
+        for f in files[: max(0, len(files) - keep)]:
+            try:
+                f.unlink()
+            except OSError:
+                pass

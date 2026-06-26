@@ -35,6 +35,8 @@ class Samples:
     obs: np.ndarray  # [K, C, H, W] float32
     pol: np.ndarray  # [K, 4] float32
     z: np.ndarray  # [K] float32
+    turns: int = 0  # total board-turns stepped (for throughput)
+    games: int = 0  # total games finished
 
 
 @dataclass
@@ -66,11 +68,14 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
     out_pol: list[np.ndarray] = []
     out_z: list[np.ndarray] = []
     collected = 0
+    turns_total = 0
+    games_total = 0
 
     while collected < cfg.samples_per_gen:
         policy = run_search(batch, net, device, cfg.depth, cfg.tau, cfg.iters)
         obs = batch.encode()  # [count, N, C, H, W]
         alive = batch.alive()  # [count, N]
+        turns_total += int(np.sum(batch.done() == 0))  # games still live this step
         for g in range(cfg.count):
             slots[g].obs.append(obs[g])
             slots[g].pol.append(policy[g])
@@ -97,6 +102,7 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
                 out_z.append(z[live])
                 collected += int(live.sum())
             slots[g] = _Slot()
+            games_total += 1
 
         batch.reset_done()
 
@@ -104,4 +110,6 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
         obs=np.concatenate(out_obs, axis=0),
         pol=np.concatenate(out_pol, axis=0),
         z=np.concatenate(out_z, axis=0),
+        turns=turns_total,
+        games=games_total,
     )

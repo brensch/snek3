@@ -76,7 +76,9 @@ def main():
     ap.add_argument("--ckpt-dir", type=str, default="checkpoints")
     ap.add_argument("--runs-dir", type=str, default="runs", help="dashboard run root")
     ap.add_argument("--run-id", type=str, default=None, help="run dir name (default: timestamp)")
-    ap.add_argument("--record-games", type=int, default=2, help="replays per opponent per eval")
+    ap.add_argument("--record-games", type=int, default=3, help="replays per opponent per recording")
+    ap.add_argument("--record-every", type=int, default=1, help="record replays every N generations")
+    ap.add_argument("--keep-games", type=int, default=40, help="keep this many recent game files")
     args = ap.parse_args()
 
     device = device_auto()
@@ -124,6 +126,8 @@ def main():
         losses = train_on_samples(net, opt, samples, device, epochs=args.epochs)
         t_train = time.time() - t1
 
+        turns_per_sec = samples.turns / max(t_gen, 1e-9)
+        games_per_sec = samples.games / max(t_gen, 1e-9)
         metric = {
             "gen": gen,
             "samples": int(samples.obs.shape[0]),
@@ -131,11 +135,14 @@ def main():
             "value_loss": round(losses["value_loss"], 4),
             "gen_seconds": round(t_gen, 1),
             "train_seconds": round(t_train, 1),
+            "turns_per_sec": round(turns_per_sec, 0),
+            "games_per_sec": round(games_per_sec, 2),
             "win_rate": None,
         }
         msg = (
             f"gen {gen:3d} | samples {metric['samples']:6d} "
             f"| pol {metric['policy_loss']:.4f} val {metric['value_loss']:.4f} "
+            f"| {turns_per_sec:5.0f} turns/s {games_per_sec:4.1f} games/s "
             f"| gen {t_gen:5.1f}s train {t_train:4.1f}s"
         )
 
@@ -149,26 +156,27 @@ def main():
                 losses_count=res["losses"],
                 draws=res["draws"],
             )
-            msg += f" | vs baseline win_rate {res['win_rate']:.3f} ({res['wins']}/{res['losses']}/{res['draws']})"
+            msg += f" | win_rate {res['win_rate']:.3f} ({res['wins']}/{res['losses']}/{res['draws']})"
             torch.save(net.state_dict(), ckpt_dir / "latest.pt")
             if res["win_rate"] > best_win:
                 best_win = res["win_rate"]
                 torch.save(net.state_dict(), ckpt_dir / "best.pt")
                 msg += " *best*"
 
-            # Record replays to watch in the dashboard.
-            if args.record_games > 0:
-                games = record_games(
-                    net, device, board=sp.board, n_games=args.record_games,
-                    depth=args.depth, tau=args.tau, iters=args.iters,
-                    opponent="baseline", seed=7000 + gen,
-                )
-                games += record_games(
-                    net, device, board=sp.board, n_games=args.record_games,
-                    depth=args.depth, tau=args.tau, iters=args.iters,
-                    opponent="net", seed=9000 + gen,
-                )
-                run.save_games(gen, games)
+        # Record replays for the dashboard's live game stream (every gen by default).
+        if args.record_games > 0 and args.record_every and (gen % args.record_every == 0):
+            games = record_games(
+                net, device, board=sp.board, n_games=args.record_games,
+                depth=args.depth, tau=args.tau, iters=args.iters,
+                opponent="baseline", seed=7000 + gen,
+            )
+            games += record_games(
+                net, device, board=sp.board, n_games=args.record_games,
+                depth=args.depth, tau=args.tau, iters=args.iters,
+                opponent="net", seed=9000 + gen,
+            )
+            run.save_games(gen, games)
+            run.prune_games(keep=args.keep_games)
 
         run.append_metric(metric)
         run.write_status(
