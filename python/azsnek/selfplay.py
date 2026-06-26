@@ -23,12 +23,13 @@ from .search import run_search, sample_actions
 class SelfPlayConfig:
     board: int = 11
     num_snakes: int = 2
-    count: int = 128  # parallel games
+    count: int = 32  # parallel games
     depth: int = 3
     tau: float = 30.0
     iters: int = 120
+    eval_batch_size: int = 8192
     samples_per_gen: int = 20_000
-    max_turns: int = 400  # safety cap per game
+    max_turns: int = 0  # 0 = play until terminal; positive values cap games as draws
     dirichlet_frac: float = 0.25  # root exploration noise mix (0 disables)
     dirichlet_alpha: float = 0.3
 
@@ -122,7 +123,7 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
     games_total = 0
 
     while collected < cfg.samples_per_gen:
-        policy = run_search(batch, net, device, cfg.depth, cfg.tau, cfg.iters)
+        policy = run_search(batch, net, device, cfg.depth, cfg.tau, cfg.iters, cfg.eval_batch_size)
         obs = batch.encode()  # [count, N, C, H, W]
         alive = batch.alive()  # [count, N]
         turns_total += int(np.sum(batch.done() == 0))  # games still live this step
@@ -142,7 +143,7 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
         winners = batch.winners()
 
         for g in range(cfg.count):
-            overrun = slots[g].turns >= cfg.max_turns
+            overrun = cfg.max_turns > 0 and slots[g].turns >= cfg.max_turns
             if not (done[g] or overrun):
                 continue
             z = _outcome(int(winners[g]), cfg.num_snakes)

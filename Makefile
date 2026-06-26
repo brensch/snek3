@@ -21,15 +21,17 @@ CKPT        ?=
 # Training defaults (all overridable)
 GENERATIONS ?= 30
 SAMPLES     ?= 12000
-COUNT       ?= 128
+COUNT       ?= 32
 DEPTH       ?= 3
 TAU         ?= 30
 ITERS       ?= 120
+EVAL_BATCH_SIZE ?= 8192
 SEARCH_THREADS ?= $(shell nproc 2>/dev/null || python3 -c 'import os; print(os.cpu_count() or 1)')
 FILTERS     ?= 64
 BLOCKS      ?= 6
 EVAL_EVERY  ?= 5
-EVAL_GAMES  ?= 200
+EVAL_GAMES  ?= 32
+MAX_TURNS   ?= 0
 RECORD_GAMES ?= 8
 RECORD_EVERY ?= 1
 RUN_ID      ?=
@@ -44,7 +46,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: GENERATIONS SAMPLES COUNT DEPTH TAU ITERS SEARCH_THREADS FILTERS BLOCKS EVAL_EVERY EVAL_GAMES RECORD_GAMES RECORD_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
+	@echo "Vars: GENERATIONS SAMPLES COUNT DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS FILTERS BLOCKS EVAL_EVERY EVAL_GAMES MAX_TURNS RECORD_GAMES RECORD_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
@@ -78,17 +80,20 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 	$(PY) -m azsnek.train \
 		--generations $(GENERATIONS) --samples $(SAMPLES) --count $(COUNT) \
 		--depth $(DEPTH) --tau $(TAU) --iters $(ITERS) \
+		--eval-batch-size $(EVAL_BATCH_SIZE) \
 		--search-threads $(SEARCH_THREADS) \
 		--filters $(FILTERS) --blocks $(BLOCKS) \
 		--eval-every $(EVAL_EVERY) --eval-games $(EVAL_GAMES) \
+		--max-turns $(MAX_TURNS) \
 		--record-games $(RECORD_GAMES) --record-every $(RECORD_EVERY) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
 overnight: build ## Start a background overnight training run. Override TAU, GENERATIONS, SAMPLES, RUN_ID...
 	TAU=$(TAU) GENERATIONS=$(GENERATIONS) SAMPLES=$(SAMPLES) COUNT=$(COUNT) \
-	DEPTH=$(DEPTH) ITERS=$(ITERS) SEARCH_THREADS=$(SEARCH_THREADS) \
+	DEPTH=$(DEPTH) ITERS=$(ITERS) EVAL_BATCH_SIZE=$(EVAL_BATCH_SIZE) \
+	SEARCH_THREADS=$(SEARCH_THREADS) \
 	FILTERS=$(FILTERS) BLOCKS=$(BLOCKS) \
-	EVAL_EVERY=$(EVAL_EVERY) EVAL_GAMES=$(EVAL_GAMES) \
+	EVAL_EVERY=$(EVAL_EVERY) EVAL_GAMES=$(EVAL_GAMES) MAX_TURNS=$(MAX_TURNS) \
 	RECORD_GAMES=$(RECORD_GAMES) RECORD_EVERY=$(RECORD_EVERY) \
 	RUN_ID="$(RUN_ID)" FRESH="$(FRESH)" bash scripts/overnight_train.sh
 

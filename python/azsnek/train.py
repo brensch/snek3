@@ -65,10 +65,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--generations", type=int, default=50)
     ap.add_argument("--samples", type=int, default=20_000)
-    ap.add_argument("--count", type=int, default=128)
+    ap.add_argument("--count", type=int, default=32)
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--tau", type=float, default=30.0)
     ap.add_argument("--iters", type=int, default=120)
+    ap.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=8192,
+        help="leaf observations per neural-net eval chunk; lower reduces eval tensor memory",
+    )
     ap.add_argument(
         "--search-threads",
         type=int,
@@ -78,8 +84,9 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--train-steps", type=int, default=256, help="SGD steps per generation")
     ap.add_argument("--buffer-size", type=int, default=150_000, help="replay buffer capacity (samples)")
+    ap.add_argument("--max-turns", type=int, default=0, help="0 plays until terminal; positive values cap games as draws")
     ap.add_argument("--eval-every", type=int, default=5)
-    ap.add_argument("--eval-games", type=int, default=200)
+    ap.add_argument("--eval-games", type=int, default=32)
     ap.add_argument("--filters", type=int, default=64)
     ap.add_argument("--blocks", type=int, default=6)
     ap.add_argument("--ckpt-dir", type=str, default="checkpoints")
@@ -109,7 +116,9 @@ def main():
         depth=args.depth,
         tau=args.tau,
         iters=args.iters,
+        eval_batch_size=args.eval_batch_size,
         samples_per_gen=args.samples,
+        max_turns=args.max_turns,
     )
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -125,6 +134,8 @@ def main():
             "depth": args.depth,
             "tau": args.tau,
             "iters": args.iters,
+            "eval_batch_size": args.eval_batch_size,
+            "max_turns": args.max_turns,
             "search_threads": args.search_threads,
             "generations": args.generations,
             "samples_per_gen": args.samples,
@@ -222,7 +233,8 @@ def main():
 
         if args.eval_every and (gen + 1) % args.eval_every == 0:
             res = evaluate(
-                net, device, games=args.eval_games, depth=args.depth, tau=args.tau, iters=args.iters
+                net, device, games=args.eval_games, depth=args.depth, tau=args.tau,
+                iters=args.iters, eval_batch_size=args.eval_batch_size, max_turns=args.max_turns
             )
             metric.update(
                 win_rate=round(res["win_rate"], 3),
@@ -242,11 +254,13 @@ def main():
             games = record_games(
                 net, device, board=sp.board, n_games=args.record_games,
                 depth=args.depth, tau=args.tau, iters=args.iters,
+                eval_batch_size=args.eval_batch_size, max_turns=args.max_turns,
                 opponent="baseline", seed=7000 + gen,
             )
             games += record_games(
                 net, device, board=sp.board, n_games=args.record_games,
                 depth=args.depth, tau=args.tau, iters=args.iters,
+                eval_batch_size=args.eval_batch_size, max_turns=args.max_turns,
                 opponent="net", seed=9000 + gen,
             )
             run.save_games(gen, games)

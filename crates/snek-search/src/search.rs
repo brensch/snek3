@@ -230,16 +230,6 @@ impl Forest {
             .map(|b| (b.height as usize, b.width as usize))
             .unwrap_or((0, 0));
 
-        let built: Vec<(Tree, Vec<Board>)> = boards
-            .par_iter()
-            .map(|board| {
-                let mut nodes = Vec::new();
-                let mut eval_boards = Vec::new();
-                let root = expand_node(board.clone(), depth, &mut nodes, &mut eval_boards);
-                (Tree { nodes, root }, eval_boards)
-            })
-            .collect();
-
         let mut forest = Forest {
             trees: Vec::with_capacity(boards.len()),
             eval_boards: Vec::new(),
@@ -249,7 +239,11 @@ impl Forest {
             width,
         };
 
-        for (mut tree, eval_boards) in built {
+        for board in boards {
+            let mut nodes = Vec::new();
+            let mut eval_boards = Vec::new();
+            let root = expand_node(board.clone(), depth, &mut nodes, &mut eval_boards);
+            let mut tree = Tree { nodes, root };
             let offset = forest.eval_boards.len();
             offset_eval_ids(&mut tree, offset);
             forest.eval_boards.extend(eval_boards);

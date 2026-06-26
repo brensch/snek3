@@ -22,6 +22,8 @@ def record_games(
     depth: int = 2,
     tau: float = 6.0,
     iters: int = 120,
+    eval_batch_size: int = 8192,
+    max_turns: int = 0,
     opponent: str = "baseline",  # "baseline" (snake1=flood-fill) or "net" (self-play)
     seed: int = 0,
 ) -> list[dict]:
@@ -32,14 +34,14 @@ def record_games(
     (`opponent="net"`, i.e. self-play). Returns a list of game dicts:
     `{opponent, winner, num_turns, frames: [snapshot, ...]}`.
     """
-    max_turns = 2 * board * board
     batch = snek.GameBatch(board, board, 2, count=n_games, seed=seed)
     frames: list[list[dict]] = [[] for _ in range(n_games)]
     # Stop recording a game once we've captured its terminal frame, so finished
     # games aren't padded with frozen frames up to the longest game's length.
     recorded_terminal = [False] * n_games
 
-    for _ in range(max_turns):
+    steps = 0
+    while max_turns <= 0 or steps < max_turns:
         done = batch.done().astype(bool)
         for g in range(n_games):
             if not recorded_terminal[g]:
@@ -48,7 +50,7 @@ def record_games(
                     recorded_terminal[g] = True  # this was the final frame
         if all(recorded_terminal):
             break
-        policy = run_search(batch, net, device, depth, tau, iters)
+        policy = run_search(batch, net, device, depth, tau, iters, eval_batch_size)
         agent = greedy_actions(policy)[:, 0]
         if opponent == "net":
             opp = greedy_actions(policy)[:, 1]
@@ -56,6 +58,7 @@ def record_games(
             opp = batch.baseline_actions()[:, 1]
         actions = np.stack([agent, opp], axis=1).astype(np.uint8)
         batch.step(actions)
+        steps += 1
 
     winners = batch.winners()
     return [
