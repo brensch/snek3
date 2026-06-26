@@ -50,3 +50,24 @@ label.chk { color: var(--muted); font-size: 12px; display: flex; align-items: ce
 .badge.win { color: #34d399; border-color: #10532f; }
 .badge.loss { color: #f87171; }
 .badge.draw { color: #fbbf24; }
+
+/* Clickable recent-games table */
+.gametable {
+  margin-top: 12px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.gametable table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.gametable thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: #11161d; color: var(--muted);
+  text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+  padding: 7px 10px; border-bottom: 1px solid var(--line);
+}
+.gametable tbody td { padding: 6px 10px; border-bottom: 1px solid #1c222b; }
+.gametable tbody tr { cursor: pointer; }
+.gametable tbody tr:hover { background: #1b2230; }
+.gametable tbody tr.active { background: #15243a; box-shadow: inset 3px 0 0 var(--accent); }
+.gametable tbody tr.active td:first-child { color: var(--accent); font-weight: 600; }

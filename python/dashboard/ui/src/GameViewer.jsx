@@ -23,7 +23,7 @@ export default function GameViewer({ run, gamesIndex }) {
   const [current, setCurrent] = useState(null); // {key, gen, opponent, winner, frames}
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(true);
-  const [fps, setFps] = useState(12);
+  const [fps, setFps] = useState(24);
   const [followLatest, setFollowLatest] = useState(true);
   const [streamed, setStreamed] = useState(0);
   const followRef = useRef(true);
@@ -186,12 +186,35 @@ export default function GameViewer({ run, gamesIndex }) {
       )}
       <div className="controls">
         <label className="chk"><input type="checkbox" checked={followLatest} onChange={(e) => { setFollowLatest(e.target.checked); if (e.target.checked) advanceStream(); }} /> stream newest</label>
-        <label className="chk">speed <input type="range" min={2} max={30} value={fps} onChange={(e) => setFps(+e.target.value)} /></label>
+        <label className="chk">speed <input type="range" min={4} max={60} value={fps} onChange={(e) => setFps(+e.target.value)} /></label>
         <span className="muted">{fps} fps</span>
-        <div className="grow" />
-        <select value={current ? current.key.split("#")[0] : ""} onChange={async (e) => { setFollowLatest(false); await loadRef({ file: e.target.value, gen: null, idx: 0, key: e.target.value + "#0" }, false); }}>
-          {gamesIndex.map((f) => <option key={f.file} value={f.file}>gen {f.gen}</option>)}
-        </select>
+      </div>
+
+      <div className="gametable">
+        <table>
+          <thead>
+            <tr><th>gen</th><th>type</th><th>result</th><th style={{ textAlign: "right" }}>turns</th></tr>
+          </thead>
+          <tbody>
+            {allGames.slice(0, 120).map((g) => {
+              const w = g.meta.winner;
+              const res = w === 0 ? ["W", "win"] : w === 1 ? ["L", "loss"] : ["D", "draw"];
+              const active = current && g.key === current.key;
+              return (
+                <tr
+                  key={g.key}
+                  className={active ? "active" : ""}
+                  onClick={() => { setFollowLatest(false); loadRef(g, false); }}
+                >
+                  <td>{g.gen}</td>
+                  <td>{g.meta.opponent === "net" ? "self-play" : "vs baseline"}</td>
+                  <td><span className={"badge " + res[1]}>{res[0]}</span></td>
+                  <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{g.meta.num_turns}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

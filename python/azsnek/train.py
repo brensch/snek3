@@ -78,7 +78,7 @@ def main():
     ap.add_argument("--ckpt-dir", type=str, default="checkpoints")
     ap.add_argument("--runs-dir", type=str, default="runs", help="dashboard run root")
     ap.add_argument("--run-id", type=str, default=None, help="run dir name (default: timestamp)")
-    ap.add_argument("--record-games", type=int, default=3, help="replays per opponent per recording")
+    ap.add_argument("--record-games", type=int, default=8, help="replays per opponent per recording")
     ap.add_argument("--record-every", type=int, default=1, help="record replays every N generations")
     ap.add_argument("--keep-games", type=int, default=40, help="keep this many recent game files")
     ap.add_argument("--fresh", action="store_true", help="ignore saved state and restart this run-id from scratch")
