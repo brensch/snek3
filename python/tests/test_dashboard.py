@@ -48,3 +48,14 @@ def test_dashboard_serves_run_data(tmp_path):
     assert full["games"][0]["frames"]
     # path traversal is rejected
     assert client.get("/api/runs/..%2F..%2Fetc/metrics").status_code in (400, 404)
+
+
+def test_index_html_is_well_formed():
+    """Guard against an unclosed <script>/<body> (a missing closing tag stops
+    the inline script from ever executing in a browser)."""
+    import dashboard.app as dash
+
+    html = TestClient(dash.app).get("/").text
+    assert html.count("<script>") == html.count("</script>"), "unbalanced <script> tags"
+    assert html.count("<script>") >= 1
+    assert "</body>" in html and "</html>" in html

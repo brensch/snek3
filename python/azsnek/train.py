@@ -249,6 +249,7 @@ def main():
             "running": False,
             "total_generations": args.generations,
             "best_win_rate": None if best_win < 0 else round(best_win, 3),
+            "last": metric if "metric" in dir() else None,
         }
     )
 
