@@ -127,7 +127,14 @@ export default function GameViewer({ run, gamesIndex }) {
         const pad = cell * 0.12;
         roundRect(ctx, px(x) + pad, py(y) + pad, cell - 2 * pad, cell - 2 * pad, cell * 0.2);
         ctx.fill();
-        if (bi === 0) { ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.beginPath(); ctx.arc(px(x) + cell / 2, py(y) + cell / 2, cell * 0.13, 0, 7); ctx.fill(); }
+        if (bi === 0) {
+          // Snake index on the head so you can tell who's who on the board.
+          ctx.fillStyle = "rgba(255,255,255,0.95)";
+          ctx.font = `bold ${Math.floor(cell * 0.5)}px ui-sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(String(si), px(x) + cell / 2, py(y) + cell / 2);
+        }
       });
       ctx.globalAlpha = 1;
     });
@@ -160,6 +167,23 @@ export default function GameViewer({ run, gamesIndex }) {
           {fr ? `turn ${fr.turn} · ${frame + 1}/${current.frames.length}  ${fr.snakes.map((s, i) => `S${i}:${s.alive ? "hp" + s.health : "✕"}`).join("  ")}` : "—"}
         </span>
       </div>
+      {current && (
+        <div className="legend">
+          {current.frames[0].snakes.map((_, i) => {
+            const role = i === 0 ? "our net" : current.opponent === "net" ? "our net (self-play)" : "flood-fill baseline";
+            const atEnd = frame >= current.frames.length - 1;
+            const dead = fr && !fr.snakes[i].alive;
+            const won = current.winner === i;
+            return (
+              <span key={i}>
+                <i className="swatch" style={{ background: COLORS[i] }} />
+                snake {i} — {role}
+                {won ? " · winner ✓" : atEnd && dead ? " · eliminated ✕" : ""}
+              </span>
+            );
+          })}
+        </div>
+      )}
       <div className="controls">
         <label className="chk"><input type="checkbox" checked={followLatest} onChange={(e) => { setFollowLatest(e.target.checked); if (e.target.checked) advanceStream(); }} /> stream newest</label>
         <label className="chk">speed <input type="range" min={2} max={30} value={fps} onChange={(e) => setFps(+e.target.value)} /></label>
