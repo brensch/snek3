@@ -88,6 +88,17 @@
 </main>
 
 <script>
+// Surface any client-side error as a visible banner instead of a blank page.
+function showError(msg){
+  let bar = document.getElementById('errbar');
+  if(!bar){ bar=document.createElement('div'); bar.id='errbar';
+    bar.style.cssText='background:#7f1d1d;color:#fff;padding:8px 14px;font:12px ui-monospace,monospace;white-space:pre-wrap';
+    document.body.insertBefore(bar, document.body.firstChild); }
+  bar.textContent = 'dashboard error: ' + msg;
+}
+window.addEventListener('error', e=>showError((e.message||e.error)+' @'+(e.filename||'')+':'+e.lineno));
+window.addEventListener('unhandledrejection', e=>showError('promise: '+((e.reason&&e.reason.message)||e.reason)));
+
 const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ec4899','#a78bfa','#f87171','#2dd4bf','#facc15'];
 const state = {
   run:null, metrics:[], filesIndex:[],

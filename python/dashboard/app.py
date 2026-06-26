@@ -32,7 +32,9 @@ def _safe_run(run: str) -> Path:
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    # no-store so the browser always fetches the current UI (the dashboard is a
+    # dev tool; stale cached HTML would be confusing).
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/runs")
