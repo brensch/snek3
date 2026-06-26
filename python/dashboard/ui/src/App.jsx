@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
 import MetricsChart from "./MetricsChart.jsx";
-import GameViewer from "./GameViewer.jsx";
+import GenerationView from "./GenerationView.jsx";
 
 function Stat({ value, label }) {
   return (
@@ -69,10 +69,11 @@ export default function App() {
         </span>
       </header>
 
-      <main>
+      <main className="stacked">
         <section className="card">
           <h2>Training metrics</h2>
-          <div className="stats">
+          <MetricsChart metrics={metrics} />
+          <div className="stats-row">
             <Stat value={m.gen ?? "—"} label="generation" />
             <Stat value={m.win_rate != null ? m.win_rate.toFixed(3) : "—"} label={`win-rate (best ${best != null ? best.toFixed(2) : "—"})`} />
             <Stat value={num(m.turns_per_sec)} label="turns / sec" />
@@ -82,10 +83,13 @@ export default function App() {
             <Stat value={num(m.samples)} label="samples/gen" />
             <Stat value={num(m.buffer)} label="replay buffer" />
           </div>
-          <MetricsChart metrics={metrics} />
         </section>
 
-        {run ? <GameViewer key={run} run={run} gamesIndex={gamesIndex} /> : <section className="card"><h2>Live game stream</h2><p className="muted">no run selected</p></section>}
+        {run ? (
+          <GenerationView run={run} gamesIndex={gamesIndex} metrics={metrics} />
+        ) : (
+          <section className="card"><h2>Games</h2><p className="muted">no run selected</p></section>
+        )}
       </main>
     </>
   );

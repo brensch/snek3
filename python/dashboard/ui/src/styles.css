@@ -30,13 +30,37 @@ button:hover { border-color: var(--accent); }
 .pill { padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; color: var(--muted); }
 .pill.live { color: #34d399; border-color: #10532f; }
 .pill.done { color: var(--muted); }
-main { display: grid; grid-template-columns: 1fr 470px; gap: 16px; padding: 16px; align-items: start; }
-@media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
 .card h2 { margin: 0 0 10px; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .6px; }
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 18px; margin-bottom: 10px; }
+
+/* Stats on a single wrapping row */
+.stats-row { display: flex; flex-wrap: wrap; gap: 10px 28px; margin-top: 12px; }
+.stat { min-width: 90px; }
 .stat b { display: block; font-size: 19px; }
 .stat span { color: var(--muted); font-size: 11px; }
+
+/* Generation table + boards grid: side by side on desktop, stacked on mobile */
+.gen-layout { display: flex; gap: 16px; align-items: flex-start; }
+@media (max-width: 720px) { .gen-layout { flex-direction: column; } }
+.gentable { flex: 0 0 240px; max-height: 460px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; }
+@media (max-width: 720px) { .gentable { flex-basis: auto; width: 100%; max-height: 220px; } }
+.gentable table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.gentable thead th { position: sticky; top: 0; background: #11161d; color: var(--muted); text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+.gentable tbody td { padding: 6px 10px; border-bottom: 1px solid #1c222b; }
+.gentable tbody tr { cursor: pointer; }
+.gentable tbody tr:hover { background: #1b2230; }
+.gentable tbody tr.active { background: #15243a; box-shadow: inset 3px 0 0 var(--accent); }
+.gentable tbody tr.active td:first-child { color: var(--accent); font-weight: 600; }
+
+/* Responsive grid of mini game boards */
+.board-grid { flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+.board-cell { background: #0d1117; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.board-cell canvas { width: 100%; height: auto; }
+.board-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; }
+.board-meta .type { color: var(--fg); }
+.board-meta .turn { margin-left: auto; font-variant-numeric: tabular-nums; }
+.board-snakes { display: flex; gap: 12px; margin-top: 4px; font-size: 11px; color: var(--muted); }
 canvas { display: block; background: #0b0e13; border-radius: 8px; max-width: 100%; }
 .controls { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
 #scrub { flex: 1; min-width: 140px; accent-color: var(--accent); }
@@ -50,24 +74,3 @@ label.chk { color: var(--muted); font-size: 12px; display: flex; align-items: ce
 .badge.win { color: #34d399; border-color: #10532f; }
 .badge.loss { color: #f87171; }
 .badge.draw { color: #fbbf24; }
-
-/* Clickable recent-games table */
-.gametable {
-  margin-top: 12px;
-  max-height: 260px;
-  overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-}
-.gametable table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.gametable thead th {
-  position: sticky; top: 0; z-index: 1;
-  background: #11161d; color: var(--muted);
-  text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
-  padding: 7px 10px; border-bottom: 1px solid var(--line);
-}
-.gametable tbody td { padding: 6px 10px; border-bottom: 1px solid #1c222b; }
-.gametable tbody tr { cursor: pointer; }
-.gametable tbody tr:hover { background: #1b2230; }
-.gametable tbody tr.active { background: #15243a; box-shadow: inset 3px 0 0 var(--accent); }
-.gametable tbody tr.active td:first-child { color: var(--accent); font-weight: 600; }
