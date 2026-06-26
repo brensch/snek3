@@ -66,7 +66,7 @@ def main():
     ap.add_argument("--generations", type=int, default=50)
     ap.add_argument("--samples", type=int, default=20_000)
     ap.add_argument("--count", type=int, default=128)
-    ap.add_argument("--depth", type=int, default=2)
+    ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--tau", type=float, default=30.0)
     ap.add_argument("--iters", type=int, default=120)
     ap.add_argument(

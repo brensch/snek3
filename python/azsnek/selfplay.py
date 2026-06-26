@@ -24,7 +24,7 @@ class SelfPlayConfig:
     board: int = 11
     num_snakes: int = 2
     count: int = 128  # parallel games
-    depth: int = 2
+    depth: int = 3
     tau: float = 30.0
     iters: int = 120
     samples_per_gen: int = 20_000
