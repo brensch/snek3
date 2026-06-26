@@ -43,6 +43,14 @@ class RunWriter:
     def has_state(self) -> bool:
         return self.state_path.exists()
 
+    def reset(self) -> None:
+        """Clear a run's progress (metrics, status, state, replays) for a fresh
+        restart under the same run id. Keeps meta.json."""
+        for p in (self.metrics_path, self.state_path, self.dir / "status.json"):
+            p.unlink(missing_ok=True)
+        for g in self.games_dir.glob("gen_*.json"):
+            g.unlink(missing_ok=True)
+
     def write_json(self, name: str, obj) -> None:
         path = self.dir / name
         tmp = path.with_suffix(path.suffix + ".tmp")

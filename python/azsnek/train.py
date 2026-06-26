@@ -81,11 +81,9 @@ def main():
     ap.add_argument("--record-games", type=int, default=3, help="replays per opponent per recording")
     ap.add_argument("--record-every", type=int, default=1, help="record replays every N generations")
     ap.add_argument("--keep-games", type=int, default=40, help="keep this many recent game files")
-    ap.add_argument("--resume", action="store_true", help="resume runs/<run-id> from its state.pt")
+    ap.add_argument("--fresh", action="store_true", help="ignore saved state and restart this run-id from scratch")
+    ap.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)  # deprecated: resume is the default
     args = ap.parse_args()
-
-    if args.resume and not args.run_id:
-        ap.error("--resume requires --run-id (the run directory to continue)")
 
     device = device_auto()
     print(f"device: {device}")
@@ -117,12 +115,15 @@ def main():
         },
     )
 
-    # Resume from a previous run's full state, or start fresh.
+    # Resume automatically when this run-id has saved state, unless --fresh.
     resume = None
-    if args.resume and run.has_state():
+    if run.has_state() and not args.fresh:
         resume = torch.load(run.state_path, map_location=device, weights_only=False)
         cfg = NetConfig(**resume["net_cfg"])
     else:
+        if args.fresh and run.has_state():
+            run.reset()
+            print(f"--fresh: cleared previous progress in {run.dir}", flush=True)
         cfg = NetConfig(channels=snek.CHANNELS, filters=args.filters, blocks=args.blocks)
 
     net = AZNet(cfg).to(device)
@@ -144,9 +145,7 @@ def main():
             print(f"warning: could not fully restore RNG state: {e}")
         print(f"resumed run {run.run_id} at generation {start_gen}", flush=True)
     else:
-        if args.resume:
-            print(f"--resume set but no state.pt in {run.dir}; starting fresh", flush=True)
-        print(f"run dir: {run.dir}", flush=True)
+        print(f"run dir: {run.dir} (fresh start)", flush=True)
 
     def save_state(gen: int):
         run.save_state(

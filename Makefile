@@ -26,7 +26,7 @@ FILTERS     ?= 64
 BLOCKS      ?= 6
 EVAL_EVERY  ?= 5
 RUN_ID      ?=
-RESUME      ?=
+FRESH       ?=
 ARGS        ?=
 
 .DEFAULT_GOAL := help
@@ -67,11 +67,11 @@ lint: ## Lint Python (import-error, no-member) and Rust (clippy)
 fmt: ## Format Rust code
 	cargo fmt
 
-train: build ## Train; writes runs/<id>/. Override GENERATIONS, SAMPLES, RUN_ID, RESUME=1, ARGS...
+train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENERATIONS, SAMPLES, RUN_ID, FRESH=1, ARGS...
 	$(PY) -m azsnek.train \
 		--generations $(GENERATIONS) --samples $(SAMPLES) --depth $(DEPTH) \
 		--filters $(FILTERS) --blocks $(BLOCKS) --eval-every $(EVAL_EVERY) \
-		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(RESUME),--resume,) $(ARGS)
+		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
 dashboard: ## Serve the live training dashboard on PORT (default 8050)
 	SNEK_RUNS_DIR=$(RUNS_DIR) $(UVICORN) dashboard.app:app --host 127.0.0.1 --port $(PORT)
