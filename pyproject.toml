@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "snek"
+version = "0.1.0"
+description = "Fast Battlesnake rules engine + observation encoding (Rust core)"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[tool.maturin]
+manifest-path = "crates/snek-py/Cargo.toml"
+module-name = "snek"
+features = []
+# `python/` is the single source root. maturin installs the `snek` package
+# (compiled extension + hand-maintained .pyi stubs) and also bundles the pure
+# Python packages `azsnek` and `server`, so every project import resolves through
+# the venv with no sys.path manipulation.
+python-source = "python"
+
+[tool.pylint.main]
+# `snek` is a compiled extension; let Pylint import it to introspect members
+# (belt-and-suspenders alongside the .pyi stubs, since astroid can't read a .so).
+extension-pkg-allow-list = ["snek"]

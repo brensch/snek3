@@ -1,0 +1,25 @@
+# Rust (root workspace and the detached crates/snek-py workspace each have one)
+target/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Compiled extension (placed in the stub dir by `maturin develop`); the .pyi
+# stubs and __init__.py in python/stubs/snek are source and ARE tracked.
+*.so
+
+# Training outputs
+checkpoints/
+*.pt
+*.pth.tar
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
