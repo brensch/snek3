@@ -13,11 +13,17 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 RUNS_DIR = Path(os.environ.get("SNEK_RUNS_DIR", "runs")).resolve()
 STATIC = Path(__file__).parent / "static"
 
 app = FastAPI(title="snek3 dashboard")
+
+# Vite build output: index.html + hashed assets under static/assets/.
+# check_dir=False so the server still starts if the UI hasn't been built yet
+# (run `make ui`); the API routes work regardless.
+app.mount("/assets", StaticFiles(directory=STATIC / "assets", check_dir=False), name="assets")
 
 
 def _safe_run(run: str) -> Path:

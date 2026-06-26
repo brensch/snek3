@@ -56,6 +56,7 @@ def test_index_html_is_well_formed():
     import dashboard.app as dash
 
     html = TestClient(dash.app).get("/").text
-    assert html.count("<script>") == html.count("</script>"), "unbalanced <script> tags"
-    assert html.count("<script>") >= 1
+    # Count tag prefixes so it matches `<script>` and `<script type="module" ...>`.
+    assert html.count("<script") == html.count("</script"), "unbalanced <script> tags"
+    assert html.count("<script") >= 1
     assert "</body>" in html and "</html>" in html

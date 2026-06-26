@@ -30,7 +30,7 @@ FRESH       ?=
 ARGS        ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help venv build test test-rust test-py bench lint fmt train dashboard serve audit clean clean-all
+.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard serve audit clean clean-all
 
 help: ## Show this help
 	@echo "snek3 targets:"
@@ -72,6 +72,9 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 		--generations $(GENERATIONS) --samples $(SAMPLES) --depth $(DEPTH) \
 		--filters $(FILTERS) --blocks $(BLOCKS) --eval-every $(EVAL_EVERY) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
+
+ui: ## Build the React dashboard UI (-> python/dashboard/static)
+	cd python/dashboard/ui && npm install && npm run build
 
 dashboard: ## Serve the live training dashboard on PORT (default 8050)
 	SNEK_RUNS_DIR=$(RUNS_DIR) $(UVICORN) dashboard.app:app --host 127.0.0.1 --port $(PORT)

@@ -70,10 +70,11 @@ python -m azsnek.train --generations 50 --samples 20000 --eval-every 5 --run-id 
 SNEK_RUNS_DIR=runs uvicorn dashboard.app:app --port 8050
 ```
 
-It shows the win-rate / loss curves updating live and a game viewer where you can
-pick a generation + game and scrub/play through the recorded board states (snake
-bodies, heads, food, health, who won). "Follow latest" auto-jumps to the newest
-replays as training advances.
+It shows the win-rate / loss curves updating live and an auto-streaming game
+viewer that plays the newest recorded games back-to-back (scrub, speed control,
+"stream newest" toggle). The UI is a React app (`python/dashboard/ui`, built with
+Vite); the built bundle is committed to `python/dashboard/static`, so the server
+needs no Node at runtime. Rebuild after editing the UI with `make ui`.
 
 ## Make targets
 
