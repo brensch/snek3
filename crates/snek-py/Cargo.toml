@@ -18,6 +18,7 @@ crate-type = ["cdylib"]
 [dependencies]
 snek-core = { path = "../snek-core", features = ["json"] }
 snek-search = { path = "../snek-search" }
+snek-infer = { path = "../snek-infer" }
 pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
 rayon = "1.10"

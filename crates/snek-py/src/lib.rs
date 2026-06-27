@@ -13,7 +13,9 @@ use pyo3::prelude::*;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use rand::Rng;
 use snek_core::{encode_into, standard_start, Board, Move, NUM_CHANNELS};
+use snek_infer::Net;
 use snek_search::{Forest, MctsForest};
 
 fn move_from_u8(v: u8) -> Move {
@@ -497,11 +499,180 @@ fn set_search_threads(threads: usize) -> PyResult<bool> {
     }
 }
 
+/// Sample one move from a 4-slot policy, mixing `explore` of a uniform over the
+/// snake's *legal* (nonzero) moves. Dead/terminal snakes (all-zero) -> Up (ignored).
+fn sample_move(probs: &[f32], explore: f32, rng: &mut Xoshiro256PlusPlus) -> Move {
+    let k = probs.iter().filter(|&&p| p > 0.0).count();
+    if k == 0 {
+        return Move::Up;
+    }
+    let u = 1.0 / k as f32;
+    let mut p = [0.0f32; 4];
+    let mut total = 0.0f32;
+    for i in 0..4 {
+        p[i] = if probs[i] > 0.0 { (1.0 - explore) * probs[i] + explore * u } else { 0.0 };
+        total += p[i];
+    }
+    let mut r = rng.gen::<f32>() * total;
+    for i in 0..4 {
+        r -= p[i];
+        if r <= 0.0 {
+            return Move::from_index(i);
+        }
+    }
+    Move::from_index(3)
+}
+
+/// Run AlphaZero self-play entirely in Rust: MCTS (decoupled-PUCT) with batched
+/// ONNX/CUDA inference (via `ort`), no Python round-trips, returning training
+/// samples `(obs [N,C,H,W], policy [N,4], value [N])` as zero-copy numpy arrays.
+/// Policy target = root visit counts; value target = undiscounted game outcome.
+#[pyfunction]
+#[pyo3(signature = (onnx_path, board=11, num_snakes=2, count=256, sims=64, c_puct=1.5,
+    samples_per_gen=10000, seed=0, exploration_prob=0.25, max_turns=0, eval_chunk=16384))]
+#[allow(clippy::too_many_arguments)]
+fn generate_selfplay<'py>(
+    py: Python<'py>,
+    onnx_path: &str,
+    board: i8,
+    num_snakes: usize,
+    count: usize,
+    sims: usize,
+    c_puct: f32,
+    samples_per_gen: usize,
+    seed: u64,
+    exploration_prob: f32,
+    max_turns: i64,
+    eval_chunk: usize,
+) -> PyResult<(Bound<'py, PyArray4<f32>>, Bound<'py, PyArray2<f32>>, Bound<'py, PyArray1<f32>>)> {
+    let c = NUM_CHANNELS;
+    let h = board as usize;
+    let w = board as usize;
+    let obs_size = c * h * w;
+    let n = num_snakes;
+
+    let mut net = Net::load(onnx_path)
+        .map_err(|e| PyValueError::new_err(format!("ort load failed: {e}")))?;
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+    let mut boards: Vec<Board> =
+        (0..count).map(|_| standard_start(board, board, n, &mut rng)).collect();
+    let mut turns = vec![0u32; count];
+
+    // Per-game pending step records (flattened, step-major) until the game ends.
+    #[derive(Default)]
+    struct Slot {
+        obs: Vec<f32>,    // each step: n*obs_size
+        pol: Vec<f32>,    // each step: n*4
+        alive: Vec<bool>, // each step: n
+        steps: usize,
+    }
+    let mut slots: Vec<Slot> = (0..count).map(|_| Slot::default()).collect();
+
+    let mut out_obs: Vec<f32> = Vec::new();
+    let mut out_pol: Vec<f32> = Vec::new();
+    let mut out_z: Vec<f32> = Vec::new();
+    let mut collected = 0usize;
+    let mut leaf_buf: Vec<f32> = Vec::new();
+    let mut actions: Vec<Move> = vec![Move::Up; n];
+
+    while collected < samples_per_gen {
+        // --- MCTS over all games ---
+        let mut forest = MctsForest::new(&boards, c_puct);
+        for _ in 0..sims {
+            let pending = forest.select();
+            if pending.is_empty() {
+                continue;
+            }
+            let m = pending.len() * n;
+            leaf_buf.clear();
+            leaf_buf.resize(m * obs_size, 0.0);
+            forest.write_pending_obs(&pending, &mut leaf_buf);
+            let mut pol_all = vec![0.0f32; m * 4];
+            let mut val_all = vec![0.0f32; m];
+            let mut start = 0;
+            while start < m {
+                let end = (start + eval_chunk).min(m);
+                let (p, v) = net
+                    .forward(&leaf_buf[start * obs_size..end * obs_size], end - start, c, h, w)
+                    .map_err(|e| PyValueError::new_err(format!("ort forward: {e}")))?;
+                pol_all[start * 4..end * 4].copy_from_slice(&p);
+                val_all[start..end].copy_from_slice(&v);
+                start = end;
+            }
+            forest.expand_backup(&pending, &pol_all, &val_all);
+        }
+        let (root_pol, _root_val) = forest.root_targets(); // [count*n*4], [count*n]
+
+        // --- record current positions ---
+        for g in 0..count {
+            let bd = &boards[g];
+            let slot = &mut slots[g];
+            for s in 0..n {
+                let base = slot.obs.len();
+                slot.obs.resize(base + obs_size, 0.0);
+                encode_into(bd, s, &mut slot.obs[base..base + obs_size]);
+                slot.alive.push(bd.snakes[s].alive());
+            }
+            slot.pol.extend_from_slice(&root_pol[g * n * 4..(g + 1) * n * 4]);
+            slot.steps += 1;
+        }
+
+        // --- play one move per game ---
+        for g in 0..count {
+            for s in 0..n {
+                let base = (g * n + s) * 4;
+                actions[s] = sample_move(&root_pol[base..base + 4], exploration_prob, &mut rng);
+            }
+            boards[g].step_and_spawn(&actions, &mut rng);
+            turns[g] += 1;
+        }
+
+        // --- finalize finished games ---
+        for g in 0..count {
+            let overrun = max_turns > 0 && turns[g] as i64 >= max_turns;
+            if !(boards[g].is_terminal() || overrun) {
+                continue;
+            }
+            let winner = boards[g].winner();
+            let slot = std::mem::take(&mut slots[g]);
+            for st in 0..slot.steps {
+                for s in 0..n {
+                    if !slot.alive[st * n + s] {
+                        continue;
+                    }
+                    let oi = (st * n + s) * obs_size;
+                    out_obs.extend_from_slice(&slot.obs[oi..oi + obs_size]);
+                    let pi = (st * n + s) * 4;
+                    out_pol.extend_from_slice(&slot.pol[pi..pi + 4]);
+                    out_z.push(match winner {
+                        Some(wi) if wi == s => 1.0,
+                        Some(_) => -1.0,
+                        None => 0.0,
+                    });
+                    collected += 1;
+                }
+            }
+            boards[g] = standard_start(board, board, n, &mut rng);
+            turns[g] = 0;
+        }
+    }
+
+    let obs_arr = Array::from_shape_vec((collected, c, h, w), out_obs)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?
+        .into_pyarray_bound(py);
+    let pol_arr = Array::from_shape_vec((collected, 4), out_pol)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?
+        .into_pyarray_bound(py);
+    let z_arr = PyArray1::from_vec_bound(py, out_z);
+    Ok((obs_arr, pol_arr, z_arr))
+}
+
 #[pymodule]
 fn snek(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CHANNELS", NUM_CHANNELS)?;
     m.add_class::<GameBatch>()?;
     m.add_function(wrap_pyfunction!(encode_move_request, m)?)?;
     m.add_function(wrap_pyfunction!(set_search_threads, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_selfplay, m)?)?;
     Ok(())
 }
