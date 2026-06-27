@@ -208,12 +208,21 @@ def export_onnx(net, channels: int, board: int, device, path) -> None:
     net.eval()
     side = 2 * board - 1  # egocentric (head-centred) canvas side = obs_side(board)
     dummy = torch.zeros(1, channels, side, side, device=device)
+    dyn = {"obs": {0: "batch"}, "policy_logits": {0: "batch"}, "value": {0: "batch"}}
+    # Temperature-conditioned nets (Albatross) take a second [batch] `temp` input.
+    if getattr(net.cfg, "temperature_input", False):
+        args = (dummy, torch.zeros(1, device=device))
+        names = ["obs", "temp"]
+        dyn["temp"] = {0: "batch"}
+    else:
+        args = (dummy,)
+        names = ["obs"]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         torch.onnx.export(
-            net, dummy, str(path),
-            input_names=["obs"], output_names=["policy_logits", "value"],
-            dynamic_axes={"obs": {0: "batch"}, "policy_logits": {0: "batch"}, "value": {0: "batch"}},
+            net, args, str(path),
+            input_names=names, output_names=["policy_logits", "value"],
+            dynamic_axes=dyn,
             opset_version=17, dynamo=False,
         )
 
