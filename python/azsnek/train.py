@@ -363,6 +363,9 @@ def main():
         )
 
     onnx_path = run.dir / "model.onnx"
+    # Persistent Rust self-play: games carry across generations, so a large
+    # `count` (big GPU batches) wastes no inference on unfinished games.
+    selfplay = snek.SelfPlay(board=sp.board, num_snakes=sp.num_snakes, count=args.count, seed=12345)
     for gen in range(start_gen, args.generations):
         # ---- GENERATE: Rust MCTS + ONNX/CUDA inference (no Python round-trips) ----
         print(
