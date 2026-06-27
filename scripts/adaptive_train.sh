@@ -22,6 +22,7 @@ EVAL_GAMES="${EVAL_GAMES:-64}"
 MAX_TURNS="${MAX_TURNS:-0}"
 EXPLORATION_PROB="${EXPLORATION_PROB:-0.15}"
 DRAW_VALUE="${DRAW_VALUE:--0.25}"
+BOOTSTRAP_VALUE="${BOOTSTRAP_VALUE:-}"
 SKIP_SHORT_DRAW_TURNS="${SKIP_SHORT_DRAW_TURNS:-0}"
 SAMPLE_GAMES="${SAMPLE_GAMES:-16}"
 SAMPLE_EVERY="${SAMPLE_EVERY:-1}"
@@ -64,6 +65,10 @@ cmd=(
 
 if [[ -n "$FRESH" ]]; then
   cmd+=(--fresh)
+fi
+
+if [[ -n "$BOOTSTRAP_VALUE" ]]; then
+  cmd+=(--bootstrap-value)
 fi
 
 if [[ -n "$ARGS" ]]; then
