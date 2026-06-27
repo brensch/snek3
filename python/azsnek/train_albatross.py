@@ -220,13 +220,20 @@ def main():
 
         gen_seconds = time.time() - t0
 
+        proxy_mean_turns = ps.turns / max(ps.games, 1)
         metric = {
             "gen": gen, "samples": int(ps.obs.shape[0]),
             "proxy_policy_loss": round(pstats["policy_loss"], 4),
             "proxy_value_loss": round(pstats["value_loss"], 4),
-            "target_entropy": ptgt["target_entropy"],
+            "target_entropy": round(ptgt["target_entropy"], 4),
             "gen_seconds": round(gen_seconds, 1),
             "proxy_games": ps.games,
+            # Issue indicators: draw rate and game-length spike on BOTH collapse
+            # modes (short mutual-death OR long timeout); len_frac = share of the
+            # turn cap (1.0 = games never resolve).
+            "proxy_mean_turns": round(proxy_mean_turns, 1),
+            "proxy_draw_rate": round(ps.draws / max(ps.games, 1), 3),
+            "proxy_len_frac": round(min(1.0, proxy_mean_turns / max(args.max_turns, 1)), 3),
         }
         if rstats:
             metric["response_policy_loss"] = round(rstats["policy_loss"], 4)

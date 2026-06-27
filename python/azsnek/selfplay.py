@@ -48,6 +48,7 @@ class Samples:
     temp: np.ndarray | None = None  # [K] float32 per-sample temperature (Albatross)
     turns: int = 0  # total board-turns stepped (for throughput)
     games: int = 0  # total games finished
+    draws: int = 0  # of `games`, how many ended without a winner (draw/timeout)
 
 
 class ReplayBuffer:
@@ -227,6 +228,7 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
     collected = 0
     turns_total = 0
     games_total = 0
+    draws_total = 0
 
     while collected < cfg.samples_per_gen:
         policy, root_vals = run_search(
@@ -249,7 +251,11 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
         play = mix_uniform(policy, cfg.exploration_prob)
         actions = sample_actions(play, rng)
         batch.step(actions)
-        games_total += int(np.sum(batch.done()))
+        done = batch.done().astype(bool)
+        if done.any():
+            w = batch.winners()
+            games_total += int(done.sum())
+            draws_total += int(np.sum(done & (w == -1)))
         batch.reset_done()
 
     return Samples(
@@ -259,6 +265,7 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
         temp=np.concatenate(out_temp, axis=0),
         turns=turns_total,
         games=games_total,
+        draws=draws_total,
     )
 
 
