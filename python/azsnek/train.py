@@ -15,6 +15,24 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+
+def _setup_ort_env():
+    """Point the Rust self-play (snek.generate_selfplay -> onnxruntime/CUDA) at
+    the venv's onnxruntime + CUDA libs. Self-contained; no launcher env needed.
+    Must run before onnxruntime is loaded."""
+    import glob
+    import sys
+    sp = os.path.join(sys.prefix, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages")
+    so = glob.glob(os.path.join(sp, "onnxruntime", "capi", "libonnxruntime.so.*"))
+    if not so:
+        return
+    os.environ.setdefault("ORT_DYLIB_PATH", so[0])
+    libdirs = [os.path.join(sp, "onnxruntime", "capi")] + glob.glob(os.path.join(sp, "nvidia", "*", "lib"))
+    os.environ["LD_LIBRARY_PATH"] = ":".join(libdirs) + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+
+
+_setup_ort_env()
+
 import numpy as np
 import snek
 import torch
@@ -24,7 +42,7 @@ from .evaluate import evaluate, evaluate_vs_net
 from .net import AZNet, NetConfig, autocast as net_autocast, device_auto
 from .recorder import record_games
 from .runlog import RunWriter
-from .selfplay import ReplayBuffer, SelfPlayConfig, generate
+from .selfplay import ReplayBuffer, Samples, SelfPlayConfig, generate
 from .autotune import TuneLimits, TuneSettings, tune_next
 
 
@@ -71,6 +89,23 @@ def policy_target_stats(pol: np.ndarray) -> dict:
         "target_entropy": float(entropy.mean()),
         "target_max_prob": float(pol.max(axis=1).mean()),
     }
+
+
+@torch.no_grad()
+def export_onnx(net, channels: int, board: int, device, path) -> None:
+    """Export the current net to ONNX so the Rust self-play can run it on GPU."""
+    import warnings
+
+    net.eval()
+    dummy = torch.zeros(1, channels, board, board, device=device)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        torch.onnx.export(
+            net, dummy, str(path),
+            input_names=["obs"], output_names=["policy_logits", "value"],
+            dynamic_axes={"obs": {0: "batch"}, "policy_logits": {0: "batch"}, "value": {0: "batch"}},
+            opset_version=17, dynamo=False,
+        )
 
 
 def main():
@@ -327,20 +362,52 @@ def main():
             flush=True,
         )
 
+    onnx_path = run.dir / "model.onnx"
     for gen in range(start_gen, args.generations):
+        # ---- GENERATE: Rust MCTS + ONNX/CUDA inference (no Python round-trips) ----
+        print(
+            f"gen {gen:3d} | GENERATING  {args.count} games x {args.sims} sims "
+            f"-> {args.samples} samples ...",
+            flush=True,
+        )
         t0 = time.time()
-        samples = generate(net, device, sp, seed=1000 + gen)
+        export_onnx(net, cfg.channels, sp.board, device, onnx_path)
+        t_export = time.time() - t0
+        obs, pol, z = snek.generate_selfplay(
+            str(onnx_path), board=sp.board, num_snakes=sp.num_snakes,
+            count=args.count, sims=args.sims, c_puct=args.c_puct,
+            samples_per_gen=args.samples, seed=1000 + gen,
+            exploration_prob=args.exploration_prob, max_turns=args.max_turns,
+        )
+        samples = Samples(obs=obs, pol=pol, z=z, turns=int(z.shape[0]), games=0)
         target_stats = policy_target_stats(samples.pol)
         buffer.add(samples)
         t_gen = time.time() - t0
+        n_samp = samples.obs.shape[0]
+        print(
+            f"gen {gen:3d} |   generated {n_samp:6d} samples in {t_gen:5.1f}s = "
+            f"{n_samp / max(t_gen, 1e-9):6.0f} samples/s  (onnx export {t_export:.1f}s)",
+            flush=True,
+        )
 
+        # ---- TRAIN: PyTorch SGD on a window of recent games ----
+        print(
+            f"gen {gen:3d} | TRAINING    {args.train_steps} steps x batch "
+            f"{args.batch_size}  (buffer {len(buffer)}) ...",
+            flush=True,
+        )
         t1 = time.time()
-        # Train on a window of recent games, not just this generation's samples.
         losses = train_on_samples(
             net, opt, buffer.dataset(), device,
             steps=args.train_steps, batch_size=args.batch_size,
         )
         t_train = time.time() - t1
+        print(
+            f"gen {gen:3d} |   trained {args.train_steps} steps in {t_train:5.1f}s = "
+            f"{args.train_steps / max(t_train, 1e-9):5.1f} steps/s | "
+            f"pol {losses['policy_loss']:.4f} val {losses['value_loss']:.4f}",
+            flush=True,
+        )
 
         turns_per_sec = samples.turns / max(t_gen, 1e-9)
         games_per_sec = samples.games / max(t_gen, 1e-9)
