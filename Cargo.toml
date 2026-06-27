@@ -19,6 +19,7 @@ snek-search = { path = "crates/snek-search" }
 arrayvec = "0.7"
 rand = "0.8"
 rand_xoshiro = "0.6"
+rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

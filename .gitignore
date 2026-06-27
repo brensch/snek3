@@ -20,6 +20,7 @@ __pycache__/
 # Training outputs
 checkpoints/
 runs/
+logs/
 *.pt
 *.pth.tar
 

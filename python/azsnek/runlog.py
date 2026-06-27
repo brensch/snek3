@@ -6,6 +6,8 @@ A run directory looks like:
         meta.json              run config (board, net size, hyperparams)
         metrics.jsonl          one JSON object per generation (appended live)
         status.json            latest summary (overwritten each generation)
+        ckpt/latest.pt         serving weights from the latest eval
+        ckpt/best.pt           serving weights from the best eval
         games/gen_XXXX.json    recorded replays at that generation
 
 Everything is plain JSON so it can be inspected by hand or by the dashboard.
@@ -56,6 +58,9 @@ class RunWriter:
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(obj))
         tmp.replace(path)  # atomic, so the dashboard never reads a half-written file
+
+    def read_json(self, name: str):
+        return json.loads((self.dir / name).read_text())
 
     def append_metric(self, metric: dict) -> None:
         metric = {"wall_time": round(time.time() - self.started, 1), **metric}

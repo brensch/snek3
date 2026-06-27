@@ -9,6 +9,7 @@ use numpy::{
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use rayon::{prelude::*, ThreadPoolBuilder};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use snek_core::{encode_into, standard_start, Board, Move, NUM_CHANNELS};
@@ -149,12 +150,14 @@ impl GameBatch {
         let c = NUM_CHANNELS;
         let per_obs = c * h * w;
         let mut flat = vec![0.0f32; self.boards.len() * n * per_obs];
-        for (g, board) in self.boards.iter().enumerate() {
-            for s in 0..n {
-                let base = (g * n + s) * per_obs;
-                encode_one(board, s, &mut flat[base..base + per_obs]);
-            }
-        }
+        flat.par_chunks_mut(n * per_obs)
+            .zip(self.boards.par_iter())
+            .for_each(|(chunk, board)| {
+                for s in 0..n {
+                    let base = s * per_obs;
+                    encode_one(board, s, &mut chunk[base..base + per_obs]);
+                }
+            });
         let arr = Array::from_shape_vec((self.boards.len(), n, c, h, w), flat)
             .expect("shape matches length");
         arr.into_pyarray_bound(py)
@@ -179,11 +182,13 @@ impl GameBatch {
     fn alive<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<u8>> {
         let n = self.num_snakes;
         let mut flat = vec![0u8; self.boards.len() * n];
-        for (g, board) in self.boards.iter().enumerate() {
-            for s in 0..n {
-                flat[g * n + s] = board.snakes[s].alive() as u8;
-            }
-        }
+        flat.par_chunks_mut(n)
+            .zip(self.boards.par_iter())
+            .for_each(|(chunk, board)| {
+                for s in 0..n {
+                    chunk[s] = board.snakes[s].alive() as u8;
+                }
+            });
         Array::from_shape_vec((self.boards.len(), n), flat)
             .unwrap()
             .into_pyarray_bound(py)
@@ -362,10 +367,26 @@ fn encode_move_request<'py>(
     Ok((obs, me, legal.into_pyarray_bound(py)))
 }
 
+/// Configure the global Rayon thread pool used by Rust search/encoding.
+///
+/// Returns true when this call initialized the pool, false if Rayon had already
+/// been initialized and the existing pool is being used.
+#[pyfunction]
+fn set_search_threads(threads: usize) -> PyResult<bool> {
+    if threads == 0 {
+        return Err(PyValueError::new_err("threads must be > 0"));
+    }
+    match ThreadPoolBuilder::new().num_threads(threads).build_global() {
+        Ok(()) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
 #[pymodule]
 fn snek(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CHANNELS", NUM_CHANNELS)?;
     m.add_class::<GameBatch>()?;
     m.add_function(wrap_pyfunction!(encode_move_request, m)?)?;
+    m.add_function(wrap_pyfunction!(set_search_threads, m)?)?;
     Ok(())
 }

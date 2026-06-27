@@ -2,7 +2,7 @@
 
 A single search step is three calls:
   1. `batch.prepare_search(depth)` -> leaf observations `[M, C, H, W]`
-  2. one batched net forward pass -> per-leaf values `[M]`
+  2. chunked batched net forward passes -> per-leaf values `[M]`
   3. `batch.backup_search(values, tau, iters)` -> root policies `[count, N, 4]`
 
 Only the value head is needed at the leaves; the equilibrium backup turns those
@@ -26,6 +26,7 @@ def run_search(
     depth: int = 2,
     tau: float = 6.0,
     iters: int = 200,
+    eval_batch_size: int = 8192,
 ) -> np.ndarray:
     """Run one equilibrium search over every game in `batch`.
 
@@ -38,10 +39,16 @@ def run_search(
         return batch.backup_search(values, tau, iters)
 
     net.eval()
-    obs_t = torch.from_numpy(obs).to(device, non_blocking=True)
-    with net_autocast(device):
-        _, value = net(obs_t)  # value: [M] in [-1, 1]
-    values = value.detach().to("cpu", dtype=torch.float32).numpy()
+    if eval_batch_size <= 0:
+        eval_batch_size = obs.shape[0]
+    values = np.empty((obs.shape[0],), dtype=np.float32)
+    for start in range(0, obs.shape[0], eval_batch_size):
+        end = min(start + eval_batch_size, obs.shape[0])
+        obs_t = torch.from_numpy(obs[start:end]).to(device, non_blocking=True)
+        with net_autocast(device):
+            _, value = net(obs_t)  # value: [M] in [-1, 1]
+        values[start:end] = value.detach().to("cpu", dtype=torch.float32).numpy()
+        del obs_t, value
     return batch.backup_search(values, tau, iters)
 
 

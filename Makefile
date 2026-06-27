@@ -20,24 +20,40 @@ CKPT        ?=
 
 # Training defaults (all overridable)
 GENERATIONS ?= 30
-SAMPLES     ?= 12000
+TOTAL_GENERATIONS ?= 2500
+CHUNK_GENERATIONS ?= 4
+ADAPTIVE_EVERY ?= $(CHUNK_GENERATIONS)
+SAMPLES     ?= 50000
+COUNT       ?= 32
 DEPTH       ?= 2
+TAU         ?= 30
+ITERS       ?= 120
+EVAL_BATCH_SIZE ?= 8192
+SEARCH_THREADS ?= $(shell nproc 2>/dev/null || python3 -c 'import os; print(os.cpu_count() or 1)')
+TRAIN_STEPS ?= 1024
+ADAPTIVE_TRAIN_STEPS ?= 256
+BATCH_SIZE  ?= 2048
+BUFFER_SIZE ?= 500000
 FILTERS     ?= 64
 BLOCKS      ?= 6
-EVAL_EVERY  ?= 5
+EVAL_EVERY  ?= 1
+EVAL_GAMES  ?= 32
+MAX_TURNS   ?= 0
+RECORD_GAMES ?= 8
+RECORD_EVERY ?= 1
 RUN_ID      ?=
 FRESH       ?=
 ARGS        ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard serve audit clean clean-all
+.PHONY: help venv build test test-rust test-py bench lint fmt train overnight adaptive ui dashboard serve audit clean clean-all
 
 help: ## Show this help
 	@echo "snek3 targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: GENERATIONS SAMPLES DEPTH FILTERS BLOCKS EVAL_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
+	@echo "Vars: GENERATIONS TOTAL_GENERATIONS ADAPTIVE_EVERY SAMPLES COUNT DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS ADAPTIVE_TRAIN_STEPS BATCH_SIZE BUFFER_SIZE FILTERS BLOCKS EVAL_EVERY EVAL_GAMES MAX_TURNS RECORD_GAMES RECORD_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
@@ -69,9 +85,36 @@ fmt: ## Format Rust code
 
 train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENERATIONS, SAMPLES, RUN_ID, FRESH=1, ARGS...
 	$(PY) -m azsnek.train \
-		--generations $(GENERATIONS) --samples $(SAMPLES) --depth $(DEPTH) \
-		--filters $(FILTERS) --blocks $(BLOCKS) --eval-every $(EVAL_EVERY) \
+		--generations $(GENERATIONS) --samples $(SAMPLES) --count $(COUNT) \
+		--depth $(DEPTH) --tau $(TAU) --iters $(ITERS) \
+		--eval-batch-size $(EVAL_BATCH_SIZE) \
+		--search-threads $(SEARCH_THREADS) \
+		--train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) \
+		--buffer-size $(BUFFER_SIZE) \
+		--filters $(FILTERS) --blocks $(BLOCKS) \
+		--eval-every $(EVAL_EVERY) --eval-games $(EVAL_GAMES) \
+		--max-turns $(MAX_TURNS) \
+		--record-games $(RECORD_GAMES) --record-every $(RECORD_EVERY) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
+
+overnight: build ## Start a background overnight training run. Override TAU, GENERATIONS, SAMPLES, RUN_ID...
+	TAU=$(TAU) GENERATIONS=$(GENERATIONS) SAMPLES=$(SAMPLES) COUNT=$(COUNT) \
+	DEPTH=$(DEPTH) ITERS=$(ITERS) EVAL_BATCH_SIZE=$(EVAL_BATCH_SIZE) \
+	SEARCH_THREADS=$(SEARCH_THREADS) TRAIN_STEPS=$(TRAIN_STEPS) BATCH_SIZE=$(BATCH_SIZE) \
+	BUFFER_SIZE=$(BUFFER_SIZE) \
+	FILTERS=$(FILTERS) BLOCKS=$(BLOCKS) \
+	EVAL_EVERY=$(EVAL_EVERY) EVAL_GAMES=$(EVAL_GAMES) MAX_TURNS=$(MAX_TURNS) \
+	RECORD_GAMES=$(RECORD_GAMES) RECORD_EVERY=$(RECORD_EVERY) \
+	RUN_ID="$(RUN_ID)" FRESH="$(FRESH)" bash scripts/overnight_train.sh
+
+adaptive: build ## Run adaptive training in the foreground; Ctrl-C stops it
+	TOTAL_GENERATIONS=$(TOTAL_GENERATIONS) ADAPTIVE_EVERY=$(ADAPTIVE_EVERY) \
+	TAU=$(TAU) SAMPLES=$(SAMPLES) COUNT=$(COUNT) DEPTH=$(DEPTH) ITERS=$(ITERS) \
+	EVAL_BATCH_SIZE=$(EVAL_BATCH_SIZE) SEARCH_THREADS=$(SEARCH_THREADS) \
+	TRAIN_STEPS=$(ADAPTIVE_TRAIN_STEPS) BATCH_SIZE=$(BATCH_SIZE) BUFFER_SIZE=$(BUFFER_SIZE) \
+	FILTERS=$(FILTERS) BLOCKS=$(BLOCKS) EVAL_GAMES=64 MAX_TURNS=$(MAX_TURNS) \
+	RECORD_GAMES=$(RECORD_GAMES) RECORD_EVERY=$(RECORD_EVERY) \
+	RUN_ID="$(RUN_ID)" FRESH="$(FRESH)" ARGS="$(ARGS)" bash scripts/adaptive_train.sh
 
 ui: ## Build the React dashboard UI (-> python/dashboard/static)
 	cd python/dashboard/ui && npm install && npm run build

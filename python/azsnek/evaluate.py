@@ -19,6 +19,8 @@ def evaluate(
     depth: int = 2,
     tau: float = 6.0,
     iters: int = 120,
+    eval_batch_size: int = 8192,
+    max_turns: int = 0,
     seed: int = 12345,
 ) -> dict:
     """Snake 0 = our search agent (greedy), snake 1 = flood-fill baseline.
@@ -30,8 +32,8 @@ def evaluate(
     rng = np.random.default_rng(seed)
 
     steps = 0
-    while not np.all(batch.done()) and steps < 2 * board * board:
-        policy = run_search(batch, net, device, depth, tau, iters)
+    while not np.all(batch.done()) and (max_turns <= 0 or steps < max_turns):
+        policy = run_search(batch, net, device, depth, tau, iters, eval_batch_size)
         agent_act = greedy_actions(policy)[:, 0]
         base_act = batch.baseline_actions()[:, 1]
         actions = np.stack([agent_act, base_act], axis=1).astype(np.uint8)
@@ -54,3 +56,40 @@ def evaluate(
         "unfinished": unfinished,
         "win_rate": win_rate,
     }
+
+
+@torch.no_grad()
+def evaluate_vs_net(
+    net: AZNet,
+    opponent: AZNet,
+    device: torch.device,
+    board: int = 11,
+    games: int = 64,
+    depth: int = 2,
+    tau: float = 30.0,
+    iters: int = 120,
+    eval_batch_size: int = 8192,
+    max_turns: int = 0,
+    seed: int = 999,
+) -> float:
+    """Head-to-head win rate of `net` (snake 0) vs `opponent` (snake 1).
+
+    Both pick greedily from their own equilibrium search. Draws count as half.
+    This is a *relative* skill signal that isolates net improvement from the
+    fixed flood-fill baseline. Returns win_rate for `net` in [0, 1].
+    """
+    batch = snek.GameBatch(board, board, 2, count=games, seed=seed)
+    steps = 0
+    while not np.all(batch.done()) and (max_turns <= 0 or steps < max_turns):
+        pol_a = run_search(batch, net, device, depth, tau, iters, eval_batch_size)
+        pol_b = run_search(batch, opponent, device, depth, tau, iters, eval_batch_size)
+        actions = np.stack([greedy_actions(pol_a)[:, 0], greedy_actions(pol_b)[:, 1]], axis=1).astype(np.uint8)
+        batch.step(actions)
+        steps += 1
+    winners = batch.winners()
+    done = batch.done().astype(bool)
+    wins = int(np.sum(winners == 0))
+    losses = int(np.sum(winners == 1))
+    draws = int(np.sum(done & (winners == -1)))
+    decided = wins + losses + draws
+    return (wins + 0.5 * draws) / decided if decided else 0.0

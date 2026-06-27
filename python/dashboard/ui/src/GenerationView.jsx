@@ -85,7 +85,15 @@ export default function GenerationView({ run, gamesIndex, metrics }) {
 
         <div className="board-grid">
           {genData
-            ? genData.games.map((g, i) => <MiniBoard key={i} game={g} tick={tick} />)
+            ? genData.games.map((g, i) => (
+                <MiniBoard
+                  key={i}
+                  game={g}
+                  tick={tick}
+                  playing={playing}
+                  onPlay={() => setPlaying(true)}
+                />
+              ))
             : <p className="muted">no games recorded yet</p>}
         </div>
       </div>
