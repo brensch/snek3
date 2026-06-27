@@ -959,6 +959,183 @@ fn generate_selfplay<'py>(
     Ok((obs_arr, pol_arr, z_arr, stats))
 }
 
+/// Fast Albatross PROXY self-play on the ORT GPU path (no torch, no Python loop).
+///
+/// Each move: build the fixed-depth equilibrium `Forest`, evaluate every leaf
+/// once with the temperature-conditioned ONNX net (ORT), then logit-equilibrium
+/// backup at the per-generation `tau` -> LE root policy + LE root value. Records
+/// (obs, LE policy, LE root value, tau) per alive agent each step. Optionally a
+/// fraction of games use the CPU UCT agent as snake 1's opponent (overlapping the
+/// idle CPU). Returns (obs [K,C,H,W], pol [K,4], z [K], temp [K], stats).
+#[pyfunction]
+#[pyo3(signature = (onnx_path, board=11, num_snakes=2, count=512, depth=2, iters=120,
+    samples_per_gen=30000, seed=0, exploration_prob=0.15, max_turns=200,
+    tau_min=0.5, tau_max=10.0, eval_chunk=2048, uct_opp_frac=0.0, uct_iters=200))]
+#[allow(clippy::too_many_arguments)]
+fn generate_selfplay_le<'py>(
+    py: Python<'py>,
+    onnx_path: &str,
+    board: i8,
+    num_snakes: usize,
+    count: usize,
+    depth: u32,
+    iters: usize,
+    samples_per_gen: usize,
+    seed: u64,
+    exploration_prob: f32,
+    max_turns: i64,
+    tau_min: f32,
+    tau_max: f32,
+    eval_chunk: usize,
+    uct_opp_frac: f64,
+    uct_iters: usize,
+) -> PyResult<(
+    Bound<'py, PyArray4<f32>>,
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray1<f32>>,
+    Bound<'py, PyArray1<f32>>,
+    Bound<'py, PyDict>,
+)> {
+    use std::time::Instant;
+    let c = NUM_CHANNELS;
+    let oh = obs_side(board as usize);
+    let ow = obs_side(board as usize);
+    let obs_size = c * oh * ow;
+    let n = num_snakes;
+    let onnx = onnx_path.to_string();
+
+    type Out = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, usize, usize, u64, usize, f64);
+    let res: Result<Out, String> = py.allow_threads(move || {
+        let mut net = Net::load(&onnx).map_err(|e| e.to_string())?;
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+        let mut boards: Vec<Board> =
+            (0..count).map(|_| standard_start(board, board, n, &mut rng)).collect();
+        let mut turns = vec![0u32; count];
+        let uct_game: Vec<bool> =
+            (0..count).map(|_| rng.gen::<f64>() < uct_opp_frac).collect();
+        let tau = rng.gen::<f32>() * (tau_max - tau_min) + tau_min; // per-generation temperature
+        let tau_vec = vec![tau; n];
+
+        let mut out_obs: Vec<f32> = Vec::new();
+        let mut out_pol: Vec<f32> = Vec::new();
+        let mut out_z: Vec<f32> = Vec::new();
+        let mut out_temp: Vec<f32> = Vec::new();
+        let (mut collected, mut games, mut draws, mut turns_total) = (0usize, 0usize, 0usize, 0u64);
+        let (mut inf_count, mut t_fwd) = (0usize, 0.0f64);
+        let mut actions: Vec<Move> = vec![Move::Up; n];
+
+        while collected < samples_per_gen {
+            let mut forest = Forest::build(&boards, depth);
+            let ec = forest.eval_count();
+            if ec == 0 {
+                for g in 0..count {
+                    boards[g] = standard_start(board, board, n, &mut rng);
+                    turns[g] = 0;
+                }
+                continue;
+            }
+            let mut leaf_obs = vec![0.0f32; ec * obs_size];
+            forest.write_observations(&mut leaf_obs);
+            let mut values = vec![0.0f32; ec];
+            let mut s = 0usize;
+            while s < ec {
+                let e = (s + eval_chunk).min(ec);
+                let temp_chunk = vec![tau; e - s];
+                let f = Instant::now();
+                let (_pol, val) = net
+                    .forward_temp(&leaf_obs[s * obs_size..e * obs_size], Some(&temp_chunk), e - s, c, oh, ow)
+                    .map_err(|er| er.to_string())?;
+                t_fwd += f.elapsed().as_secs_f64();
+                inf_count += e - s;
+                values[s..e].copy_from_slice(&val);
+                s = e;
+            }
+            let (root_pol, root_val) = forest.backup(&values, &tau_vec, iters);
+
+            // Record current-state targets for every alive agent.
+            for g in 0..count {
+                let bd = &boards[g];
+                for sk in 0..n {
+                    if !bd.snakes[sk].alive() {
+                        continue;
+                    }
+                    let base = out_obs.len();
+                    out_obs.resize(base + obs_size, 0.0);
+                    encode_into(bd, sk, &mut out_obs[base..base + obs_size]);
+                    let pi = (g * n + sk) * 4;
+                    out_pol.extend_from_slice(&root_pol[pi..pi + 4]);
+                    out_z.push(root_val[g * n + sk]);
+                    out_temp.push(tau);
+                    collected += 1;
+                }
+            }
+
+            // Batched UCT opponent moves (CPU, parallel across the chosen games).
+            let mut uct_move: Vec<Option<Move>> = vec![None; count];
+            if uct_opp_frac > 0.0 && n >= 2 {
+                let idx: Vec<usize> = (0..count)
+                    .filter(|&g| uct_game[g] && boards[g].snakes[1].alive())
+                    .collect();
+                if !idx.is_empty() {
+                    let ub: Vec<Board> = idx.iter().map(|&g| boards[g].clone()).collect();
+                    let um = uct_actions(&ub, uct_iters, 1.4, seed ^ turns_total ^ 0x5DEECE66D);
+                    for (k, &g) in idx.iter().enumerate() {
+                        uct_move[g] = Some(um[k][1]);
+                    }
+                }
+            }
+
+            // Play a move in every game.
+            for g in 0..count {
+                for sk in 0..n {
+                    let base = (g * n + sk) * 4;
+                    actions[sk] = sample_move(&root_pol[base..base + 4], exploration_prob, &mut rng);
+                }
+                if let Some(m) = uct_move[g] {
+                    actions[1] = m;
+                }
+                boards[g].step_and_spawn(&actions, &mut rng);
+                turns[g] += 1;
+                turns_total += 1;
+            }
+
+            // Finalize finished / overrun games.
+            for g in 0..count {
+                let overrun = max_turns > 0 && turns[g] as i64 >= max_turns;
+                if boards[g].is_terminal() || overrun {
+                    games += 1;
+                    if boards[g].winner().is_none() {
+                        draws += 1;
+                    }
+                    boards[g] = standard_start(board, board, n, &mut rng);
+                    turns[g] = 0;
+                }
+            }
+        }
+        Ok((out_obs, out_pol, out_z, out_temp, games, draws, turns_total, inf_count, t_fwd))
+    });
+
+    let (out_obs, out_pol, out_z, out_temp, games, draws, turns_total, inf_count, t_fwd) =
+        res.map_err(PyValueError::new_err)?;
+    let k = out_z.len();
+    let obs_arr = Array::from_shape_vec((k, c, oh, ow), out_obs)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?
+        .into_pyarray_bound(py);
+    let pol_arr = Array::from_shape_vec((k, 4), out_pol)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?
+        .into_pyarray_bound(py);
+    let z_arr = PyArray1::from_vec_bound(py, out_z);
+    let temp_arr = PyArray1::from_vec_bound(py, out_temp);
+    let stats = PyDict::new_bound(py);
+    stats.set_item("games", games)?;
+    stats.set_item("draws", draws)?;
+    stats.set_item("turns", turns_total)?;
+    stats.set_item("inference_count", inf_count)?;
+    stats.set_item("inference_seconds", t_fwd)?;
+    stats.set_item("inference_per_sec", if t_fwd > 0.0 { inf_count as f64 / t_fwd } else { 0.0 })?;
+    Ok((obs_arr, pol_arr, z_arr, temp_arr, stats))
+}
+
 #[pymodule]
 fn snek(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CHANNELS", NUM_CHANNELS)?;
@@ -966,5 +1143,6 @@ fn snek(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode_move_request, m)?)?;
     m.add_function(wrap_pyfunction!(set_search_threads, m)?)?;
     m.add_function(wrap_pyfunction!(generate_selfplay, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_selfplay_le, m)?)?;
     Ok(())
 }
