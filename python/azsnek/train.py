@@ -20,7 +20,7 @@ import snek
 import torch
 import torch.nn.functional as F
 
-from .evaluate import evaluate
+from .evaluate import evaluate, evaluate_vs_net
 from .net import AZNet, NetConfig, autocast as net_autocast, device_auto
 from .recorder import record_games
 from .runlog import RunWriter
@@ -100,6 +100,10 @@ def main():
     ap.add_argument("--max-turns", type=int, default=0, help="0 plays until terminal; positive values cap games as draws")
     ap.add_argument("--eval-every", type=int, default=1)
     ap.add_argument("--eval-games", type=int, default=32)
+    ap.add_argument("--league-every", type=int, default=20, help="snapshot a league checkpoint every N gens")
+    ap.add_argument("--league-keep", type=int, default=8, help="keep this many recent league checkpoints (plus the anchor)")
+    ap.add_argument("--relative-every", type=int, default=5, help="measure self-play win_rate vs past checkpoints every N gens")
+    ap.add_argument("--relative-games", type=int, default=64, help="games per relative (net-vs-past) eval")
     ap.add_argument("--filters", type=int, default=64)
     ap.add_argument("--blocks", type=int, default=6)
     ap.add_argument("--ckpt-dir", type=str, default=None, help="serving weights dir (default: runs/<run-id>/ckpt)")
@@ -224,6 +228,34 @@ def main():
         {"generation": start_gen - 1, "running": True, "total_generations": args.generations}
     )
 
+    # Relative-skill "league": snapshot past nets and play current vs them at the
+    # (shallow) training depth. Isolates net improvement from the fixed baseline.
+    league_dir = ckpt_dir / "league"
+    league_dir.mkdir(parents=True, exist_ok=True)
+    opp_net = AZNet(cfg).to(device)
+
+    def league_ckpts():
+        return sorted(league_dir.glob("gen_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
+
+    def relative_winrates(gen: int) -> dict:
+        ckpts = league_ckpts()
+        if not ckpts:
+            return {}
+        out = {}
+        opp_net.load_state_dict(torch.load(ckpts[0], map_location=device))  # anchor (phase start)
+        out["self_vs_anchor"] = round(
+            evaluate_vs_net(net, opp_net, device, games=args.relative_games, depth=args.depth,
+                            tau=args.tau, iters=args.iters, eval_batch_size=args.eval_batch_size,
+                            max_turns=args.max_turns, seed=3000 + gen), 3)
+        if len(ckpts) >= 2:  # rolling: a checkpoint a couple league-steps back
+            recent = ckpts[max(0, len(ckpts) - 3)]
+            opp_net.load_state_dict(torch.load(recent, map_location=device))
+            out["self_vs_recent"] = round(
+                evaluate_vs_net(net, opp_net, device, games=args.relative_games, depth=args.depth,
+                                tau=args.tau, iters=args.iters, eval_batch_size=args.eval_batch_size,
+                                max_turns=args.max_turns, seed=5000 + gen), 3)
+        return out
+
     buffer = ReplayBuffer(args.buffer_size)
     metrics_history = []
     if run.metrics_path.exists() and not args.fresh:
@@ -347,6 +379,20 @@ def main():
                 best_win = res["win_rate"]
                 torch.save(net.state_dict(), ckpt_dir / "best.pt")
                 msg += " *best*"
+
+        # League: snapshot a past-self, then measure relative skill at the shallow
+        # training depth. Seed an anchor immediately so progress is measured from here.
+        if args.relative_every:
+            if not league_ckpts() or (gen % args.league_every == 0):
+                torch.save(net.state_dict(), league_dir / f"gen_{gen:06d}.pt")
+                extra = league_ckpts()[1:]  # keep anchor (oldest) + most recent league_keep
+                for old in extra[: max(0, len(extra) - args.league_keep)]:
+                    old.unlink(missing_ok=True)
+            if gen % args.relative_every == 0:
+                rel = relative_winrates(gen)
+                metric.update(rel)
+                if rel:
+                    msg += " | self " + " ".join(f"{k.split('_')[-1]}={v:.2f}" for k, v in rel.items())
 
         # Record replays for the dashboard's live game stream (every gen by default).
         if args.record_games > 0 and args.record_every and (gen % args.record_every == 0):
