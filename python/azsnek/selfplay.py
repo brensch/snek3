@@ -16,7 +16,7 @@ import snek
 import torch
 
 from .net import AZNet
-from .search import run_search, sample_actions
+from .search import mcts_search, sample_actions
 
 
 @dataclass
@@ -24,21 +24,14 @@ class SelfPlayConfig:
     board: int = 11
     num_snakes: int = 2
     count: int = 32  # parallel games
-    depth: int = 2
-    tau: float = 30.0
-    iters: int = 120
+    sims: int = 128  # MCTS simulations per move
+    c_puct: float = 1.5  # PUCT exploration constant
     eval_batch_size: int = 8192
     samples_per_gen: int = 20_000
     max_turns: int = 0  # 0 = play until terminal; positive values cap games as draws
     dirichlet_frac: float = 0.25  # root exploration noise mix (0 disables)
     dirichlet_alpha: float = 0.3
-    # Value-target shaping (Albatross-style): discounted TD(lambda) return of a
-    # dense per-step reward, instead of the undiscounted terminal win/loss.
-    gamma: float = 0.97  # discount; <1 makes surviving longer worth more
-    lam: float = 0.5  # TD(lambda): 0 = pure bootstrap, 1 = discounted Monte-Carlo
-    living_reward: float = 0.01  # per-step reward for staying alive
-    terminal_reward: float = 1.0  # +win / -death at the end
-    exploration_prob: float = 0.25  # mix this much uniform-legal into the play policy
+    exploration_prob: float = 0.25  # mix this much uniform-legal into the played action
 
 
 @dataclass
@@ -116,65 +109,25 @@ class _Slot:
     """Pending records for one parallel game until it finishes."""
 
     obs: list = field(default_factory=list)  # each [N, C, H, W]
-    pol: list = field(default_factory=list)  # each [N, 4]
+    pol: list = field(default_factory=list)  # each [N, 4] MCTS visit-count policy
     alive: list = field(default_factory=list)  # each [N] bool
-    val: list = field(default_factory=list)  # each [N] root bootstrap value
-    reward: list = field(default_factory=list)  # each [N] step reward
     turns: int = 0
 
 
-def _step_reward(
-    alive_before: np.ndarray,  # [N] bool, alive at this state
-    alive_after: np.ndarray,  # [N] bool, alive after the step
-    ended: bool,
-    winner: int,  # winner index, or -1 for draw / not-ended
-    living: float,
-    terminal: float,
-) -> np.ndarray:
-    """Dense per-snake reward for the transition out of this state."""
-    n = alive_before.shape[0]
-    r = np.zeros(n, dtype=np.float32)
-    for p in range(n):
-        if not alive_before[p]:
-            continue
-        if not alive_after[p]:  # died this step
-            r[p] = -terminal
-        elif ended and winner == p:  # last snake standing
-            r[p] = terminal
-        elif ended:  # game ended but p didn't win outright (draw / turn cap)
-            r[p] = 0.0
-        else:  # survived, game continues
-            r[p] = living
-    return r
-
-
-def _lambda_returns(slot: _Slot, player: int, gamma: float, lam: float) -> tuple[list[int], np.ndarray]:
-    """TD(lambda) return target for `player` over the steps it was alive.
-
-    Snakes never resurrect, so a player's live steps are a contiguous prefix.
-    Returns (live_step_indices, targets) with targets clipped to [-1, 1] to match
-    the tanh value head."""
-    steps = [t for t in range(len(slot.alive)) if slot.alive[t][player]]
-    if not steps:
-        return steps, np.zeros(0, dtype=np.float32)
-    targets = np.zeros(len(steps), dtype=np.float32)
-    g_next = 0.0
-    for i in range(len(steps) - 1, -1, -1):
-        t = steps[i]
-        r_t = float(slot.reward[t][player])
-        if i == len(steps) - 1:  # player's terminal step: no bootstrap
-            g = r_t
-        else:
-            v_next = float(slot.val[steps[i + 1]][player])
-            g = r_t + gamma * ((1.0 - lam) * v_next + lam * g_next)
-        g_next = g
-        targets[i] = g
-    np.clip(targets, -1.0, 1.0, out=targets)
-    return steps, targets
+def _outcome(winner: int, n: int) -> np.ndarray:
+    """Undiscounted value target per snake: +1 winner, -1 loser, 0 draw."""
+    if winner < 0:
+        return np.zeros(n, dtype=np.float32)
+    z = -np.ones(n, dtype=np.float32)
+    z[winner] = 1.0
+    return z
 
 
 @torch.no_grad()
 def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -> Samples:
+    """AlphaZero self-play: MCTS produces a visit-count policy target per move;
+    the value target is the (undiscounted) game outcome from each snake's
+    perspective, back-filled when the game ends."""
     rng = np.random.default_rng(seed)
     batch = snek.GameBatch(cfg.board, cfg.board, cfg.num_snakes, count=cfg.count, seed=seed)
     slots = [_Slot() for _ in range(cfg.count)]
@@ -187,48 +140,41 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
     games_total = 0
 
     while collected < cfg.samples_per_gen:
-        policy, root_vals = run_search(
-            batch, net, device, cfg.depth, cfg.tau, cfg.iters, cfg.eval_batch_size,
-            return_root_values=True,
-        )  # policy [count, N, 4], root_vals [count, N]
+        policy, _root_vals = mcts_search(
+            batch, net, device, sims=cfg.sims, c_puct=cfg.c_puct,
+            eval_batch_size=cfg.eval_batch_size,
+        )  # policy [count, N, 4] = root visit-count distribution
         obs = batch.encode()  # [count, N, C, H, W]
-        alive = batch.alive().astype(bool)  # [count, N], alive at this state
-        turns_total += int(np.sum(batch.done() == 0))  # games still live this step
+        alive = batch.alive().astype(bool)  # [count, N]
+        turns_total += int(np.sum(batch.done() == 0))
         for g in range(cfg.count):
             slots[g].obs.append(obs[g])
             slots[g].pol.append(policy[g])
             slots[g].alive.append(alive[g])
-            slots[g].val.append(root_vals[g])
             slots[g].turns += 1
 
-        # Explore: mix Dirichlet noise + uniform-legal into the *played* action
-        # (the stored policy target stays the clean search policy).
+        # Explore: mix Dirichlet + uniform-legal into the *played* action; the
+        # stored policy target stays the clean MCTS visit-count distribution.
         play_policy = add_root_noise(policy, rng, cfg.dirichlet_frac, cfg.dirichlet_alpha)
         play_policy = mix_uniform(play_policy, cfg.exploration_prob)
         actions = sample_actions(play_policy, rng)
         batch.step(actions)
         done = batch.done()
         winners = batch.winners()
-        alive_after = batch.alive().astype(bool)  # [count, N], after the step
 
         for g in range(cfg.count):
             overrun = cfg.max_turns > 0 and slots[g].turns >= cfg.max_turns
-            ended = bool(done[g]) or overrun
-            slots[g].reward.append(
-                _step_reward(alive[g], alive_after[g], ended, int(winners[g]),
-                             cfg.living_reward, cfg.terminal_reward)
-            )
-            if not ended:
+            if not (bool(done[g]) or overrun):
                 continue
-            # Finalize: per-player discounted TD(lambda) return over its live steps.
-            for p in range(cfg.num_snakes):
-                steps, targets = _lambda_returns(slots[g], p, cfg.gamma, cfg.lam)
-                if not steps:
+            z = _outcome(int(winners[g]), cfg.num_snakes)
+            for rec_obs, rec_pol, rec_alive in zip(slots[g].obs, slots[g].pol, slots[g].alive):
+                live = rec_alive
+                if not live.any():
                     continue
-                out_obs.append(np.stack([slots[g].obs[t][p] for t in steps]))
-                out_pol.append(np.stack([slots[g].pol[t][p] for t in steps]))
-                out_z.append(targets)
-                collected += len(steps)
+                out_obs.append(rec_obs[live])
+                out_pol.append(rec_pol[live])
+                out_z.append(z[live])
+                collected += int(live.sum())
             slots[g] = _Slot()
             games_total += 1
 

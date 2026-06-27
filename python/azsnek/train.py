@@ -98,11 +98,9 @@ def main():
     ap.add_argument("--batch-size", type=int, default=2048, help="SGD minibatch size")
     ap.add_argument("--buffer-size", type=int, default=500_000, help="replay buffer capacity (samples)")
     ap.add_argument("--max-turns", type=int, default=0, help="0 plays until terminal; positive values cap games as draws")
-    # Value-target shaping (discounted TD(lambda) of a dense reward).
-    ap.add_argument("--gamma", type=float, default=0.97, help="reward discount; <1 makes surviving longer valuable")
-    ap.add_argument("--lam", type=float, default=0.5, help="TD(lambda): 0=bootstrap, 1=discounted Monte-Carlo")
-    ap.add_argument("--living-reward", type=float, default=0.01, help="per-step reward for staying alive")
-    ap.add_argument("--terminal-reward", type=float, default=1.0, help="+win / -death reward at game end")
+    # AlphaZero MCTS search.
+    ap.add_argument("--sims", type=int, default=128, help="MCTS simulations per move")
+    ap.add_argument("--c-puct", type=float, default=1.5, help="PUCT exploration constant")
     ap.add_argument("--exploration-prob", type=float, default=0.25, help="uniform-legal mix into the played action")
     ap.add_argument("--eval-every", type=int, default=1)
     ap.add_argument("--eval-games", type=int, default=32)
@@ -144,16 +142,11 @@ def main():
 
     sp = SelfPlayConfig(
         count=args.count,
-        depth=args.depth,
-        tau=args.tau,
-        iters=args.iters,
+        sims=args.sims,
+        c_puct=args.c_puct,
         eval_batch_size=args.eval_batch_size,
         samples_per_gen=args.samples,
         max_turns=args.max_turns,
-        gamma=args.gamma,
-        lam=args.lam,
-        living_reward=args.living_reward,
-        terminal_reward=args.terminal_reward,
         exploration_prob=args.exploration_prob,
     )
     run = RunWriter(
@@ -255,15 +248,15 @@ def main():
         out = {}
         opp_net.load_state_dict(torch.load(ckpts[0], map_location=device))  # anchor (phase start)
         out["self_vs_anchor"] = round(
-            evaluate_vs_net(net, opp_net, device, games=args.relative_games, depth=args.depth,
-                            tau=args.tau, iters=args.iters, eval_batch_size=args.eval_batch_size,
+            evaluate_vs_net(net, opp_net, device, games=args.relative_games, sims=args.sims,
+                            c_puct=args.c_puct, eval_batch_size=args.eval_batch_size,
                             max_turns=args.max_turns, seed=3000 + gen), 3)
         if len(ckpts) >= 2:  # rolling: a checkpoint a couple league-steps back
             recent = ckpts[max(0, len(ckpts) - 3)]
             opp_net.load_state_dict(torch.load(recent, map_location=device))
             out["self_vs_recent"] = round(
-                evaluate_vs_net(net, opp_net, device, games=args.relative_games, depth=args.depth,
-                                tau=args.tau, iters=args.iters, eval_batch_size=args.eval_batch_size,
+                evaluate_vs_net(net, opp_net, device, games=args.relative_games, sims=args.sims,
+                                c_puct=args.c_puct, eval_batch_size=args.eval_batch_size,
                                 max_turns=args.max_turns, seed=5000 + gen), 3)
         return out
 
@@ -375,8 +368,8 @@ def main():
 
         if args.eval_every and (gen + 1) % args.eval_every == 0:
             res = evaluate(
-                net, device, games=args.eval_games, depth=args.depth, tau=args.tau,
-                iters=args.iters, eval_batch_size=args.eval_batch_size, max_turns=args.max_turns
+                net, device, games=args.eval_games, sims=args.sims, c_puct=args.c_puct,
+                eval_batch_size=args.eval_batch_size, max_turns=args.max_turns
             )
             metric.update(
                 win_rate=round(res["win_rate"], 3),

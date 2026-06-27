@@ -7,7 +7,7 @@ import snek
 import torch
 
 from .net import AZNet
-from .search import greedy_actions, run_search
+from .search import greedy_actions, mcts_search
 
 
 @torch.no_grad()
@@ -16,30 +16,26 @@ def evaluate(
     device: torch.device,
     board: int = 11,
     games: int = 200,
-    depth: int = 2,
-    tau: float = 6.0,
-    iters: int = 120,
+    sims: int = 128,
+    c_puct: float = 1.5,
     eval_batch_size: int = 8192,
     max_turns: int = 0,
     seed: int = 12345,
 ) -> dict:
-    """Snake 0 = our search agent (greedy), snake 1 = flood-fill baseline.
-
-    Returns a dict with win/loss/draw counts and the agent win rate (draws count
-    as half), over `games` parallel duels.
-    """
+    """Snake 0 = our MCTS agent (greedy / most-visited), snake 1 = flood-fill
+    baseline. Returns win/loss/draw counts and the agent win rate (draws = half)
+    over `games` parallel duels."""
     batch = snek.GameBatch(board, board, 2, count=games, seed=seed)
-    rng = np.random.default_rng(seed)
 
     steps = 0
     while not np.all(batch.done()) and (max_turns <= 0 or steps < max_turns):
-        policy = run_search(batch, net, device, depth, tau, iters, eval_batch_size)
+        policy, _ = mcts_search(batch, net, device, sims=sims, c_puct=c_puct,
+                                eval_batch_size=eval_batch_size)
         agent_act = greedy_actions(policy)[:, 0]
         base_act = batch.baseline_actions()[:, 1]
         actions = np.stack([agent_act, base_act], axis=1).astype(np.uint8)
         batch.step(actions)
         steps += 1
-        _ = rng  # reserved for optional stochastic play
 
     winners = batch.winners()
     done = batch.done().astype(bool)
@@ -65,24 +61,23 @@ def evaluate_vs_net(
     device: torch.device,
     board: int = 11,
     games: int = 64,
-    depth: int = 2,
-    tau: float = 30.0,
-    iters: int = 120,
+    sims: int = 128,
+    c_puct: float = 1.5,
     eval_batch_size: int = 8192,
     max_turns: int = 0,
     seed: int = 999,
 ) -> float:
     """Head-to-head win rate of `net` (snake 0) vs `opponent` (snake 1).
 
-    Both pick greedily from their own equilibrium search. Draws count as half.
-    This is a *relative* skill signal that isolates net improvement from the
-    fixed flood-fill baseline. Returns win_rate for `net` in [0, 1].
+    Both pick greedily from their own MCTS. Draws count as half. A *relative*
+    skill signal that isolates net improvement from the fixed flood-fill
+    baseline. Returns win_rate for `net` in [0, 1].
     """
     batch = snek.GameBatch(board, board, 2, count=games, seed=seed)
     steps = 0
     while not np.all(batch.done()) and (max_turns <= 0 or steps < max_turns):
-        pol_a = run_search(batch, net, device, depth, tau, iters, eval_batch_size)
-        pol_b = run_search(batch, opponent, device, depth, tau, iters, eval_batch_size)
+        pol_a, _ = mcts_search(batch, net, device, sims=sims, c_puct=c_puct, eval_batch_size=eval_batch_size)
+        pol_b, _ = mcts_search(batch, opponent, device, sims=sims, c_puct=c_puct, eval_batch_size=eval_batch_size)
         actions = np.stack([greedy_actions(pol_a)[:, 0], greedy_actions(pol_b)[:, 1]], axis=1).astype(np.uint8)
         batch.step(actions)
         steps += 1
