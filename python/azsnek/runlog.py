@@ -73,8 +73,11 @@ class RunWriter:
             {"updated": datetime.now(timezone.utc).isoformat(), **status},
         )
 
-    def save_games(self, gen: int, games: list[dict]) -> None:
-        self.write_json(f"games/gen_{gen:04d}.json", {"gen": gen, "games": games})
+    def save_games(self, gen: int, games: list[dict], summary: dict | None = None) -> None:
+        payload = {"gen": gen, "games": games}
+        if summary is not None:
+            payload["selfplay"] = summary
+        self.write_json(f"games/gen_{gen:04d}.json", payload)
 
     def prune_games(self, keep: int) -> None:
         """Keep only the `keep` most recent game files to bound disk usage."""

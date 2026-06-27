@@ -1,12 +1,25 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-// Full-width responsive line chart: win-rate (0..1) + normalized policy/value
-// losses, x = generation. Resizes to its container.
+// Fixed-scale line chart: win-rate (0..1) + normalized policy/value losses,
+// x = generation. Width is controlled by px/gen and can be panned horizontally.
 export default function MetricsChart({ metrics }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
+  const dragRef = useRef(null);
   const [width, setWidth] = useState(900);
+  const [pxPerGen, setPxPerGen] = useState(18);
+  const [panX, setPanX] = useState(0);
   const [hover, setHover] = useState(null);
+
+  const plot = useMemo(() => {
+    if (!metrics.length) return { gmin: 0, gmax: 1, contentWidth: 0, maxPan: 0 };
+    const gens = metrics.map((m) => m.gen);
+    const gmin = Math.min(...gens);
+    const gmax = Math.max(...gens, gmin + 1);
+    const contentWidth = Math.max(1, (gmax - gmin) * pxPerGen);
+    const plotWidth = Math.max(1, width - 42 - 14);
+    return { gmin, gmax, contentWidth, maxPan: Math.max(0, contentWidth - plotWidth) };
+  }, [metrics, pxPerGen, width]);
 
   useLayoutEffect(() => {
     const el = wrapRef.current;
@@ -15,6 +28,33 @@ export default function MetricsChart({ metrics }) {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  useEffect(() => {
+    setPanX((p) => Math.min(Math.max(0, p), plot.maxPan));
+  }, [plot.maxPan]);
+
+  const beginDrag = (event) => {
+    const el = wrapRef.current;
+    if (!el || event.button === 1 || event.target?.closest?.("input,button")) return;
+    dragRef.current = { x: event.clientX, panX };
+    el.setPointerCapture?.(event.pointerId);
+    el.classList.add("dragging");
+  };
+
+  const drag = (event) => {
+    const el = wrapRef.current;
+    const start = dragRef.current;
+    if (!el || !start) return;
+    setPanX(Math.min(Math.max(0, start.panX - (event.clientX - start.x)), plot.maxPan));
+  };
+
+  const endDrag = (event) => {
+    const el = wrapRef.current;
+    dragRef.current = null;
+    if (!el) return;
+    el.releasePointerCapture?.(event.pointerId);
+    el.classList.remove("dragging");
+  };
 
   useEffect(() => {
     const c = canvasRef.current;
@@ -28,9 +68,8 @@ export default function MetricsChart({ metrics }) {
       ctx.fillText("no metrics yet", padL, H / 2);
       return;
     }
-    const gens = metrics.map((m) => m.gen);
-    const gmin = Math.min(...gens), gmax = Math.max(...gens, gmin + 1);
-    const x = (g) => padL + (W - padL - padR) * (g - gmin) / ((gmax - gmin) || 1);
+    const { gmin, gmax } = plot;
+    const x = (g) => padL + (g - gmin) * pxPerGen - panX;
     ctx.strokeStyle = "#21262d";
     ctx.fillStyle = "#8b949e";
     ctx.lineWidth = 1;
@@ -81,7 +120,7 @@ export default function MetricsChart({ metrics }) {
     ctx.fillStyle = "#8b949e";
     ctx.fillText("gen " + gmin, padL, H - 7);
     ctx.fillText("gen " + gmax, W - padR - 44, H - 7);
-  }, [metrics, width, hover]);
+  }, [metrics, width, hover, pxPerGen, panX, plot]);
 
   const updateHover = (event) => {
     const c = canvasRef.current;
@@ -89,10 +128,8 @@ export default function MetricsChart({ metrics }) {
     const rect = c.getBoundingClientRect();
     const px = (event.clientX - rect.left) * (c.width / rect.width);
     const py = (event.clientY - rect.top) * (c.height / rect.height);
-    const W = c.width, padL = 42, padR = 14;
-    const gens = metrics.map((m) => m.gen);
-    const gmin = Math.min(...gens), gmax = Math.max(...gens, gmin + 1);
-    const x = (g) => padL + (W - padL - padR) * (g - gmin) / ((gmax - gmin) || 1);
+    const padL = 42;
+    const x = (g) => padL + (g - plot.gmin) * pxPerGen - panX;
     const nearest = metrics.reduce((best, metric) => {
       const dist = Math.abs(x(metric.gen) - px);
       return dist < best.dist ? { metric, dist } : best;
@@ -111,34 +148,54 @@ export default function MetricsChart({ metrics }) {
     ["value loss", fmt(hover.metric.value_loss)],
     ["target entropy", fmt(hover.metric.target_entropy)],
     ["target max prob", fmt(hover.metric.target_max_prob)],
+    ["inference / sec", hover.metric.inference_per_sec != null ? Number(hover.metric.inference_per_sec).toLocaleString() : null],
+    ["GPU busy", hover.metric.gpu_busy_pct != null ? `${Number(hover.metric.gpu_busy_pct).toFixed(1)}%` : null],
+    ["short draws skipped", hover.metric.skipped_short_draw_games != null ? Number(hover.metric.skipped_short_draw_games).toLocaleString() : null],
+    ["skipped samples", hover.metric.skipped_short_draw_samples != null ? Number(hover.metric.skipped_short_draw_samples).toLocaleString() : null],
+    ["eval sec", fmt(hover.metric.eval_seconds, 1)],
+    ["record sec", fmt(hover.metric.record_seconds, 1)],
     ["samples", hover.metric.samples != null ? Number(hover.metric.samples).toLocaleString() : null],
-    ["buffer", hover.metric.buffer_size != null ? Number(hover.metric.buffer_size).toLocaleString() : null],
+    ["buffer", hover.metric.buffer != null ? Number(hover.metric.buffer).toLocaleString() : null],
   ].filter(([, value]) => value != null) : [];
 
   const tooltipLeft = hover ? Math.min(Math.max(hover.x + 12, 8), Math.max(8, width - 190)) : 0;
   const tooltipTop = hover ? (hover.y > 145 ? Math.max(8, hover.y - 124) : Math.min(210, hover.y + 12)) : 0;
 
   return (
-    <div ref={wrapRef} className="chart-wrap">
-      <canvas
-        ref={canvasRef}
-        width={width}
-        height={260}
-        style={{ width: "100%" }}
-        onPointerMove={updateHover}
-        onPointerLeave={() => setHover(null)}
-      />
-      {hover?.metric && (
-        <div className="chart-tooltip" style={{ left: tooltipLeft, top: tooltipTop }}>
-          <b>gen {hover.metric.gen}</b>
-          {tooltipRows.map(([label, value]) => (
-            <span key={label}>
-              <em>{label}</em>
-              <strong>{value}</strong>
-            </span>
-          ))}
-        </div>
-      )}
+    <div
+      ref={wrapRef}
+      className="chart-panel"
+      onPointerDown={beginDrag}
+      onPointerMove={drag}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+    >
+      <div className="chart-toolbar">
+        <label className="chk">width <input type="range" min={6} max={48} value={pxPerGen} onChange={(e) => setPxPerGen(+e.target.value)} /></label>
+        <span className="muted">{pxPerGen}px/gen</span>
+        {plot.maxPan > 0 && <span className="muted">drag chart to pan</span>}
+      </div>
+      <div className="chart-wrap">
+        <canvas
+          ref={canvasRef}
+          width={width}
+          height={260}
+          style={{ width: "100%" }}
+          onPointerMove={updateHover}
+          onPointerLeave={() => setHover(null)}
+        />
+        {hover?.metric && (
+          <div className="chart-tooltip" style={{ left: tooltipLeft, top: tooltipTop }}>
+            <b>gen {hover.metric.gen}</b>
+            {tooltipRows.map(([label, value]) => (
+              <span key={label}>
+                <em>{label}</em>
+                <strong>{value}</strong>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
       <div className="legend">
         <span><i className="swatch" style={{ background: "#34d399" }} />win-rate vs baseline (0–1)</span>
         <span><i className="swatch" style={{ background: "#f59e0b" }} />policy loss</span>

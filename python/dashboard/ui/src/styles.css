@@ -52,9 +52,88 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
 .gentable tbody tr:hover { background: #1b2230; }
 .gentable tbody tr.active { background: #15243a; box-shadow: inset 3px 0 0 var(--accent); }
 .gentable tbody tr.active td:first-child { color: var(--accent); font-weight: 600; }
+.game-summary {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1.1fr);
+  gap: 16px;
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+@media (max-width: 900px) { .game-summary { grid-template-columns: 1fr; } }
+.summary-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 10px 18px;
+  align-content: start;
+}
+.summary-stats span { min-width: 0; }
+.summary-stats b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
+.summary-stats em { display: block; color: var(--muted); font-size: 11px; font-style: normal; }
+.length-hist {
+  display: flex;
+  align-items: end;
+  gap: 6px;
+  min-height: 72px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.hist-bin {
+  display: grid;
+  grid-template-rows: 46px 14px 14px;
+  justify-items: center;
+  min-width: 34px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.hist-bin i {
+  align-self: end;
+  width: 12px;
+  border-radius: 3px 3px 0 0;
+  background: #60a5fa;
+}
+.hist-bin b { color: var(--fg); font-size: 10px; font-weight: 600; }
 
-/* Responsive grid of mini game boards */
-.board-grid { flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+/* Fixed-width mini game boards grouped by opponent class. */
+.board-scroll {
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+  cursor: default;
+}
+.board-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--tile-width, 210px), var(--tile-width, 210px)));
+  gap: 12px;
+  width: 100%;
+  min-width: 100%;
+}
+.board-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 100%;
+}
+.board-group {
+  min-width: 0;
+}
+.board-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+  white-space: nowrap;
+}
+.board-group-head h3 {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
 .board-cell { background: #0d1117; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
 .board-cell canvas { width: 100%; height: auto; }
 .replay-controls { display: grid; grid-template-columns: 28px 1fr; align-items: center; gap: 8px; margin-top: 8px; }
@@ -79,7 +158,10 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
 .board-meta .turn { margin-left: auto; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .board-snakes { display: flex; gap: 12px; margin-top: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; }
 canvas { display: block; background: #0b0e13; border-radius: 8px; max-width: 100%; }
-.chart-wrap { position: relative; width: 100%; }
+.chart-panel { min-width: 0; cursor: grab; }
+.chart-panel.dragging { cursor: grabbing; user-select: none; }
+.chart-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.chart-wrap { position: relative; width: 100%; touch-action: pan-x; }
 .chart-tooltip {
   position: absolute;
   z-index: 1;

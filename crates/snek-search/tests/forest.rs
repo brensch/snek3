@@ -16,7 +16,10 @@ fn build_collects_leaf_observations() {
     b.add_snake(&[Point::new(8, 8), Point::new(8, 9)]);
 
     let forest = Forest::build(std::slice::from_ref(&b), 2);
-    assert!(forest.eval_count() > 0, "depth-2 search has leaves to evaluate");
+    assert!(
+        forest.eval_count() > 0,
+        "depth-2 search has leaves to evaluate"
+    );
     assert_eq!(forest.obs_size(), 9 * 11 * 11);
 
     let mut obs = vec![0.0f32; forest.eval_count() * forest.obs_size()];
@@ -42,7 +45,10 @@ fn policy_is_a_distribution_over_legal_moves() {
     assert!(root_values.iter().all(|&v| v.is_finite()));
     let p0 = &policy[0..4];
     let sum: f32 = p0.iter().sum();
-    assert!((sum - 1.0).abs() < 1e-3, "snake 0 policy sums to 1, got {sum}");
+    assert!(
+        (sum - 1.0).abs() < 1e-3,
+        "snake 0 policy sums to 1, got {sum}"
+    );
     // Moving Down (reversing onto the neck at (5,4)) is pruned -> zero mass.
     assert_eq!(p0[1], 0.0, "reversal move gets no probability");
 }

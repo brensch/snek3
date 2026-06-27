@@ -19,28 +19,35 @@ SERVE_PORT  ?= 8000
 CKPT        ?=
 
 # Training defaults (all overridable)
-GENERATIONS ?= 30
+GENERATIONS ?= 100000
 TOTAL_GENERATIONS ?= 2500
 CHUNK_GENERATIONS ?= 4
 ADAPTIVE_EVERY ?= $(CHUNK_GENERATIONS)
-SAMPLES     ?= 50000
-COUNT       ?= 32
+SAMPLES     ?= 30000
+COUNT       ?= 1024
+SIMS        ?= 32
+EXPLORATION_PROB ?= 0.45
+DRAW_VALUE ?= -0.25
+SKIP_SHORT_DRAW_TURNS ?= 12
 DEPTH       ?= 2
 TAU         ?= 30
 ITERS       ?= 120
 EVAL_BATCH_SIZE ?= 8192
 SEARCH_THREADS ?= $(shell nproc 2>/dev/null || python3 -c 'import os; print(os.cpu_count() or 1)')
-TRAIN_STEPS ?= 1024
+TRAIN_STEPS ?= 256
 ADAPTIVE_TRAIN_STEPS ?= 256
 BATCH_SIZE  ?= 2048
 BUFFER_SIZE ?= 500000
 FILTERS     ?= 64
 BLOCKS      ?= 6
-EVAL_EVERY  ?= 1
+EVAL_EVERY  ?= 5
 EVAL_GAMES  ?= 32
-MAX_TURNS   ?= 0
-RECORD_GAMES ?= 8
-RECORD_EVERY ?= 1
+RELATIVE_EVERY ?= 20
+MAX_TURNS   ?= 200
+SAMPLE_GAMES ?= 16
+SAMPLE_EVERY ?= 1
+RECORD_GAMES ?= 4
+RECORD_EVERY ?= 20
 RUN_ID      ?=
 FRESH       ?=
 ARGS        ?=
@@ -53,7 +60,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: GENERATIONS TOTAL_GENERATIONS ADAPTIVE_EVERY SAMPLES COUNT DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS ADAPTIVE_TRAIN_STEPS BATCH_SIZE BUFFER_SIZE FILTERS BLOCKS EVAL_EVERY EVAL_GAMES MAX_TURNS RECORD_GAMES RECORD_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
+	@echo "Vars: GENERATIONS TOTAL_GENERATIONS ADAPTIVE_EVERY SAMPLES COUNT SIMS EXPLORATION_PROB DRAW_VALUE SKIP_SHORT_DRAW_TURNS DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS ADAPTIVE_TRAIN_STEPS BATCH_SIZE BUFFER_SIZE FILTERS BLOCKS EVAL_EVERY EVAL_GAMES RELATIVE_EVERY MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY RECORD_GAMES RECORD_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
@@ -86,6 +93,9 @@ fmt: ## Format Rust code
 train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENERATIONS, SAMPLES, RUN_ID, FRESH=1, ARGS...
 	$(PY) -m azsnek.train \
 		--generations $(GENERATIONS) --samples $(SAMPLES) --count $(COUNT) \
+		--sims $(SIMS) \
+		--exploration-prob $(EXPLORATION_PROB) \
+		--draw-value $(DRAW_VALUE) --skip-short-draw-turns $(SKIP_SHORT_DRAW_TURNS) \
 		--depth $(DEPTH) --tau $(TAU) --iters $(ITERS) \
 		--eval-batch-size $(EVAL_BATCH_SIZE) \
 		--search-threads $(SEARCH_THREADS) \
@@ -93,7 +103,9 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 		--buffer-size $(BUFFER_SIZE) \
 		--filters $(FILTERS) --blocks $(BLOCKS) \
 		--eval-every $(EVAL_EVERY) --eval-games $(EVAL_GAMES) \
+		--relative-every $(RELATIVE_EVERY) \
 		--max-turns $(MAX_TURNS) \
+		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) \
 		--record-games $(RECORD_GAMES) --record-every $(RECORD_EVERY) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
@@ -104,6 +116,7 @@ overnight: build ## Start a background overnight training run. Override TAU, GEN
 	BUFFER_SIZE=$(BUFFER_SIZE) \
 	FILTERS=$(FILTERS) BLOCKS=$(BLOCKS) \
 	EVAL_EVERY=$(EVAL_EVERY) EVAL_GAMES=$(EVAL_GAMES) MAX_TURNS=$(MAX_TURNS) \
+	SAMPLE_GAMES=$(SAMPLE_GAMES) SAMPLE_EVERY=$(SAMPLE_EVERY) \
 	RECORD_GAMES=$(RECORD_GAMES) RECORD_EVERY=$(RECORD_EVERY) \
 	RUN_ID="$(RUN_ID)" FRESH="$(FRESH)" bash scripts/overnight_train.sh
 
@@ -113,6 +126,7 @@ adaptive: build ## Run adaptive training in the foreground; Ctrl-C stops it
 	EVAL_BATCH_SIZE=$(EVAL_BATCH_SIZE) SEARCH_THREADS=$(SEARCH_THREADS) \
 	TRAIN_STEPS=$(ADAPTIVE_TRAIN_STEPS) BATCH_SIZE=$(BATCH_SIZE) BUFFER_SIZE=$(BUFFER_SIZE) \
 	FILTERS=$(FILTERS) BLOCKS=$(BLOCKS) EVAL_GAMES=64 MAX_TURNS=$(MAX_TURNS) \
+	SAMPLE_GAMES=$(SAMPLE_GAMES) SAMPLE_EVERY=$(SAMPLE_EVERY) \
 	RECORD_GAMES=$(RECORD_GAMES) RECORD_EVERY=$(RECORD_EVERY) \
 	RUN_ID="$(RUN_ID)" FRESH="$(FRESH)" ARGS="$(ARGS)" bash scripts/adaptive_train.sh
 

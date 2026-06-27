@@ -104,7 +104,10 @@ pub fn solve(
         values[i] = v;
     }
 
-    LeSolution { values, policies: pi }
+    LeSolution {
+        values,
+        policies: pi,
+    }
 }
 
 #[cfg(test)]
@@ -131,7 +134,10 @@ mod tests {
         let payoffs = payoff_vec(&[[1.0, -1.0], [-1.0, 1.0], [-1.0, 1.0], [1.0, -1.0]]);
         let sol = solve(&[2, 2], &payoffs, 6.0, 500);
         for i in 0..2 {
-            assert!((sol.policies[i][0] - 0.5).abs() < 0.05, "agent {i} ~ uniform");
+            assert!(
+                (sol.policies[i][0] - 0.5).abs() < 0.05,
+                "agent {i} ~ uniform"
+            );
         }
         // Game value is ~0 for both.
         assert!(sol.values[0].abs() < 0.1 && sol.values[1].abs() < 0.1);
@@ -160,7 +166,10 @@ mod tests {
         payoffs[1][0] = 1.0; // a0=1
         let sol = solve(&[2, 1], &payoffs, 8.0, 300);
         assert!(sol.policies[1][0] > 0.999);
-        assert!(sol.policies[0][1] > 0.95, "agent 0 prefers the better action");
+        assert!(
+            sol.policies[0][1] > 0.95,
+            "agent 0 prefers the better action"
+        );
     }
 
     #[test]

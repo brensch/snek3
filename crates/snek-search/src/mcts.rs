@@ -34,17 +34,21 @@ struct MctsNode {
     terminal: bool,
     term_value: [f32; MAX_SNAKES],
     expanded: bool,
-    cands: Vec<Vec<Move>>,        // [n][k_i] candidate moves per snake
-    nvisit: Vec<Vec<f32>>,        // [n][k_i] visit counts
-    wsum: Vec<Vec<f32>>,          // [n][k_i] summed backed-up value
-    prior: Vec<Vec<f32>>,         // [n][k_i] policy priors
-    children: Vec<(u32, usize)>,  // (joint index -> child node id), small assoc list
+    cands: Vec<Vec<Move>>,       // [n][k_i] candidate moves per snake
+    nvisit: Vec<Vec<f32>>,       // [n][k_i] visit counts
+    wsum: Vec<Vec<f32>>,         // [n][k_i] summed backed-up value
+    prior: Vec<Vec<f32>>,        // [n][k_i] policy priors
+    children: Vec<(u32, usize)>, // (joint index -> child node id), small assoc list
 }
 
 impl MctsNode {
     fn leaf(board: Board) -> Self {
         let terminal = board.is_terminal();
-        let term_value = if terminal { terminal_values(&board) } else { [0.0; MAX_SNAKES] };
+        let term_value = if terminal {
+            terminal_values(&board)
+        } else {
+            [0.0; MAX_SNAKES]
+        };
         MctsNode {
             board,
             terminal,
@@ -59,7 +63,10 @@ impl MctsNode {
     }
 
     fn child(&self, joint: u32) -> Option<usize> {
-        self.children.iter().find(|(j, _)| *j == joint).map(|(_, id)| *id)
+        self.children
+            .iter()
+            .find(|(j, _)| *j == joint)
+            .map(|(_, id)| *id)
     }
 }
 
@@ -99,7 +106,11 @@ impl MctsTree {
             let mut best_score = f32::NEG_INFINITY;
             for a in 0..node.cands[i].len() {
                 let n_a = nv[a];
-                let q = if n_a > 0.0 { node.wsum[i][a] / n_a } else { 0.0 };
+                let q = if n_a > 0.0 {
+                    node.wsum[i][a] / n_a
+                } else {
+                    0.0
+                };
                 let u = self.c_puct * node.prior[i][a] * sqrt_total / (1.0 + n_a);
                 let score = q + u;
                 if score > best_score {
@@ -142,7 +153,10 @@ impl MctsTree {
                 };
             }
             let (joint, action_idx) = self.select_joint(id, &strides);
-            self.pending_path.push(Edge { node: id, action_idx });
+            self.pending_path.push(Edge {
+                node: id,
+                action_idx,
+            });
             match self.nodes[id].child(joint) {
                 Some(cid) => {
                     id = cid;
@@ -274,7 +288,10 @@ impl MctsForest {
             .map(|b| (b.height as usize, b.width as usize))
             .unwrap_or((0, 0));
         MctsForest {
-            trees: boards.iter().map(|b| MctsTree::new(b.clone(), c_puct)).collect(),
+            trees: boards
+                .iter()
+                .map(|b| MctsTree::new(b.clone(), c_puct))
+                .collect(),
             n_snakes,
             channels: NUM_CHANNELS,
             height,
@@ -382,7 +399,10 @@ mod tests {
         for i in 0..n {
             let p = &policies[i * 4..i * 4 + 4];
             let sum: f32 = p.iter().sum();
-            assert!((sum - 1.0).abs() < 1e-3, "snake {i} policy sums to 1, got {sum}");
+            assert!(
+                (sum - 1.0).abs() < 1e-3,
+                "snake {i} policy sums to 1, got {sum}"
+            );
             assert!(p.iter().all(|&x| x >= 0.0 && x.is_finite()));
         }
         // With 64 sims the tree must have grown well past the root.

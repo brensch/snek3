@@ -6,7 +6,10 @@ use crate::{Board, EliminatedCause, Point, Snake};
 use serde_json::Value;
 
 fn point(v: &Value) -> Option<Point> {
-    Some(Point::new(v.get("x")?.as_i64()? as i8, v.get("y")?.as_i64()? as i8))
+    Some(Point::new(
+        v.get("x")?.as_i64()? as i8,
+        v.get("y")?.as_i64()? as i8,
+    ))
 }
 
 fn points(v: &Value) -> Vec<Point> {
@@ -21,8 +24,14 @@ pub fn parse_move_request(body: &str) -> Result<(Board, usize), String> {
     let v: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
     let board_v = v.get("board").ok_or("missing board")?;
 
-    let width = board_v.get("width").and_then(Value::as_i64).ok_or("missing width")? as i8;
-    let height = board_v.get("height").and_then(Value::as_i64).ok_or("missing height")? as i8;
+    let width = board_v
+        .get("width")
+        .and_then(Value::as_i64)
+        .ok_or("missing width")? as i8;
+    let height = board_v
+        .get("height")
+        .and_then(Value::as_i64)
+        .ok_or("missing height")? as i8;
 
     let mut board = Board::new(width, height);
     board.turn = v.get("turn").and_then(Value::as_u64).unwrap_or(0) as u32;

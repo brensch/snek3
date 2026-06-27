@@ -275,7 +275,6 @@ impl Board {
         }
     }
 
-
     fn reduce_health(&mut self) {
         for snake in self.snakes.iter_mut() {
             if snake.eliminated.is_none() {

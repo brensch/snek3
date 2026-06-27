@@ -94,10 +94,13 @@ def list_games(run: str):
             data = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
             continue
+        selfplay = data.get("selfplay") or {}
+        selfplay_index = {k: v for k, v in selfplay.items() if k != "games"}
         files.append(
             {
                 "file": f.name,
                 "gen": data.get("gen"),
+                "selfplay": selfplay_index,
                 "games": [
                     {
                         "opponent": g.get("opponent"),
