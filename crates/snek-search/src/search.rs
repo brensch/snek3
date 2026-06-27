@@ -179,7 +179,7 @@ fn backup_node(
     tree: &mut Tree,
     node_id: usize,
     values: &[f32],
-    tau: f32,
+    tau: &[f32],
     iters: usize,
 ) -> Option<Vec<Vec<f32>>> {
     // Resolve this node's value, recursing into children first.
@@ -295,7 +295,7 @@ impl Forest {
     /// * `root_values` — per-agent equilibrium expected value at each root, flat
     ///   `[num_roots * n_snakes]`. This is the bootstrapped value the search
     ///   assigns to the current state, used as a TD target during training.
-    pub fn backup(&mut self, values: &[f32], tau: f32, iters: usize) -> (Vec<f32>, Vec<f32>) {
+    pub fn backup(&mut self, values: &[f32], tau: &[f32], iters: usize) -> (Vec<f32>, Vec<f32>) {
         debug_assert_eq!(values.len(), self.eval_count());
         let n = self.n_snakes;
         let mut out = vec![0.0f32; self.trees.len() * n * 4];

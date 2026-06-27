@@ -23,14 +23,18 @@ pub struct LeSolution {
 /// * `payoffs[joint][i]` — agent `i`'s payoff for the joint action `joint`,
 ///   where joint actions are enumerated row-major with agent 0 most significant
 ///   (`joint = sum_i a_i * stride_i`, `stride_i = prod_{k>i} cand_lens[k]`).
-/// * `tau` — inverse temperature (higher ⇒ sharper ⇒ closer to Nash).
+/// * `tau` — per-agent inverse temperature (higher ⇒ sharper ⇒ closer to best
+///   response). Length must equal `cand_lens.len()`. Heterogeneous temperatures
+///   give a quantal-response / SBRLE-style equilibrium: a rational agent at a
+///   high `tau` best-responds to weaker agents at lower `tau`.
 /// * `iters` — number of SFP iterations.
 pub fn solve(
     cand_lens: &[usize],
     payoffs: &[[f32; MAX_SNAKES]],
-    tau: f32,
+    tau: &[f32],
     iters: usize,
 ) -> LeSolution {
+    debug_assert_eq!(tau.len(), cand_lens.len());
     let n = cand_lens.len();
     let total: usize = cand_lens.iter().product();
     debug_assert_eq!(payoffs.len(), total);
@@ -81,7 +85,7 @@ pub fn solve(
             let mut denom = 0.0f32;
             let mut sbr = vec![0.0f32; qi.len()];
             for (a, &qa) in qi.iter().enumerate() {
-                let e = ((qa - max) * tau).exp();
+                let e = ((qa - max) * tau[i]).exp();
                 sbr[a] = e;
                 denom += e;
             }
@@ -132,7 +136,7 @@ mod tests {
         // joint order (a0,a1): (0,0),(0,1),(1,0),(1,1)
         // U0: match -> +1, mismatch -> -1; U1 = -U0.
         let payoffs = payoff_vec(&[[1.0, -1.0], [-1.0, 1.0], [-1.0, 1.0], [1.0, -1.0]]);
-        let sol = solve(&[2, 2], &payoffs, 6.0, 500);
+        let sol = solve(&[2, 2], &payoffs, &[6.0, 6.0], 500);
         for i in 0..2 {
             assert!(
                 (sol.policies[i][0] - 0.5).abs() < 0.05,
@@ -153,7 +157,7 @@ mod tests {
             [0.0, 0.0], // (1,0)
             [0.0, 1.0], // (1,1)
         ]);
-        let sol = solve(&[2, 2], &payoffs, 8.0, 500);
+        let sol = solve(&[2, 2], &payoffs, &[8.0, 8.0], 500);
         assert!(sol.policies[0][0] > 0.95, "agent 0 picks dominant action 0");
         assert!(sol.policies[1][1] > 0.95, "agent 1 picks dominant action 1");
     }
@@ -164,7 +168,7 @@ mod tests {
         let mut payoffs = vec![[0.0; MAX_SNAKES]; 2];
         payoffs[0][0] = -1.0; // a0=0
         payoffs[1][0] = 1.0; // a0=1
-        let sol = solve(&[2, 1], &payoffs, 8.0, 300);
+        let sol = solve(&[2, 1], &payoffs, &[8.0, 8.0], 300);
         assert!(sol.policies[1][0] > 0.999);
         assert!(
             sol.policies[0][1] > 0.95,
@@ -175,11 +179,26 @@ mod tests {
     #[test]
     fn high_tau_sharpens_toward_best_response() {
         let payoffs = payoff_vec(&[[1.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 0.0]]);
-        let low = solve(&[2, 2], &payoffs, 1.0, 500);
-        let high = solve(&[2, 2], &payoffs, 12.0, 500);
+        let low = solve(&[2, 2], &payoffs, &[1.0, 1.0], 500);
+        let high = solve(&[2, 2], &payoffs, &[12.0, 12.0], 500);
         assert!(
             high.policies[0][0] > low.policies[0][0],
             "higher tau concentrates more on the better action"
         );
+    }
+
+    #[test]
+    fn heterogeneous_tau_lets_rational_agent_exploit_weak_one() {
+        // Coordination-ish game: agent 0 prefers action 0; agent 1's payoff is
+        // flat (indifferent), so at low tau it plays ~uniform. A rational agent 0
+        // (high tau) should then concentrate harder on its best action than it
+        // would against a rational agent 1.
+        let payoffs = payoff_vec(&[[1.0, 0.0], [2.0, 0.0], [0.0, 0.0], [0.0, 0.0]]);
+        // Agent 1 weak (tau 0.5), agent 0 rational (tau 12).
+        let exploit = solve(&[2, 2], &payoffs, &[12.0, 0.5], 500);
+        // Agent 1 near-uniform because it's near-indifferent and low-tau.
+        assert!((exploit.policies[1][0] - 0.5).abs() < 0.15, "weak agent ~uniform");
+        // Agent 0 strongly prefers action 0 (its better action given a1 uniform).
+        assert!(exploit.policies[0][0] > 0.9, "rational agent exploits");
     }
 }
