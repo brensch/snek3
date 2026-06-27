@@ -279,19 +279,28 @@ impl Forest {
     }
 
     /// Back up `values` (length `eval_count()`, indexed `[eval_id, agent]`) and
-    /// return root equilibrium policies as a flat `[num_roots * n_snakes * 4]`
-    /// array (probability per move; non-candidate moves are 0).
-    pub fn backup(&mut self, values: &[f32], tau: f32, iters: usize) -> Vec<f32> {
+    /// return `(policies, root_values)`:
+    /// * `policies` — root equilibrium policies, flat `[num_roots * n_snakes * 4]`
+    ///   (probability per move; non-candidate moves are 0).
+    /// * `root_values` — per-agent equilibrium expected value at each root, flat
+    ///   `[num_roots * n_snakes]`. This is the bootstrapped value the search
+    ///   assigns to the current state, used as a TD target during training.
+    pub fn backup(&mut self, values: &[f32], tau: f32, iters: usize) -> (Vec<f32>, Vec<f32>) {
         debug_assert_eq!(values.len(), self.eval_count());
         let n = self.n_snakes;
         let mut out = vec![0.0f32; self.trees.len() * n * 4];
+        let mut root_vals = vec![0.0f32; self.trees.len() * n];
 
         self.trees
             .par_iter_mut()
             .zip(out.par_chunks_mut(n * 4))
-            .for_each(|(tree, out_chunk)| {
+            .zip(root_vals.par_chunks_mut(n))
+            .for_each(|((tree, out_chunk), val_chunk)| {
                 let root = tree.root;
                 let policies = backup_node(&self.eval_boards, n, tree, root, values, tau, iters);
+                // Root per-agent equilibrium value (set on the root node by backup_node).
+                let rv = tree.nodes[root].value;
+                val_chunk.copy_from_slice(&rv[..n]);
 
                 // A single-snake (or already-terminal-root) game yields no policy;
                 // leave it uniform-free (all zeros) and let the caller handle it.
@@ -302,6 +311,6 @@ impl Forest {
                     }
                 }
             });
-        out
+        (out, root_vals)
     }
 }

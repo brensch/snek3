@@ -27,15 +27,21 @@ def run_search(
     tau: float = 6.0,
     iters: int = 200,
     eval_batch_size: int = 8192,
-) -> np.ndarray:
+    return_root_values: bool = False,
+):
     """Run one equilibrium search over every game in `batch`.
 
-    Returns root policies as a float32 array of shape `[count, num_snakes, 4]`.
+    Returns root policies `[count, num_snakes, 4]`. If `return_root_values` is
+    set, returns `(policies, root_values)` where `root_values` is `[count,
+    num_snakes]` — the per-agent equilibrium value of the current state (used as
+    a bootstrapped TD target during training).
     """
     obs = batch.prepare_search(depth)  # [M, C, H, W] float32
     if obs.shape[0] == 0:
         # Every root already terminal; backup still needs a (length-0) value array.
         values = np.zeros((0,), dtype=np.float32)
+        if return_root_values:
+            return batch.backup_search_values(values, tau, iters)
         return batch.backup_search(values, tau, iters)
 
     net.eval()
@@ -49,6 +55,8 @@ def run_search(
             _, value = net(obs_t)  # value: [M] in [-1, 1]
         values[start:end] = value.detach().to("cpu", dtype=torch.float32).numpy()
         del obs_t, value
+    if return_root_values:
+        return batch.backup_search_values(values, tau, iters)
     return batch.backup_search(values, tau, iters)
 
 

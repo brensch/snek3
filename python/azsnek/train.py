@@ -98,6 +98,12 @@ def main():
     ap.add_argument("--batch-size", type=int, default=2048, help="SGD minibatch size")
     ap.add_argument("--buffer-size", type=int, default=500_000, help="replay buffer capacity (samples)")
     ap.add_argument("--max-turns", type=int, default=0, help="0 plays until terminal; positive values cap games as draws")
+    # Value-target shaping (discounted TD(lambda) of a dense reward).
+    ap.add_argument("--gamma", type=float, default=0.97, help="reward discount; <1 makes surviving longer valuable")
+    ap.add_argument("--lam", type=float, default=0.5, help="TD(lambda): 0=bootstrap, 1=discounted Monte-Carlo")
+    ap.add_argument("--living-reward", type=float, default=0.01, help="per-step reward for staying alive")
+    ap.add_argument("--terminal-reward", type=float, default=1.0, help="+win / -death reward at game end")
+    ap.add_argument("--exploration-prob", type=float, default=0.25, help="uniform-legal mix into the played action")
     ap.add_argument("--eval-every", type=int, default=1)
     ap.add_argument("--eval-games", type=int, default=32)
     ap.add_argument("--league-every", type=int, default=20, help="snapshot a league checkpoint every N gens")
@@ -144,6 +150,11 @@ def main():
         eval_batch_size=args.eval_batch_size,
         samples_per_gen=args.samples,
         max_turns=args.max_turns,
+        gamma=args.gamma,
+        lam=args.lam,
+        living_reward=args.living_reward,
+        terminal_reward=args.terminal_reward,
+        exploration_prob=args.exploration_prob,
     )
     run = RunWriter(
         args.runs_dir,

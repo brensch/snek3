@@ -34,10 +34,12 @@ fn policy_is_a_distribution_over_legal_moves() {
 
     let mut forest = Forest::build(std::slice::from_ref(&b), 1);
     let values = neutral_values(&forest);
-    let policy = forest.backup(&values, 6.0, 200);
+    let (policy, root_values) = forest.backup(&values, 6.0, 200);
 
-    // Layout: [root, snake, 4].
+    // Layout: [root, snake, 4]; root values are [root, snake].
     assert_eq!(policy.len(), 2 * 4);
+    assert_eq!(root_values.len(), 2);
+    assert!(root_values.iter().all(|&v| v.is_finite()));
     let p0 = &policy[0..4];
     let sum: f32 = p0.iter().sum();
     assert!((sum - 1.0).abs() < 1e-3, "snake 0 policy sums to 1, got {sum}");
@@ -55,7 +57,7 @@ fn search_avoids_walking_into_a_wall() {
 
     let mut forest = Forest::build(std::slice::from_ref(&b), 1);
     let values = neutral_values(&forest);
-    let policy = forest.backup(&values, 8.0, 200);
+    let (policy, _root_values) = forest.backup(&values, 8.0, 200);
     // Move::Left has index 2.
     assert_eq!(policy[2], 0.0, "stepping into the wall is never chosen");
 }
@@ -71,7 +73,7 @@ fn search_prefers_winning_head_to_head() {
 
     let mut forest = Forest::build(std::slice::from_ref(&b), 2);
     let values = neutral_values(&forest);
-    let policy = forest.backup(&values, 8.0, 300);
+    let (policy, _root_values) = forest.backup(&values, 8.0, 300);
     let p0 = &policy[0..4];
     let sum: f32 = p0.iter().sum();
     assert!((sum - 1.0).abs() < 1e-3);

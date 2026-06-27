@@ -280,10 +280,43 @@ impl GameBatch {
                 forest.eval_count()
             )));
         }
-        let policy = forest.backup(v, tau, iters);
+        let (policy, _values) = forest.backup(v, tau, iters);
         Array::from_shape_vec((self.boards.len(), self.num_snakes, 4), policy)
             .map(|a| a.into_pyarray_bound(py))
             .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Like `backup_search`, but also returns the per-agent root equilibrium
+    /// value (the bootstrapped value of the current state, used as a TD target).
+    /// Returns `(policies [count, N, 4], root_values [count, N])`, both float32.
+    #[pyo3(signature = (values, tau=6.0, iters=200))]
+    fn backup_search_values<'py>(
+        &mut self,
+        py: Python<'py>,
+        values: PyReadonlyArray1<f32>,
+        tau: f32,
+        iters: usize,
+    ) -> PyResult<(Bound<'py, PyArray3<f32>>, Bound<'py, PyArray2<f32>>)> {
+        let mut forest = self
+            .forest
+            .take()
+            .ok_or_else(|| PyValueError::new_err("call prepare_search before backup_search"))?;
+        let v = values.as_slice().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if v.len() != forest.eval_count() {
+            return Err(PyValueError::new_err(format!(
+                "values length {} != expected {}",
+                v.len(),
+                forest.eval_count()
+            )));
+        }
+        let (policy, root_vals) = forest.backup(v, tau, iters);
+        let pol = Array::from_shape_vec((self.boards.len(), self.num_snakes, 4), policy)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .into_pyarray_bound(py);
+        let vals = Array::from_shape_vec((self.boards.len(), self.num_snakes), root_vals)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .into_pyarray_bound(py);
+        Ok((pol, vals))
     }
 
     /// JSON snapshot of game `i`'s board state, for recording replays:
