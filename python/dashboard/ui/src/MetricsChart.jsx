@@ -9,6 +9,7 @@ export default function MetricsChart({ metrics }) {
   const [width, setWidth] = useState(900);
   const [pxPerGen, setPxPerGen] = useState(18);
   const [panX, setPanX] = useState(0);
+  const [followLatest, setFollowLatest] = useState(true);
   const [hover, setHover] = useState(null);
 
   const plot = useMemo(() => {
@@ -30,13 +31,14 @@ export default function MetricsChart({ metrics }) {
   }, []);
 
   useEffect(() => {
-    setPanX((p) => Math.min(Math.max(0, p), plot.maxPan));
-  }, [plot.maxPan]);
+    setPanX((p) => followLatest ? plot.maxPan : Math.min(Math.max(0, p), plot.maxPan));
+  }, [followLatest, plot.maxPan]);
 
   const beginDrag = (event) => {
     const el = wrapRef.current;
     if (!el || event.button === 1 || event.target?.closest?.("input,button")) return;
     dragRef.current = { x: event.clientX, panX };
+    setFollowLatest(false);
     el.setPointerCapture?.(event.pointerId);
     el.classList.add("dragging");
   };
@@ -173,6 +175,14 @@ export default function MetricsChart({ metrics }) {
       <div className="chart-toolbar">
         <label className="chk">width <input type="range" min={6} max={48} value={pxPerGen} onChange={(e) => setPxPerGen(+e.target.value)} /></label>
         <span className="muted">{pxPerGen}px/gen</span>
+        <button
+          type="button"
+          className={"chart-lock" + (followLatest ? " active" : "")}
+          onClick={() => setFollowLatest((locked) => !locked)}
+          title={followLatest ? "Following latest generation" : "Lock view to latest generation"}
+        >
+          latest
+        </button>
         {plot.maxPan > 0 && <span className="muted">drag chart to pan</span>}
       </div>
       <div className="chart-wrap">

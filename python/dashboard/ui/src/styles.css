@@ -161,6 +161,7 @@ canvas { display: block; background: #0b0e13; border-radius: 8px; max-width: 100
 .chart-panel { min-width: 0; cursor: grab; }
 .chart-panel.dragging { cursor: grabbing; user-select: none; }
 .chart-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.chart-lock.active { color: #34d399; border-color: #10532f; background: #0f1f17; }
 .chart-wrap { position: relative; width: 100%; touch-action: pan-x; }
 .chart-tooltip {
   position: absolute;

@@ -672,18 +672,8 @@ fn generate_selfplay<'py>(
     let mut skipped_short_draw_games = 0usize;
     let mut skipped_short_draw_samples = 0usize;
     let mut recorded_games_json: Vec<String> = Vec::new();
+    let mut recorded_game_candidates = 0usize;
     let mut completed_games_json: Vec<String> = Vec::new();
-    let mut record_flags: Vec<Vec<bool>> = (0..2).map(|_| vec![false; count]).collect();
-    let mut remaining_to_mark = record_games;
-    for b in 0..2 {
-        for g in 0..count {
-            if remaining_to_mark == 0 {
-                break;
-            }
-            record_flags[b][g] = true;
-            remaining_to_mark -= 1;
-        }
-    }
     let mut actions: Vec<Move> = vec![Move::Up; n];
 
     // Run the pipeline. On any error we drop the channels, which stops the GPU thread.
@@ -692,8 +682,8 @@ fn generate_selfplay<'py>(
     let mut run = || -> Result<(), String> {
         while collected < samples_per_gen {
             let mut forests = [
-                MctsForest::new(&boards[0], c_puct),
-                MctsForest::new(&boards[1], c_puct),
+                MctsForest::new_with_draw_value(&boards[0], c_puct, draw_value),
+                MctsForest::new_with_draw_value(&boards[1], c_puct, draw_value),
             ];
             let mut pend: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
             let mut sims_done = [0usize, 0usize];
@@ -733,7 +723,7 @@ fn generate_selfplay<'py>(
                 for g in 0..count {
                     let bd = &bds[g];
                     let slot = &mut slt[g];
-                    if record_flags[b][g] && recorded_games_json.len() < record_games {
+                    if record_games > 0 {
                         slot.frames.push(board_snapshot_value(bd));
                     }
                     for s in 0..n {
@@ -758,7 +748,7 @@ fn generate_selfplay<'py>(
                     if !(bds[g].is_terminal() || overrun) {
                         continue;
                     }
-                    if record_flags[b][g] && recorded_games_json.len() < record_games {
+                    if record_games > 0 {
                         slt[g].frames.push(board_snapshot_value(&bds[g]));
                     }
                     let winner = bds[g].winner();
@@ -779,14 +769,22 @@ fn generate_selfplay<'py>(
                     if short_terminal_draw {
                         skipped_short_draw_games += 1;
                         skipped_short_draw_samples += live_samples;
-                        if record_flags[b][g] && recorded_games_json.len() < record_games && !slot.frames.is_empty() {
+                        if record_games > 0 && !slot.frames.is_empty() {
                             let game = serde_json::json!({
                                 "opponent": "net",
                                 "winner": -1,
                                 "num_turns": slot.frames.len(),
                                 "frames": slot.frames,
                             });
-                            recorded_games_json.push(game.to_string());
+                            recorded_game_candidates += 1;
+                            if recorded_games_json.len() < record_games {
+                                recorded_games_json.push(game.to_string());
+                            } else {
+                                let replace = rng.gen_range(0..recorded_game_candidates);
+                                if replace < record_games {
+                                    recorded_games_json[replace] = game.to_string();
+                                }
+                            }
                         }
                         bds[g] = standard_start(board, board, n, &mut rng);
                         trn[g] = 0;
@@ -804,20 +802,27 @@ fn generate_selfplay<'py>(
                             out_z.push(match winner {
                                 Some(wi) if wi == s => 1.0,
                                 Some(_) => -1.0,
-                                None if overrun => 0.0,
                                 None => draw_value,
                             });
                             collected += 1;
                         }
                     }
-                    if record_flags[b][g] && recorded_games_json.len() < record_games && !slot.frames.is_empty() {
+                    if record_games > 0 && !slot.frames.is_empty() {
                         let game = serde_json::json!({
                             "opponent": "net",
                             "winner": winner.map(|wi| wi as i8).unwrap_or(-1),
                             "num_turns": slot.frames.len(),
                             "frames": slot.frames,
                         });
-                        recorded_games_json.push(game.to_string());
+                        recorded_game_candidates += 1;
+                        if recorded_games_json.len() < record_games {
+                            recorded_games_json.push(game.to_string());
+                        } else {
+                            let replace = rng.gen_range(0..recorded_game_candidates);
+                            if replace < record_games {
+                                recorded_games_json[replace] = game.to_string();
+                            }
+                        }
                     }
                     bds[g] = standard_start(board, board, n, &mut rng);
                     trn[g] = 0;
@@ -868,6 +873,7 @@ fn generate_selfplay<'py>(
     stats.set_item("skipped_short_draw_samples", skipped_short_draw_samples)?;
     stats.set_item("draw_value", draw_value)?;
     stats.set_item("skip_short_draw_turns", skip_short_draw_turns)?;
+    stats.set_item("recorded_game_candidates", recorded_game_candidates)?;
     stats.set_item("recorded_games_json", recorded_games_json)?;
     stats.set_item("completed_games_json", completed_games_json)?;
     Ok((obs_arr, pol_arr, z_arr, stats))

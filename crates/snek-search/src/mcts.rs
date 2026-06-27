@@ -15,7 +15,7 @@
 //!      and propagates its value up the path.
 //! Repeat for `sims` simulations, then read [`MctsForest::root_targets`].
 
-use crate::search::{candidates, terminal_values};
+use crate::search::{candidates, terminal_values_with_draw};
 use rayon::prelude::*;
 use snek_core::{encode_into, Board, Move, MAX_SNAKES, NUM_CHANNELS};
 
@@ -42,10 +42,10 @@ struct MctsNode {
 }
 
 impl MctsNode {
-    fn leaf(board: Board) -> Self {
+    fn leaf(board: Board, draw_value: f32) -> Self {
         let terminal = board.is_terminal();
         let term_value = if terminal {
-            terminal_values(&board)
+            terminal_values_with_draw(&board, draw_value)
         } else {
             [0.0; MAX_SNAKES]
         };
@@ -74,6 +74,7 @@ struct MctsTree {
     nodes: Vec<MctsNode>,
     n_snakes: usize,
     c_puct: f32,
+    draw_value: f32,
     /// Path of the in-flight simulation, awaiting a leaf evaluation.
     pending_path: Vec<Edge>,
     /// Node id of the in-flight leaf to evaluate (None if terminal/no-op).
@@ -81,12 +82,13 @@ struct MctsTree {
 }
 
 impl MctsTree {
-    fn new(board: Board, c_puct: f32) -> Self {
+    fn new_with_draw_value(board: Board, c_puct: f32, draw_value: f32) -> Self {
         let n_snakes = board.snakes.len();
         MctsTree {
-            nodes: vec![MctsNode::leaf(board)],
+            nodes: vec![MctsNode::leaf(board, draw_value)],
             n_snakes,
             c_puct,
+            draw_value,
             pending_path: Vec::new(),
             pending_leaf: None,
         }
@@ -174,7 +176,7 @@ impl MctsTree {
                     let mut child_board = self.nodes[id].board.clone();
                     child_board.step(&mv[..n]);
                     let cid = self.nodes.len();
-                    let child = MctsNode::leaf(child_board);
+                    let child = MctsNode::leaf(child_board, self.draw_value);
                     let is_terminal = child.terminal;
                     let term_value = child.term_value;
                     self.nodes.push(child);
@@ -282,6 +284,10 @@ pub struct MctsForest {
 
 impl MctsForest {
     pub fn new(boards: &[Board], c_puct: f32) -> Self {
+        Self::new_with_draw_value(boards, c_puct, 0.0)
+    }
+
+    pub fn new_with_draw_value(boards: &[Board], c_puct: f32, draw_value: f32) -> Self {
         let n_snakes = boards.first().map(|b| b.snakes.len()).unwrap_or(0);
         let (height, width) = boards
             .first()
@@ -290,7 +296,7 @@ impl MctsForest {
         MctsForest {
             trees: boards
                 .iter()
-                .map(|b| MctsTree::new(b.clone(), c_puct))
+                .map(|b| MctsTree::new_with_draw_value(b.clone(), c_puct, draw_value))
                 .collect(),
             n_snakes,
             channels: NUM_CHANNELS,

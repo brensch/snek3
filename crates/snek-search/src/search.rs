@@ -78,8 +78,8 @@ pub(crate) fn candidates(board: &Board, i: usize) -> Vec<Move> {
     v
 }
 
-/// Exact per-agent value at a terminal board: winner +1, losers -1, draw 0.
-pub(crate) fn terminal_values(board: &Board) -> [f32; MAX_SNAKES] {
+/// Exact per-agent value at a terminal board: winner +1, losers -1, draw configurable.
+pub(crate) fn terminal_values_with_draw(board: &Board, draw_value: f32) -> [f32; MAX_SNAKES] {
     let mut v = [0.0f32; MAX_SNAKES];
     match board.winner() {
         Some(w) => {
@@ -87,9 +87,18 @@ pub(crate) fn terminal_values(board: &Board) -> [f32; MAX_SNAKES] {
                 v[i] = if i == w { 1.0 } else { -1.0 };
             }
         }
-        None => { /* draw: all zero */ }
+        None => {
+            for x in v.iter_mut().take(board.snakes.len()) {
+                *x = draw_value;
+            }
+        }
     }
     v
+}
+
+/// Exact per-agent value at a terminal board: winner +1, losers -1, draw 0.
+pub(crate) fn terminal_values(board: &Board) -> [f32; MAX_SNAKES] {
+    terminal_values_with_draw(board, 0.0)
 }
 
 /// Recursively expand `board`, pushing nodes into `nodes` and returning the

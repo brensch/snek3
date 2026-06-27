@@ -235,9 +235,9 @@ def main():
     # AlphaZero MCTS search.
     ap.add_argument("--sims", type=int, default=128, help="MCTS simulations per move")
     ap.add_argument("--c-puct", type=float, default=1.5, help="PUCT exploration constant")
-    ap.add_argument("--exploration-prob", type=float, default=0.25, help="uniform-legal mix into the played action")
-    ap.add_argument("--draw-value", type=float, default=-0.25, help="value target for terminal non-overrun draws")
-    ap.add_argument("--skip-short-draw-turns", type=int, default=12, help="drop terminal draw games up to this many turns from replay")
+    ap.add_argument("--exploration-prob", type=float, default=0.15, help="uniform-legal mix into the played action")
+    ap.add_argument("--draw-value", type=float, default=-0.25, help="value/search target for all draws")
+    ap.add_argument("--skip-short-draw-turns", type=int, default=0, help="drop terminal draw games up to this many turns from replay; 0 disables")
     ap.add_argument("--eval-every", type=int, default=1)
     ap.add_argument("--eval-games", type=int, default=32)
     ap.add_argument("--league-every", type=int, default=20, help="snapshot a league checkpoint every N gens")
@@ -599,6 +599,7 @@ def main():
                 cpu_record_play_seconds=round(float(gen_stats.get("cpu_record_play_seconds", 0.0)), 2),
                 skipped_short_draw_games=int(gen_stats.get("skipped_short_draw_games", 0)),
                 skipped_short_draw_samples=int(gen_stats.get("skipped_short_draw_samples", 0)),
+                recorded_game_candidates=int(gen_stats.get("recorded_game_candidates", 0)),
             )
         msg = (
             f"gen {gen:3d} | samples {metric['samples']:6d} "
