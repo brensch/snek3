@@ -44,6 +44,7 @@ from .evaluate import evaluate, evaluate_vs_net
 from .net import AZNet, NetConfig, autocast as net_autocast, device_auto
 from .recorder import record_games
 from .runlog import RunWriter
+from .symmetry import augment_batch
 from .selfplay import ReplayBuffer, Samples, SelfPlayConfig, generate
 from .autotune import TuneLimits, TuneSettings, tune_next
 
@@ -109,11 +110,15 @@ def train_on_samples(
     n = obs.shape[0]
 
     net.train()
+    aug_rng = np.random.default_rng()
     pl = vl = 0.0
     for _ in range(steps):
         idx = np.random.randint(0, n, size=min(batch_size, n))
-        obs_b = torch.from_numpy(obs[idx]).to(device, non_blocking=True)
-        pol_b = torch.from_numpy(pol[idx]).to(device, non_blocking=True)
+        # D4 symmetry augmentation: rotate/reflect the egocentric obs and remap
+        # the policy target consistently (value targets are symmetry-invariant).
+        ob, pb = augment_batch(obs[idx], pol[idx], aug_rng)
+        obs_b = torch.from_numpy(ob).to(device, non_blocking=True)
+        pol_b = torch.from_numpy(pb).to(device, non_blocking=True)
         z_b = torch.from_numpy(z[idx]).to(device, non_blocking=True)
         with net_autocast(device):
             logits, value = net(obs_b)
