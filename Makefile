@@ -53,15 +53,26 @@ RUN_ID      ?=
 FRESH       ?=
 ARGS        ?=
 
+# Albatross trainer (proxy + response + UCT pool) defaults.
+ALB_COUNT      ?= 512   # equilibrium search is heavier per game than MCTS
+NUM_SNAKES     ?= 2
+TAU_MIN        ?= 0.5   # proxy: low end of the per-episode temperature range
+TAU_MAX        ?= 10.0  # proxy: high end (~optimal play)
+RESPONSE_TAU   ?= 12.0  # response: the rational agent's fixed temperature tau_R
+RESPONSE_AFTER ?= 30    # start the response net after this many proxy generations
+EVAL_OPP_TAU   ?= 1.0   # assumed opponent temperature for response eval
+UCT_ITERS      ?= 200   # UCB sims for the CPU UCT pool opponent
+LR             ?= 1e-3
+
 .DEFAULT_GOAL := help
-.PHONY: help venv build test test-rust test-py bench lint fmt train overnight adaptive ui dashboard serve audit clean clean-all
+.PHONY: help venv build test test-rust test-py bench lint fmt train albatross overnight adaptive ui dashboard serve audit clean clean-all
 
 help: ## Show this help
 	@echo "snek3 targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: GENERATIONS TOTAL_GENERATIONS ADAPTIVE_EVERY SAMPLES COUNT SIMS EXPLORATION_PROB DRAW_VALUE BOOTSTRAP_VALUE SKIP_SHORT_DRAW_TURNS DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS ADAPTIVE_TRAIN_STEPS BATCH_SIZE BUFFER_SIZE FILTERS BLOCKS EVAL_EVERY EVAL_GAMES RELATIVE_EVERY MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY RECORD_GAMES RECORD_EVERY RUN_ID ARGS PORT SERVE_PORT CKPT TORCH_INDEX"
+	@echo "Vars: GENERATIONS TOTAL_GENERATIONS ADAPTIVE_EVERY SAMPLES COUNT SIMS EXPLORATION_PROB DRAW_VALUE BOOTSTRAP_VALUE SKIP_SHORT_DRAW_TURNS DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS ADAPTIVE_TRAIN_STEPS BATCH_SIZE BUFFER_SIZE FILTERS BLOCKS EVAL_EVERY EVAL_GAMES RELATIVE_EVERY MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY RECORD_GAMES RECORD_EVERY RUN_ID ARGS ALB_COUNT NUM_SNAKES TAU_MIN TAU_MAX RESPONSE_TAU RESPONSE_AFTER EVAL_OPP_TAU UCT_ITERS LR PORT SERVE_PORT CKPT TORCH_INDEX"
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
@@ -109,6 +120,21 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 		--max-turns $(MAX_TURNS) \
 		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) \
 		--record-games $(RECORD_GAMES) --record-every $(RECORD_EVERY) \
+		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
+
+albatross: build ## Full Albatross: temperature-conditioned proxy + best-response net + UCT opponent pool. Override TAU_MIN/TAU_MAX, RESPONSE_AFTER, RUN_ID, FRESH=1...
+	$(PY) -m azsnek.train_albatross \
+		--generations $(GENERATIONS) --num-snakes $(NUM_SNAKES) \
+		--samples $(SAMPLES) --count $(ALB_COUNT) \
+		--depth $(DEPTH) --iters $(ITERS) \
+		--tau-min $(TAU_MIN) --tau-max $(TAU_MAX) \
+		--response-tau $(RESPONSE_TAU) --response-after $(RESPONSE_AFTER) \
+		--eval-opp-tau $(EVAL_OPP_TAU) --uct-iters $(UCT_ITERS) \
+		--exploration-prob $(EXPLORATION_PROB) --max-turns $(MAX_TURNS) \
+		--eval-batch-size $(EVAL_BATCH_SIZE) \
+		--filters $(FILTERS) --blocks $(BLOCKS) --lr $(LR) \
+		--train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) --buffer-size $(BUFFER_SIZE) \
+		--eval-every $(EVAL_EVERY) --eval-games $(EVAL_GAMES) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
 overnight: build ## Start a background overnight training run. Override TAU, GENERATIONS, SAMPLES, RUN_ID...
