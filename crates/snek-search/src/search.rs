@@ -53,7 +53,7 @@ pub struct Forest {
 /// Candidate moves for one snake: drop strictly-dominated suicides (reversing
 /// onto the neck, stepping off the board). A trapped snake keeps all moves (it
 /// dies regardless). Eliminated snakes get a single dummy move.
-fn candidates(board: &Board, i: usize) -> Vec<Move> {
+pub(crate) fn candidates(board: &Board, i: usize) -> Vec<Move> {
     let s = &board.snakes[i];
     if !s.alive() {
         return vec![DUMMY_MOVE];
@@ -79,7 +79,7 @@ fn candidates(board: &Board, i: usize) -> Vec<Move> {
 }
 
 /// Exact per-agent value at a terminal board: winner +1, losers -1, draw 0.
-fn terminal_values(board: &Board) -> [f32; MAX_SNAKES] {
+pub(crate) fn terminal_values(board: &Board) -> [f32; MAX_SNAKES] {
     let mut v = [0.0f32; MAX_SNAKES];
     match board.winner() {
         Some(w) => {

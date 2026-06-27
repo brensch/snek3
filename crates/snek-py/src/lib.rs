@@ -5,7 +5,8 @@
 
 use numpy::ndarray::Array;
 use numpy::{
-    IntoPyArray, PyArray2, PyArray3, PyArray4, PyArray5, PyReadonlyArray1, PyReadonlyArray2,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyArray4, PyArray5, PyReadonlyArray1,
+    PyReadonlyArray2,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -13,7 +14,7 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use snek_core::{encode_into, standard_start, Board, Move, NUM_CHANNELS};
-use snek_search::Forest;
+use snek_search::{Forest, MctsForest};
 
 fn move_from_u8(v: u8) -> Move {
     match v {
@@ -40,6 +41,8 @@ struct GameBatch {
     rng: Xoshiro256PlusPlus,
     /// Transient search forest between `prepare_search` and `backup_search`.
     forest: Option<Forest>,
+    /// Transient MCTS forest, driven by mcts_select / mcts_expand_backup.
+    mcts: Option<MctsForest>,
 }
 
 #[pymethods]
@@ -61,6 +64,7 @@ impl GameBatch {
             num_snakes,
             rng,
             forest: None,
+            mcts: None,
         })
     }
 
@@ -81,6 +85,7 @@ impl GameBatch {
                 num_snakes,
                 rng: Xoshiro256PlusPlus::seed_from_u64(0),
                 forest: None,
+                mcts: None,
             },
             me,
         ))
@@ -317,6 +322,83 @@ impl GameBatch {
             .map_err(|e| PyValueError::new_err(e.to_string()))?
             .into_pyarray_bound(py);
         Ok((pol, vals))
+    }
+
+    /// Begin a batched AlphaZero MCTS over the current boards. Drive it with
+    /// repeated mcts_select / mcts_expand_backup, then read mcts_root_targets.
+    #[pyo3(signature = (c_puct=1.5))]
+    fn mcts_new(&mut self, c_puct: f32) {
+        self.mcts = Some(MctsForest::new(&self.boards, c_puct));
+    }
+
+    /// One MCTS selection step across all games. Returns `(pending, obs)`:
+    /// `pending` [k] int64 game indices whose leaf needs a network estimate
+    /// (terminal leaves were already backed up), and `obs`
+    /// [k, num_snakes, C, H, W] float32 leaf observations for those games.
+    fn mcts_select<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyArray1<i64>>, Bound<'py, PyArray5<f32>>)> {
+        let forest = self
+            .mcts
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("call mcts_new before mcts_select"))?;
+        let pending = forest.select();
+        let n = forest.n_snakes;
+        let (c, h, w) = (forest.channels, forest.height, forest.width);
+        let obs_size = forest.obs_size();
+        let mut flat = vec![0.0f32; pending.len() * n * obs_size];
+        forest.write_pending_obs(&pending, &mut flat);
+        let pend_arr = PyArray1::from_vec_bound(py, pending.iter().map(|&x| x as i64).collect());
+        let obs_arr = Array::from_shape_vec((pending.len(), n, c, h, w), flat)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .into_pyarray_bound(py);
+        Ok((pend_arr, obs_arr))
+    }
+
+    /// Expand and back up the evaluated leaves. `pending` [k] int64 (from
+    /// mcts_select), `policies` [k*num_snakes*4] probabilities, `values`
+    /// [k*num_snakes], both flattened row-major.
+    fn mcts_expand_backup(
+        &mut self,
+        pending: PyReadonlyArray1<i64>,
+        policies: PyReadonlyArray1<f32>,
+        values: PyReadonlyArray1<f32>,
+    ) -> PyResult<()> {
+        let forest = self
+            .mcts
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("call mcts_new before mcts_expand_backup"))?;
+        let pend: Vec<usize> = pending
+            .as_slice()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .iter()
+            .map(|&x| x as usize)
+            .collect();
+        let pol = policies.as_slice().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let val = values.as_slice().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        forest.expand_backup(&pend, pol, val);
+        Ok(())
+    }
+
+    /// Read MCTS root targets: `(policies [count, num_snakes, 4]` visit-count
+    /// distributions, `values [count, num_snakes]` mean root values)`.
+    fn mcts_root_targets<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyArray3<f32>>, Bound<'py, PyArray2<f32>>)> {
+        let forest = self
+            .mcts
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("call mcts_new before mcts_root_targets"))?;
+        let (pol, val) = forest.root_targets();
+        let pol_arr = Array::from_shape_vec((self.boards.len(), self.num_snakes, 4), pol)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .into_pyarray_bound(py);
+        let val_arr = Array::from_shape_vec((self.boards.len(), self.num_snakes), val)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .into_pyarray_bound(py);
+        Ok((pol_arr, val_arr))
     }
 
     /// JSON snapshot of game `i`'s board state, for recording replays:

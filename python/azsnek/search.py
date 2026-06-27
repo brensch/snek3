@@ -77,6 +77,66 @@ def run_search(
     return batch.backup_search(values, tau, iters)
 
 
+@torch.no_grad()
+def mcts_search(
+    batch,
+    net: AZNet,
+    device: torch.device,
+    sims: int = 128,
+    c_puct: float = 1.5,
+    eval_batch_size: int = 8192,
+    temp=None,
+):
+    """AlphaZero MCTS over every game in `batch` (decoupled-PUCT, simultaneous
+    moves). Uses BOTH heads: policy = priors, value = leaf eval. Returns
+    `(policies, root_values)` — visit-count policy targets `[count, num_snakes,
+    4]` and mean root values `[count, num_snakes]`.
+
+    `temp` optionally conditions a temperature-aware net at the leaves (scalar or
+    per-agent length `num_snakes`).
+    """
+    net.eval()
+    n = int(batch.num_snakes)
+    use_temp = getattr(net.cfg, "temperature_input", False) and temp is not None
+    temp_arr = None
+    if use_temp:
+        t = np.asarray(temp, dtype=np.float32).reshape(-1)
+        temp_arr = t  # tiled per leaf below
+
+    batch.mcts_new(c_puct)
+    for _ in range(sims):
+        pending, obs = batch.mcts_select()  # obs: [k, n, C, H, W]
+        k = int(pending.shape[0])
+        if k == 0:
+            continue
+        m = k * n
+        flat = obs.reshape(m, *obs.shape[2:])
+        leaf_temp = None
+        if use_temp:
+            leaf_temp = (
+                np.full(m, float(temp_arr[0]), dtype=np.float32)
+                if temp_arr.size == 1
+                else np.tile(temp_arr, k)
+            )
+        pol_out = np.empty((m, 4), dtype=np.float32)
+        val_out = np.empty((m,), dtype=np.float32)
+        ebs = eval_batch_size if eval_batch_size > 0 else m
+        for s in range(0, m, ebs):
+            e = min(s + ebs, m)
+            obs_t = torch.from_numpy(flat[s:e]).to(device, non_blocking=True)
+            temp_t = (
+                torch.from_numpy(leaf_temp[s:e]).to(device, non_blocking=True)
+                if use_temp else None
+            )
+            with net_autocast(device):
+                logits, value = net(obs_t, temp_t)
+                probs = torch.softmax(logits.float(), dim=1)
+            pol_out[s:e] = probs.cpu().numpy()
+            val_out[s:e] = value.detach().float().cpu().numpy()
+        batch.mcts_expand_backup(pending, pol_out.reshape(-1), val_out.reshape(-1))
+    return batch.mcts_root_targets()
+
+
 def sample_actions(policy: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     """Sample one action per snake from a `[count, N, 4]` policy (vectorized).
 
