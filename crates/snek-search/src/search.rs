@@ -11,7 +11,7 @@
 
 use crate::le;
 use rayon::prelude::*;
-use snek_core::{encode_into, Board, Move, MAX_SNAKES, NUM_CHANNELS};
+use snek_core::{encode_into, obs_side, Board, Move, MAX_SNAKES, NUM_CHANNELS};
 
 /// Placeholder move for eliminated snakes (ignored by `step`).
 const DUMMY_MOVE: Move = Move::Up;
@@ -234,9 +234,10 @@ impl Forest {
     /// Build the search forest for `boards`, expanding each to `depth` plies.
     pub fn build(boards: &[Board], depth: u32) -> Forest {
         let n_snakes = boards.first().map(|b| b.snakes.len()).unwrap_or(0);
+        // Observation canvas dims are egocentric (head-centred): 2*side-1.
         let (height, width) = boards
             .first()
-            .map(|b| (b.height as usize, b.width as usize))
+            .map(|b| (obs_side(b.height as usize), obs_side(b.width as usize)))
             .unwrap_or((0, 0));
 
         let mut forest = Forest {

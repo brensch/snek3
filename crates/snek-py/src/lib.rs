@@ -15,7 +15,7 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rand::Rng;
-use snek_core::{encode_into, standard_start, Board, Move, NUM_CHANNELS};
+use snek_core::{encode_into, obs_side, standard_start, Board, Move, NUM_CHANNELS};
 use snek_infer::Net;
 use snek_search::{Forest, MctsForest};
 
@@ -152,8 +152,8 @@ impl GameBatch {
     /// Egocentric observations for every snake in every game:
     /// shape `[count, num_snakes, channels, height, width]`, dtype float32.
     fn encode<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray5<f32>> {
-        let h = self.height as usize;
-        let w = self.width as usize;
+        let h = obs_side(self.height as usize);
+        let w = obs_side(self.width as usize);
         let n = self.num_snakes;
         let c = NUM_CHANNELS;
         let per_obs = c * h * w;
@@ -440,8 +440,8 @@ fn encode_move_request<'py>(
 ) -> PyResult<(Bound<'py, PyArray3<f32>>, usize, Bound<'py, numpy::PyArray1<u8>>)> {
     let (board, me) =
         snek_core::json::parse_move_request(body).map_err(PyValueError::new_err)?;
-    let h = board.height as usize;
-    let w = board.width as usize;
+    let h = obs_side(board.height as usize);
+    let w = obs_side(board.width as usize);
     let c = NUM_CHANNELS;
     let mut flat = vec![0.0f32; c * h * w];
     encode_one(&board, me, &mut flat);
@@ -604,8 +604,8 @@ fn generate_selfplay<'py>(
     Bound<'py, PyDict>,
 )> {
     let c = NUM_CHANNELS;
-    let h = board as usize;
-    let w = board as usize;
+    let h = obs_side(board as usize);
+    let w = obs_side(board as usize);
     let obs_size = c * h * w;
     let n = num_snakes;
 

@@ -195,7 +195,8 @@ def export_onnx(net, channels: int, board: int, device, path) -> None:
     import warnings
 
     net.eval()
-    dummy = torch.zeros(1, channels, board, board, device=device)
+    side = 2 * board - 1  # egocentric (head-centred) canvas side = obs_side(board)
+    dummy = torch.zeros(1, channels, side, side, device=device)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         torch.onnx.export(

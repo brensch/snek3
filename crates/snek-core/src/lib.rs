@@ -22,7 +22,7 @@ pub mod setup;
 pub mod json;
 
 pub use body::{Body, MAX_BODY};
-pub use encode::{encode_into, obs_len, NUM_CHANNELS};
+pub use encode::{encode_into, obs_h, obs_len, obs_side, obs_w, NUM_CHANNELS};
 pub use setup::standard_start;
 
 /// Maximum number of snakes supported in a single game.

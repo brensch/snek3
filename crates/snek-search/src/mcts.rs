@@ -17,7 +17,7 @@
 
 use crate::search::{candidates, terminal_values_with_draw};
 use rayon::prelude::*;
-use snek_core::{encode_into, Board, Move, MAX_SNAKES, NUM_CHANNELS};
+use snek_core::{encode_into, obs_side, Board, Move, MAX_SNAKES, NUM_CHANNELS};
 
 const DUMMY_MOVE: Move = Move::Up;
 
@@ -289,9 +289,10 @@ impl MctsForest {
 
     pub fn new_with_draw_value(boards: &[Board], c_puct: f32, draw_value: f32) -> Self {
         let n_snakes = boards.first().map(|b| b.snakes.len()).unwrap_or(0);
+        // Observation canvas dims are egocentric (head-centred): 2*side-1.
         let (height, width) = boards
             .first()
-            .map(|b| (b.height as usize, b.width as usize))
+            .map(|b| (obs_side(b.height as usize), obs_side(b.width as usize)))
             .unwrap_or((0, 0));
         MctsForest {
             trees: boards

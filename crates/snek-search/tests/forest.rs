@@ -20,13 +20,16 @@ fn build_collects_leaf_observations() {
         forest.eval_count() > 0,
         "depth-2 search has leaves to evaluate"
     );
-    assert_eq!(forest.obs_size(), 9 * 11 * 11);
+    // Egocentric (head-centred) canvas: side = 2*11-1 = 21.
+    let side = 2 * 11 - 1;
+    assert_eq!(forest.obs_size(), 9 * side * side);
 
     let mut obs = vec![0.0f32; forest.eval_count() * forest.obs_size()];
     forest.write_observations(&mut obs);
-    // Board-mask channel of the first observation is all ones.
-    let board_mask = &obs[8 * 11 * 11..9 * 11 * 11];
-    assert!(board_mask.iter().all(|&x| x == 1.0));
+    // Board-mask channel marks exactly the real board cells (11*11 of them) on
+    // the larger egocentric canvas, not the whole plane.
+    let board_mask = &obs[8 * side * side..9 * side * side];
+    assert_eq!(board_mask.iter().filter(|&&x| x == 1.0).count(), 11 * 11);
 }
 
 #[test]
