@@ -61,15 +61,15 @@ def estimate_opponent_tau(proxy, device, obs_hist, act_hist) -> float:
 
 
 @torch.no_grad()
-def _winrate_vs_baseline(action_fn, board, num_snakes, games, seed, max_turns) -> float:
-    """Snake 0 = our agent (greedy via `action_fn(batch) -> [count] move idx`),
-    snake 1 = flood-fill baseline. Returns win rate (draws = half)."""
+def _winrate_vs(agent_fn, opp_fn, board, num_snakes, games, seed, max_turns) -> float:
+    """Snake 0 = our agent (`agent_fn(batch) -> [count] move idx`), snake 1 =
+    pool opponent (`opp_fn(batch) -> [count] move idx`). Win rate (draws=half)."""
     batch = snek.GameBatch(board, board, num_snakes, count=games, seed=seed)
     steps = 0
     while not np.all(batch.done()) and (max_turns <= 0 or steps < max_turns):
-        agent = action_fn(batch)
-        base = batch.baseline_actions()[:, 1]
-        actions = np.stack([agent, base], axis=1).astype(np.uint8)
+        agent = agent_fn(batch)
+        opp = opp_fn(batch)
+        actions = np.stack([agent, opp], axis=1).astype(np.uint8)
         batch.step(actions)
         steps += 1
     winners = batch.winners()
@@ -81,28 +81,38 @@ def _winrate_vs_baseline(action_fn, board, num_snakes, games, seed, max_turns) -
 
 
 @torch.no_grad()
-def evaluate_albatross(proxy, response, device, cfg: SelfPlayConfig, games, seed, eval_opp_tau):
-    """Win rate vs the flood-fill baseline for the proxy (near-optimal tau) and,
-    if present, the response (best-responding at tau_R to an assumed-weak
-    opponent at `eval_opp_tau`)."""
+def evaluate_albatross(proxy, response, device, cfg: SelfPlayConfig, games, seed,
+                       eval_opp_tau, uct_iters):
+    """Win rate of the proxy (near-optimal tau) and the response (best-responding
+    at tau_R to an assumed-weak opponent at `eval_opp_tau`) against the opponent
+    pool: the 1-ply flood-fill baseline and the CPU UCT agent (stronger)."""
     def proxy_action(batch):
         pol, _ = run_search(batch, proxy, device, cfg.depth, cfg.tau_max, cfg.iters,
                             cfg.eval_batch_size, return_root_values=True, temp=cfg.tau_max)
         return greedy_actions(pol)[:, 0]
 
-    out = {"proxy_win_rate": _winrate_vs_baseline(
-        proxy_action, cfg.board, cfg.num_snakes, games, seed, cfg.max_turns)}
+    def response_action(batch):
+        # Leaf values from proxy; for serving, use the response net + per-opponent
+        # MLE tau (estimate_opponent_tau) instead of a fixed eval_opp_tau.
+        pol, _ = run_search_hetero(batch, proxy, device, cfg.depth,
+                                   [cfg.response_tau, eval_opp_tau], cfg.iters,
+                                   cfg.eval_batch_size, temp=eval_opp_tau)
+        return greedy_actions(pol)[:, 0]
 
+    # Opponent pool: name -> action fn for snake 1.
+    pool = {
+        "baseline": lambda b: b.baseline_actions()[:, 1],
+        "uct": lambda b: np.asarray(b.heuristic_actions(iters=uct_iters, seed=seed))[:, 1],
+    }
+    agents = {"proxy": proxy_action}
     if response is not None:
-        def response_action(batch):
-            pol, _ = run_search_hetero(batch, proxy, device, cfg.depth,
-                                       [cfg.response_tau, eval_opp_tau], cfg.iters,
-                                       cfg.eval_batch_size, temp=eval_opp_tau)
-            # Note: leaf values from proxy; for serving, use the response net +
-            # per-opponent MLE tau (estimate_opponent_tau).
-            return greedy_actions(pol)[:, 0]
-        out["response_win_rate"] = _winrate_vs_baseline(
-            response_action, cfg.board, cfg.num_snakes, games, seed + 1, cfg.max_turns)
+        agents["response"] = response_action
+
+    out = {}
+    for aname, afn in agents.items():
+        for oname, ofn in pool.items():
+            out[f"{aname}_vs_{oname}"] = _winrate_vs(
+                afn, ofn, cfg.board, cfg.num_snakes, games, seed, cfg.max_turns)
     return out
 
 
@@ -122,6 +132,8 @@ def build_args():
                     help="start training the response net after this many proxy generations")
     ap.add_argument("--eval-opp-tau", type=float, default=1.0,
                     help="assumed opponent temperature for response eval vs baseline")
+    ap.add_argument("--uct-iters", type=int, default=200,
+                    help="UCB simulations for the CPU UCT pool opponent in eval")
     ap.add_argument("--exploration-prob", type=float, default=0.15)
     ap.add_argument("--max-turns", type=int, default=200)
     ap.add_argument("--eval-batch-size", type=int, default=8192)
@@ -224,7 +236,8 @@ def main():
         if args.eval_every and gen % args.eval_every == 0:
             ev = evaluate_albatross(
                 proxy, response if train_response else None, device, spcfg,
-                games=args.eval_games, seed=7000 + gen, eval_opp_tau=args.eval_opp_tau)
+                games=args.eval_games, seed=7000 + gen, eval_opp_tau=args.eval_opp_tau,
+                uct_iters=args.uct_iters)
             metric.update({k: round(v, 4) for k, v in ev.items()})
 
         log_phase(logger, "GEN", " ".join(f"{k}={v}" for k, v in metric.items()))
