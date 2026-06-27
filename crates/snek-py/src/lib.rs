@@ -17,7 +17,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rand::Rng;
 use snek_core::{encode_into, obs_side, standard_start, Board, Move, NUM_CHANNELS};
 use snek_infer::Net;
-use snek_search::{Forest, MctsForest};
+use snek_search::{uct_actions, Forest, MctsForest};
 
 fn move_from_u8(v: u8) -> Move {
     match v {
@@ -179,6 +179,31 @@ impl GameBatch {
         for (g, board) in self.boards.iter().enumerate() {
             for s in 0..n {
                 flat[g * n + s] = snek_core::baseline::baseline_action(board, s) as u8;
+            }
+        }
+        Array::from_shape_vec((self.boards.len(), n), flat)
+            .unwrap()
+            .into_pyarray_bound(py)
+    }
+
+    /// Pure-CPU UCT (decoupled-UCB + Voronoi heuristic) action per snake, shape
+    /// `[count, num_snakes]`, dtype uint8. A strong fixed (non-net) opponent that
+    /// runs on idle CPU cores (parallel across games) concurrently with GPU net
+    /// inference. `iters` UCB simulations per game; higher `c_uct` explores more.
+    #[pyo3(signature = (iters=256, c_uct=1.4, seed=0))]
+    fn heuristic_actions<'py>(
+        &self,
+        py: Python<'py>,
+        iters: usize,
+        c_uct: f32,
+        seed: u64,
+    ) -> Bound<'py, PyArray2<u8>> {
+        let n = self.num_snakes;
+        let acts = py.allow_threads(|| uct_actions(&self.boards, iters, c_uct, seed));
+        let mut flat = vec![0u8; self.boards.len() * n];
+        for (g, mv) in acts.iter().enumerate() {
+            for s in 0..n {
+                flat[g * n + s] = mv[s] as u8;
             }
         }
         Array::from_shape_vec((self.boards.len(), n), flat)

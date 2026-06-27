@@ -7,7 +7,9 @@
 pub mod le;
 pub mod mcts;
 pub mod search;
+pub mod uct;
 
 pub use le::{solve as solve_le, LeSolution};
 pub use mcts::MctsForest;
 pub use search::Forest;
+pub use uct::uct_actions;
