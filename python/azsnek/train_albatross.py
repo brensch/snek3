@@ -16,6 +16,12 @@ Run with `python -m azsnek.train_albatross --generations ... [--fresh] [--run-id
 
 from __future__ import annotations
 
+import os
+
+# Must be set before torch initializes CUDA: expandable segments cut allocator
+# fragmentation and avoid spilling into (slow) shared GPU memory on WSL2.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import argparse
 import random
 import time
@@ -136,7 +142,9 @@ def build_args():
                     help="UCB simulations for the CPU UCT pool opponent in eval")
     ap.add_argument("--exploration-prob", type=float, default=0.15)
     ap.add_argument("--max-turns", type=int, default=200)
-    ap.add_argument("--eval-batch-size", type=int, default=8192)
+    # Egocentric obs are 21x21 (3.6x the cells of 11x11), so conv activations are
+    # ~3.6x larger; keep the leaf-eval batch modest to stay within dedicated VRAM.
+    ap.add_argument("--eval-batch-size", type=int, default=2048)
     ap.add_argument("--filters", type=int, default=64)
     ap.add_argument("--blocks", type=int, default=6)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -200,8 +208,11 @@ def main():
     run.write_status({"generation": start_gen - 1, "running": True,
                       "total_generations": args.generations})
 
+    cuda = device.type == "cuda"
     for gen in range(start_gen, args.generations):
         t0 = time.time()
+        if cuda:
+            torch.cuda.reset_peak_memory_stats()
         # --- proxy self-play + train ---
         ps = generate_proxy(proxy, device, spcfg, seed=1000 + gen)
         proxy_buf.add(ps)
@@ -238,6 +249,8 @@ def main():
         if rstats:
             metric["response_policy_loss"] = round(rstats["policy_loss"], 4)
             metric["response_value_loss"] = round(rstats["value_loss"], 4)
+        if cuda:
+            metric["gpu_peak_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
 
         # --- eval ---
         if args.eval_every and gen % args.eval_every == 0:

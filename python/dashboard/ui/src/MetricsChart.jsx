@@ -178,6 +178,7 @@ export default function MetricsChart({ metrics }) {
         ["mean turns", fmt(hover.metric.proxy_mean_turns, 1)],
         ["samples", hover.metric.samples != null ? Number(hover.metric.samples).toLocaleString() : null],
         ["gen sec", fmt(hover.metric.gen_seconds, 1)],
+        ["GPU peak GB", fmt(hover.metric.gpu_peak_gb, 2)],
       ].filter(([, value]) => value != null)
     : [];
 

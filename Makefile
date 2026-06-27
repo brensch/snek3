@@ -63,6 +63,11 @@ RESPONSE_AFTER ?= 30    # start the response net after this many proxy generatio
 EVAL_OPP_TAU   ?= 1.0   # assumed opponent temperature for response eval
 UCT_ITERS      ?= 200   # UCB sims for the CPU UCT pool opponent
 LR             ?= 1e-3
+# Egocentric obs are 21x21 (3.6x the cells of 11x11) so conv activations are big;
+# keep Albatross GPU batches modest to stay within dedicated VRAM (watch
+# gpu_peak_gb in the metrics and raise if you have headroom).
+ALB_EVAL_BATCH ?= 2048
+ALB_BATCH      ?= 1024
 
 .DEFAULT_GOAL := help
 .PHONY: help venv build test test-rust test-py bench lint fmt train albatross overnight adaptive ui dashboard serve audit clean clean-all
@@ -131,9 +136,9 @@ albatross: build ## Full Albatross: temperature-conditioned proxy + best-respons
 		--response-tau $(RESPONSE_TAU) --response-after $(RESPONSE_AFTER) \
 		--eval-opp-tau $(EVAL_OPP_TAU) --uct-iters $(UCT_ITERS) \
 		--exploration-prob $(EXPLORATION_PROB) --max-turns $(MAX_TURNS) \
-		--eval-batch-size $(EVAL_BATCH_SIZE) \
+		--eval-batch-size $(ALB_EVAL_BATCH) \
 		--filters $(FILTERS) --blocks $(BLOCKS) --lr $(LR) \
-		--train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) --buffer-size $(BUFFER_SIZE) \
+		--train-steps $(TRAIN_STEPS) --batch-size $(ALB_BATCH) --buffer-size $(BUFFER_SIZE) \
 		--eval-every $(EVAL_EVERY) --eval-games $(EVAL_GAMES) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
