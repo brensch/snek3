@@ -16,7 +16,7 @@ import snek
 import torch
 
 from .net import AZNet
-from .search import mcts_search, sample_actions
+from .search import mcts_search, run_search, run_search_hetero, sample_actions
 
 
 @dataclass
@@ -32,6 +32,12 @@ class SelfPlayConfig:
     dirichlet_frac: float = 0.25  # root exploration noise mix (0 disables)
     dirichlet_alpha: float = 0.3
     exploration_prob: float = 0.25  # mix this much uniform-legal into the played action
+    # Albatross equilibrium-search params (proxy/response).
+    depth: int = 2  # fixed-depth equilibrium search plies
+    iters: int = 120  # logit-equilibrium SFP iterations per node
+    tau_min: float = 0.5  # proxy: low end of the per-episode temperature distribution
+    tau_max: float = 10.0  # proxy: high end (>= ~10 ~ near-optimal play)
+    response_tau: float = 12.0  # response: the rational agent's fixed temperature (tau_R)
 
 
 @dataclass
@@ -39,31 +45,40 @@ class Samples:
     obs: np.ndarray  # [K, C, H, W] float32
     pol: np.ndarray  # [K, 4] float32
     z: np.ndarray  # [K] float32
+    temp: np.ndarray | None = None  # [K] float32 per-sample temperature (Albatross)
     turns: int = 0  # total board-turns stepped (for throughput)
     games: int = 0  # total games finished
 
 
 class ReplayBuffer:
     """Sliding window of recent self-play samples (AlphaZero trains on a window
-    of recent games, not just the latest generation)."""
+    of recent games, not just the latest generation). Optionally carries a
+    per-sample temperature (`temp`) for Albatross temperature-conditioned nets."""
 
     def __init__(self, capacity: int):
         self.capacity = capacity
         self._obs: deque[np.ndarray] = deque()
         self._pol: deque[np.ndarray] = deque()
         self._z: deque[np.ndarray] = deque()
+        self._temp: deque[np.ndarray] = deque()
+        self._has_temp = False
         self._n = 0
 
     def add(self, s: Samples) -> None:
         self._obs.append(s.obs)
         self._pol.append(s.pol)
         self._z.append(s.z)
+        if s.temp is not None:
+            self._temp.append(s.temp)
+            self._has_temp = True
         self._n += len(s.z)
         while self._n > self.capacity and len(self._z) > 1:
             self._n -= len(self._z[0])
             self._obs.popleft()
             self._pol.popleft()
             self._z.popleft()
+            if self._has_temp:
+                self._temp.popleft()
 
     def __len__(self) -> int:
         return self._n
@@ -73,6 +88,7 @@ class ReplayBuffer:
             obs=np.concatenate(self._obs, axis=0),
             pol=np.concatenate(self._pol, axis=0),
             z=np.concatenate(self._z, axis=0),
+            temp=np.concatenate(self._temp, axis=0) if self._has_temp else None,
         )
 
 
@@ -184,6 +200,129 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
         obs=np.concatenate(out_obs, axis=0),
         pol=np.concatenate(out_pol, axis=0),
         z=np.concatenate(out_z, axis=0),
+        turns=turns_total,
+        games=games_total,
+    )
+
+
+@torch.no_grad()
+def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -> Samples:
+    """Albatross PROXY self-play. A per-generation temperature `tau` is sampled
+    from [tau_min, tau_max]; all agents play the logit equilibrium at `tau`
+    (fixed-depth equilibrium search), and the net is conditioned on `tau`. Both
+    targets come from the equilibrium, not the game outcome:
+      * policy target  = LE root policy at `tau`
+      * value target   = LE root expected utility at `tau` (per-step bootstrap)
+    so the net learns pi_P(o, tau) and v_P(o, tau). Over generations `tau` ranges
+    across the interval, training the temperature-conditioned proxy.
+    """
+    rng = np.random.default_rng(seed)
+    batch = snek.GameBatch(cfg.board, cfg.board, cfg.num_snakes, count=cfg.count, seed=seed)
+    tau = float(rng.uniform(cfg.tau_min, cfg.tau_max))  # per-generation temperature
+
+    out_obs: list[np.ndarray] = []
+    out_pol: list[np.ndarray] = []
+    out_z: list[np.ndarray] = []
+    out_temp: list[np.ndarray] = []
+    collected = 0
+    turns_total = 0
+    games_total = 0
+
+    while collected < cfg.samples_per_gen:
+        policy, root_vals = run_search(
+            batch, net, device, cfg.depth, tau, cfg.iters,
+            cfg.eval_batch_size, return_root_values=True, temp=tau,
+        )  # policy [count, N, 4] LE policy; root_vals [count, N] LE expected utility
+        obs = batch.encode()
+        alive = batch.alive().astype(bool)
+        turns_total += int(np.sum(batch.done() == 0))
+        for g in range(cfg.count):
+            live = alive[g]
+            if not live.any():
+                continue
+            out_obs.append(obs[g][live])
+            out_pol.append(policy[g][live])
+            out_z.append(root_vals[g][live].astype(np.float32))
+            out_temp.append(np.full(int(live.sum()), tau, dtype=np.float32))
+            collected += int(live.sum())
+
+        play = mix_uniform(policy, cfg.exploration_prob)
+        actions = sample_actions(play, rng)
+        batch.step(actions)
+        games_total += int(np.sum(batch.done()))
+        batch.reset_done()
+
+    return Samples(
+        obs=np.concatenate(out_obs, axis=0),
+        pol=np.concatenate(out_pol, axis=0),
+        z=np.concatenate(out_z, axis=0),
+        temp=np.concatenate(out_temp, axis=0),
+        turns=turns_total,
+        games=games_total,
+    )
+
+
+@torch.no_grad()
+def generate_response(
+    net: AZNet,
+    proxy: AZNet,
+    device: torch.device,
+    cfg: SelfPlayConfig,
+    seed: int,
+) -> Samples:
+    """Albatross RESPONSE self-play (2-player). Agent 0 is the rational responder
+    at fixed temperature `response_tau` (tau_R); agent 1 is a weak opponent at a
+    per-generation sampled temperature `tau_opp`. A heterogeneous-temperature
+    equilibrium search ([tau_R, tau_opp]) over leaf values from the frozen
+    `proxy` net yields, for the responder, the smooth-best-response policy and
+    its expected value -- the targets for the response net, conditioned on the
+    OPPONENT's temperature `tau_opp`. Both agents are driven by the same search
+    (responder samples its policy, opponent samples its LE policy).
+    """
+    assert cfg.num_snakes == 2, "response model is defined for 2-player duels"
+    rng = np.random.default_rng(seed)
+    batch = snek.GameBatch(cfg.board, cfg.board, 2, count=cfg.count, seed=seed)
+    tau_opp = float(rng.uniform(cfg.tau_min, cfg.tau_max))  # weak opponent temperature
+    tau_pair = [cfg.response_tau, tau_opp]
+
+    out_obs: list[np.ndarray] = []
+    out_pol: list[np.ndarray] = []
+    out_z: list[np.ndarray] = []
+    out_temp: list[np.ndarray] = []
+    collected = 0
+    turns_total = 0
+    games_total = 0
+
+    while collected < cfg.samples_per_gen:
+        # Leaf values from the frozen proxy, conditioned on the opponent's tau
+        # (the weak agent sets the game's character).
+        policy, root_vals = run_search_hetero(
+            batch, proxy, device, cfg.depth, tau_pair, cfg.iters,
+            cfg.eval_batch_size, temp=tau_opp,
+        )  # policy [count, 2, 4]; root_vals [count, 2]
+        obs = batch.encode()
+        alive = batch.alive().astype(bool)
+        turns_total += int(np.sum(batch.done() == 0))
+        # Record ONLY the responder (agent 0); it is what the response net learns.
+        for g in range(cfg.count):
+            if alive[g, 0]:
+                out_obs.append(obs[g, 0][None])
+                out_pol.append(policy[g, 0][None])
+                out_z.append(root_vals[g, 0][None].astype(np.float32))
+                out_temp.append(np.full(1, tau_opp, dtype=np.float32))
+                collected += 1
+
+        play = mix_uniform(policy, cfg.exploration_prob)
+        actions = sample_actions(play, rng)
+        batch.step(actions)
+        games_total += int(np.sum(batch.done()))
+        batch.reset_done()
+
+    return Samples(
+        obs=np.concatenate(out_obs, axis=0),
+        pol=np.concatenate(out_pol, axis=0),
+        z=np.concatenate(out_z, axis=0),
+        temp=np.concatenate(out_temp, axis=0),
         turns=turns_total,
         games=games_total,
     )

@@ -78,6 +78,52 @@ def run_search(
 
 
 @torch.no_grad()
+def run_search_hetero(
+    batch,
+    net: AZNet,
+    device: torch.device,
+    depth: int,
+    tau_per_agent,
+    iters: int = 200,
+    eval_batch_size: int = 8192,
+    temp=None,
+):
+    """Heterogeneous-temperature equilibrium search: per-agent `tau_per_agent`
+    (length num_snakes) instead of one shared value, for SBRLE-style play where a
+    rational agent (high tau) best-responds to weaker agents (low tau). Leaf
+    values come from `net` (optionally temperature-conditioned via `temp`, a
+    scalar applied to all leaves). Returns `(policies [count, N, 4],
+    root_values [count, N])`.
+    """
+    tau_list = [float(t) for t in tau_per_agent]
+    obs = batch.prepare_search(depth)  # [M, C, H, W] float32
+    if obs.shape[0] == 0:
+        values = np.zeros((0,), dtype=np.float32)
+        return batch.backup_search_hetero(values, tau_list, iters)
+
+    net.eval()
+    use_temp = getattr(net.cfg, "temperature_input", False) and temp is not None
+    temp_all = (
+        np.full(obs.shape[0], float(temp), dtype=np.float32) if use_temp else None
+    )
+    if eval_batch_size <= 0:
+        eval_batch_size = obs.shape[0]
+    values = np.empty((obs.shape[0],), dtype=np.float32)
+    for start in range(0, obs.shape[0], eval_batch_size):
+        end = min(start + eval_batch_size, obs.shape[0])
+        obs_t = torch.from_numpy(obs[start:end]).to(device, non_blocking=True)
+        temp_t = (
+            torch.from_numpy(temp_all[start:end]).to(device, non_blocking=True)
+            if use_temp else None
+        )
+        with net_autocast(device):
+            _, value = net(obs_t, temp_t)
+        values[start:end] = value.detach().to("cpu", dtype=torch.float32).numpy()
+        del obs_t, value
+    return batch.backup_search_hetero(values, tau_list, iters)
+
+
+@torch.no_grad()
 def mcts_search(
     batch,
     net: AZNet,

@@ -107,6 +107,8 @@ def train_on_samples(
     obs = samples.obs
     pol = samples.pol
     z = samples.z
+    temp = samples.temp  # [n] per-sample temperature, or None
+    use_temp = temp is not None and getattr(net.cfg, "temperature_input", False)
     n = obs.shape[0]
 
     net.train()
@@ -115,13 +117,17 @@ def train_on_samples(
     for _ in range(steps):
         idx = np.random.randint(0, n, size=min(batch_size, n))
         # D4 symmetry augmentation: rotate/reflect the egocentric obs and remap
-        # the policy target consistently (value targets are symmetry-invariant).
+        # the policy target consistently (value targets and the scalar temperature
+        # are symmetry-invariant).
         ob, pb = augment_batch(obs[idx], pol[idx], aug_rng)
         obs_b = torch.from_numpy(ob).to(device, non_blocking=True)
         pol_b = torch.from_numpy(pb).to(device, non_blocking=True)
         z_b = torch.from_numpy(z[idx]).to(device, non_blocking=True)
+        temp_b = (
+            torch.from_numpy(temp[idx]).to(device, non_blocking=True) if use_temp else None
+        )
         with net_autocast(device):
-            logits, value = net(obs_b)
+            logits, value = net(obs_b, temp_b)
             logp = F.log_softmax(logits, dim=1)
             # Soft-target cross-entropy; illegal moves have target 0.
             policy_loss = -(pol_b * logp).sum(dim=1).mean()
