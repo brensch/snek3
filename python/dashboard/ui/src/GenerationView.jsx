@@ -59,18 +59,20 @@ export default function GenerationView({ run, gamesIndex, metrics }) {
 
   const gameGroups = useMemo(() => {
     const games = genData?.games || [];
-    return [
-      {
-        key: "baseline",
-        title: "Net vs baseline",
-        games: games.filter((g) => g.opponent !== "net"),
-      },
-      {
-        key: "net",
-        title: "Net self-play",
-        games: games.filter((g) => g.opponent === "net"),
-      },
-    ].filter((g) => g.games.length > 0);
+    // One group per distinct opponent label (e.g. proxy-v-uct, response-v-baseline),
+    // ordered by first appearance.
+    const order = [];
+    const byOpp = {};
+    for (const g of games) {
+      const key = g.opponent || "baseline";
+      if (!byOpp[key]) { byOpp[key] = []; order.push(key); }
+      byOpp[key].push(g);
+    }
+    const title = (k) =>
+      k === "net" ? "Net self-play"
+      : k === "baseline" ? "Net vs baseline"
+      : k.replace(/-v-/g, " vs ");
+    return order.map((k) => ({ key: k, title: title(k), games: byOpp[k] }));
   }, [genData]);
 
   const selfplay = genData?.selfplay;

@@ -7,11 +7,16 @@ export const ROLE_COLORS = {
 export const COLORS = [ROLE_COLORS.net, ROLE_COLORS.baseline, "#f59e0b", "#ec4899", "#a78bfa", "#f87171", "#2dd4bf", "#facc15"];
 
 export function snakeRole(opponent, index) {
-  return index === 0 || opponent === "net" ? "net" : "baseline";
+  if (opponent === "net") return "net";
+  // "agent-v-opp" labels (e.g. proxy-v-uct): snake 0 is our agent, snake 1 the opponent.
+  const parts = (opponent || "").split("-v-");
+  if (parts.length === 2) return index === 0 ? parts[0] : parts[1];
+  return index === 0 ? "net" : "baseline";
 }
 
 export function snakeColor(opponent, index) {
-  return ROLE_COLORS[snakeRole(opponent, index)];
+  // Snake 0 (our agent) blue, snake 1 (opponent) green; fall back by index.
+  return ROLE_COLORS[snakeRole(opponent, index)] || COLORS[index % COLORS.length];
 }
 
 function roundRect(ctx, x, y, w, h, r) {

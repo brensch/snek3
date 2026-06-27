@@ -23,7 +23,8 @@ export default function MiniBoard({ game, tick, playing, onPlay }) {
   }, [fr, game.opponent]);
 
   const [r, cls] = resultOf(game.winner);
-  const type = game.opponent === "net" ? "net self-play" : "net vs baseline";
+  const type = game.opponent === "net" ? "net self-play"
+    : (game.opponent || "net vs baseline").replace(/-v-/g, " vs ");
   const isPlaying = autoplay && playing && n > 1;
   const stopAutoplay = () => {
     setManualFrame(autoplayFrame);

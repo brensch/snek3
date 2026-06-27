@@ -23,6 +23,7 @@ import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import argparse
+import json
 import random
 import time
 from dataclasses import asdict
@@ -43,6 +44,7 @@ from .selfplay import (
 from .train import _setup_ort_env, log_phase, policy_target_stats, setup_logger, train_on_samples
 
 TAU_GRID = np.geomspace(0.25, 20.0, 24).astype(np.float32)
+SAFETY_TURNS = 5000  # hang-guard for uncapped (max_turns=0) eval/recording loops
 
 
 @torch.no_grad()
@@ -71,8 +73,9 @@ def _winrate_vs(agent_fn, opp_fn, board, num_snakes, games, seed, max_turns) -> 
     """Snake 0 = our agent (`agent_fn(batch) -> [count] move idx`), snake 1 =
     pool opponent (`opp_fn(batch) -> [count] move idx`). Win rate (draws=half)."""
     batch = snek.GameBatch(board, board, num_snakes, count=games, seed=seed)
+    cap = max_turns if max_turns > 0 else SAFETY_TURNS  # hang-guard when uncapped
     steps = 0
-    while not np.all(batch.done()) and (max_turns <= 0 or steps < max_turns):
+    while not np.all(batch.done()) and steps < cap:
         agent = agent_fn(batch)
         opp = opp_fn(batch)
         actions = np.stack([agent, opp], axis=1).astype(np.uint8)
@@ -122,6 +125,63 @@ def evaluate_albatross(proxy, response, device, cfg: SelfPlayConfig, games, seed
     return out
 
 
+@torch.no_grad()
+def record_albatross_games(proxy, response, device, cfg: SelfPlayConfig, n_games, seed, uct_iters):
+    """Record replay games (snake 0 = our agent, snake 1 = pool opponent) for the
+    dashboard. Proxy plays via the LE search (near-optimal tau); response plays
+    via the heterogeneous-tau best-response search. Opponents: flood-fill
+    baseline and the CPU UCT agent. Returns a list of {opponent, winner,
+    num_turns, frames} dicts."""
+    def proxy_move(batch):
+        pol, _ = run_search(batch, proxy, device, cfg.depth, cfg.tau_max, cfg.iters,
+                            cfg.eval_batch_size, return_root_values=True, temp=cfg.tau_max)
+        return greedy_actions(pol)[:, 0]
+
+    def response_move(batch):
+        pol, _ = run_search_hetero(batch, proxy, device, cfg.depth,
+                                   [cfg.response_tau, cfg.tau_min], cfg.iters,
+                                   cfg.eval_batch_size, temp=cfg.tau_min)
+        return greedy_actions(pol)[:, 0]
+
+    opps = {
+        "baseline": lambda b: b.baseline_actions()[:, 1],
+        "uct": lambda b: np.asarray(b.heuristic_actions(iters=uct_iters, seed=seed))[:, 1],
+    }
+    agents = [("proxy", proxy_move)]
+    if response is not None:
+        agents.append(("response", response_move))
+
+    games = []
+    for aname, agent_fn in agents:
+        for oname, opp_fn in opps.items():
+            batch = snek.GameBatch(cfg.board, cfg.board, cfg.num_snakes, count=n_games, seed=seed)
+            frames = [[] for _ in range(n_games)]
+            term = [False] * n_games
+            steps = 0
+            cap = cfg.max_turns if cfg.max_turns > 0 else SAFETY_TURNS
+            while steps < cap:
+                done = batch.done().astype(bool)
+                for g in range(n_games):
+                    if not term[g]:
+                        frames[g].append(json.loads(batch.snapshot(g)))
+                        if done[g]:
+                            term[g] = True
+                if all(term):
+                    break
+                actions = np.stack([agent_fn(batch), opp_fn(batch)], axis=1).astype(np.uint8)
+                batch.step(actions)
+                steps += 1
+            winners = batch.winners()
+            for g in range(n_games):
+                games.append({
+                    "opponent": f"{aname}-v-{oname}",
+                    "winner": int(winners[g]),
+                    "num_turns": len(frames[g]),
+                    "frames": frames[g],
+                })
+    return games
+
+
 def build_args():
     ap = argparse.ArgumentParser(description="Albatross proxy/response training")
     ap.add_argument("--generations", type=int, default=100000)
@@ -141,7 +201,8 @@ def build_args():
     ap.add_argument("--uct-iters", type=int, default=200,
                     help="UCB simulations for the CPU UCT pool opponent in eval")
     ap.add_argument("--exploration-prob", type=float, default=0.15)
-    ap.add_argument("--max-turns", type=int, default=200)
+    ap.add_argument("--max-turns", type=int, default=0,
+                    help="0 = play until a snake dies (no cap); positive caps games")
     # Egocentric obs are 21x21 (3.6x the cells of 11x11), so conv activations are
     # ~3.6x larger; keep the leaf-eval batch modest to stay within dedicated VRAM.
     ap.add_argument("--eval-batch-size", type=int, default=2048)
@@ -153,6 +214,12 @@ def build_args():
     ap.add_argument("--buffer-size", type=int, default=500000)
     ap.add_argument("--eval-every", type=int, default=5)
     ap.add_argument("--eval-games", type=int, default=64)
+    ap.add_argument("--record-games", type=int, default=2,
+                    help="replay games to record per (agent,opponent) matchup; 0 disables")
+    ap.add_argument("--record-every", type=int, default=1,
+                    help="record replays every N generations")
+    ap.add_argument("--keep-games", type=int, default=200,
+                    help="keep replays for at most this many recent generations")
     ap.add_argument("--runs-dir", type=str, default="runs")
     ap.add_argument("--run-id", type=str, default=None)
     ap.add_argument("--fresh", action="store_true")
@@ -250,8 +317,10 @@ def main():
             # turn cap (1.0 = games never resolve).
             "proxy_mean_turns": round(proxy_mean_turns, 1),
             "proxy_draw_rate": round(ps.draws / max(ps.games, 1), 3),
-            "proxy_len_frac": round(min(1.0, proxy_mean_turns / max(args.max_turns, 1)), 3),
         }
+        # len_frac is only meaningful with a turn cap; with no cap, report raw turns.
+        if args.max_turns > 0:
+            metric["proxy_len_frac"] = round(min(1.0, proxy_mean_turns / args.max_turns), 3)
         if rstats:
             metric["response_policy_loss"] = round(rstats["policy_loss"], 4)
             metric["response_value_loss"] = round(rstats["value_loss"], 4)
@@ -266,6 +335,15 @@ def main():
                 games=args.eval_games, seed=7000 + gen, eval_opp_tau=args.eval_opp_tau,
                 uct_iters=args.uct_iters)
             metric.update({k: round(v, 4) for k, v in ev.items()})
+
+        # --- record replays for the dashboard ---
+        if args.record_games > 0 and args.record_every and gen % args.record_every == 0:
+            log_phase(logger, "RECORDING", f"gen={gen} games={args.record_games}/matchup")
+            recorded = record_albatross_games(
+                proxy, response if train_response else None, device, spcfg,
+                n_games=args.record_games, seed=9000 + gen, uct_iters=args.uct_iters)
+            run.save_games(gen, recorded)
+            run.prune_games(keep=args.keep_games)
 
         log_phase(logger, "GEN", " ".join(f"{k}={v}" for k, v in metric.items()))
         run.append_metric(metric)

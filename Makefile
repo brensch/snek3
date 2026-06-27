@@ -68,6 +68,9 @@ LR             ?= 1e-3
 # gpu_peak_gb in the metrics and raise if you have headroom).
 ALB_EVAL_BATCH ?= 2048
 ALB_BATCH      ?= 1024
+ALB_RECORD_GAMES ?= 2   # replays per (agent,opponent) matchup, recorded for the dashboard
+ALB_RECORD_EVERY ?= 1   # record replays every N generations
+ALB_MAX_TURNS  ?= 0     # 0 = games play until a snake dies (no artificial cap)
 
 .DEFAULT_GOAL := help
 .PHONY: help venv build test test-rust test-py bench lint fmt train albatross overnight adaptive ui dashboard serve audit clean clean-all
@@ -135,11 +138,12 @@ albatross: build ## Full Albatross: temperature-conditioned proxy + best-respons
 		--tau-min $(TAU_MIN) --tau-max $(TAU_MAX) \
 		--response-tau $(RESPONSE_TAU) --response-after $(RESPONSE_AFTER) \
 		--eval-opp-tau $(EVAL_OPP_TAU) --uct-iters $(UCT_ITERS) \
-		--exploration-prob $(EXPLORATION_PROB) --max-turns $(MAX_TURNS) \
+		--exploration-prob $(EXPLORATION_PROB) --max-turns $(ALB_MAX_TURNS) \
 		--eval-batch-size $(ALB_EVAL_BATCH) \
 		--filters $(FILTERS) --blocks $(BLOCKS) --lr $(LR) \
 		--train-steps $(TRAIN_STEPS) --batch-size $(ALB_BATCH) --buffer-size $(BUFFER_SIZE) \
 		--eval-every $(EVAL_EVERY) --eval-games $(EVAL_GAMES) \
+		--record-games $(ALB_RECORD_GAMES) --record-every $(ALB_RECORD_EVERY) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
 overnight: build ## Start a background overnight training run. Override TAU, GENERATIONS, SAMPLES, RUN_ID...
