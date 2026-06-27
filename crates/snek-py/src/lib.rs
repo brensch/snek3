@@ -511,6 +511,7 @@ fn sample_move(probs: &[f32], explore: f32, rng: &mut Xoshiro256PlusPlus) -> Mov
 struct Slot {
     obs: Vec<f32>,    // each step: n*obs_size
     pol: Vec<f32>,    // each step: n*4
+    value: Vec<f32>,  // each step: n  (search root value, for bootstrapped target)
     alive: Vec<bool>, // each step: n
     frames: Vec<serde_json::Value>,
     steps: usize,
@@ -577,7 +578,7 @@ fn select_write(forest: &mut MctsForest, pend: &mut Vec<usize>, n: usize, obs_si
 #[pyfunction]
 #[pyo3(signature = (onnx_path, board=11, num_snakes=2, count=1024, sims=32, c_puct=1.5,
     samples_per_gen=30000, seed=0, exploration_prob=0.25, max_turns=0, eval_chunk=16384,
-    draw_value=0.0, skip_short_draw_turns=0, record_games=0))]
+    draw_value=0.0, skip_short_draw_turns=0, record_games=0, bootstrap_value=false))]
 #[allow(clippy::too_many_arguments)]
 fn generate_selfplay<'py>(
     py: Python<'py>,
@@ -595,6 +596,7 @@ fn generate_selfplay<'py>(
     draw_value: f32,
     skip_short_draw_turns: usize,
     record_games: usize,
+    bootstrap_value: bool,
 ) -> PyResult<(
     Bound<'py, PyArray4<f32>>,
     Bound<'py, PyArray2<f32>>,
@@ -716,7 +718,7 @@ fn generate_selfplay<'py>(
             // Both buffers: read root policy, record, play a move, finalize finished games.
             let rp0 = Instant::now();
             for b in 0..2 {
-                let (root_pol, _rv) = forests[b].root_targets();
+                let (root_pol, root_val) = forests[b].root_targets();
                 let bds = &mut boards[b];
                 let slt = &mut slots[b];
                 let trn = &mut turns[b];
@@ -733,6 +735,7 @@ fn generate_selfplay<'py>(
                         slot.alive.push(bd.snakes[s].alive());
                     }
                     slot.pol.extend_from_slice(&root_pol[g * n * 4..(g + 1) * n * 4]);
+                    slot.value.extend_from_slice(&root_val[g * n..(g + 1) * n]);
                     slot.steps += 1;
                 }
                 for g in 0..count {
@@ -799,10 +802,17 @@ fn generate_selfplay<'py>(
                             out_obs.extend_from_slice(&slot.obs[oi..oi + obs_size]);
                             let pi = (st * n + s) * 4;
                             out_pol.extend_from_slice(&slot.pol[pi..pi + 4]);
-                            out_z.push(match winner {
-                                Some(wi) if wi == s => 1.0,
-                                Some(_) => -1.0,
-                                None => draw_value,
+                            // Value target: equilibrium-bootstrapped (the search's root
+                            // value at this state, grounded by terminal nodes within the
+                            // tree) when enabled, else the flat Monte-Carlo game outcome.
+                            out_z.push(if bootstrap_value {
+                                slot.value[st * n + s]
+                            } else {
+                                match winner {
+                                    Some(wi) if wi == s => 1.0,
+                                    Some(_) => -1.0,
+                                    None => draw_value,
+                                }
                             });
                             collected += 1;
                         }
@@ -872,6 +882,7 @@ fn generate_selfplay<'py>(
     stats.set_item("skipped_short_draw_games", skipped_short_draw_games)?;
     stats.set_item("skipped_short_draw_samples", skipped_short_draw_samples)?;
     stats.set_item("draw_value", draw_value)?;
+    stats.set_item("bootstrap_value", bootstrap_value)?;
     stats.set_item("skip_short_draw_turns", skip_short_draw_turns)?;
     stats.set_item("recorded_game_candidates", recorded_game_candidates)?;
     stats.set_item("recorded_games_json", recorded_games_json)?;

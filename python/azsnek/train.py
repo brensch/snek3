@@ -237,6 +237,8 @@ def main():
     ap.add_argument("--c-puct", type=float, default=1.5, help="PUCT exploration constant")
     ap.add_argument("--exploration-prob", type=float, default=0.15, help="uniform-legal mix into the played action")
     ap.add_argument("--draw-value", type=float, default=-0.25, help="value/search target for all draws")
+    ap.add_argument("--bootstrap-value", action="store_true",
+                    help="value target = search root (equilibrium) value per state instead of the flat game outcome")
     ap.add_argument("--skip-short-draw-turns", type=int, default=0, help="drop terminal draw games up to this many turns from replay; 0 disables")
     ap.add_argument("--eval-every", type=int, default=1)
     ap.add_argument("--eval-games", type=int, default=32)
@@ -302,6 +304,7 @@ def main():
             "max_turns": args.max_turns,
             "exploration_prob": args.exploration_prob,
             "draw_value": args.draw_value,
+            "bootstrap_value": args.bootstrap_value,
             "skip_short_draw_turns": args.skip_short_draw_turns,
             "search_threads": args.search_threads,
             "generations": args.generations,
@@ -493,7 +496,7 @@ def main():
             samples_per_gen=args.samples, seed=1000 + gen,
             exploration_prob=args.exploration_prob, max_turns=args.max_turns,
             draw_value=args.draw_value, skip_short_draw_turns=args.skip_short_draw_turns,
-            record_games=rust_sample_games,
+            record_games=rust_sample_games, bootstrap_value=args.bootstrap_value,
         )
         if len(generated) == 4:
             obs, pol, z, gen_stats = generated
