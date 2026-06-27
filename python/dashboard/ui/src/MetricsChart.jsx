@@ -36,10 +36,14 @@ export default function MetricsChart({ metrics }) {
   const [panX, setPanX] = useState(0);
   const [followLatest, setFollowLatest] = useState(true);
   const [hover, setHover] = useState(null);
+  const [solo, setSolo] = useState(null); // legend click: show only this series key
 
   // Which series actually have data in this run.
-  const unit = useMemo(() => UNIT_SERIES.filter((s) => present(metrics, s.key)), [metrics]);
-  const norm = useMemo(() => NORM_SERIES.filter((s) => present(metrics, s.key)), [metrics]);
+  const allUnit = useMemo(() => UNIT_SERIES.filter((s) => present(metrics, s.key)), [metrics]);
+  const allNorm = useMemo(() => NORM_SERIES.filter((s) => present(metrics, s.key)), [metrics]);
+  // When a series is soloed (clicked in the legend), only it is drawn.
+  const unit = useMemo(() => (solo ? allUnit.filter((s) => s.key === solo) : allUnit), [allUnit, solo]);
+  const norm = useMemo(() => (solo ? allNorm.filter((s) => s.key === solo) : allNorm), [allNorm, solo]);
 
   const plot = useMemo(() => {
     if (!metrics.length) return { gmin: 0, gmax: 1, contentWidth: 0, maxPan: 0 };
@@ -143,6 +147,20 @@ export default function MetricsChart({ metrics }) {
       };
       norm.forEach((s) => dot(m[s.key], yL, s.color));
       unit.forEach((s) => dot(m[s.key], yU, s.color));
+      // Emphasize the single data point closest to the cursor.
+      let closest = null;
+      const consider = (value, yFn) => {
+        if (value == null) return;
+        const yy = yFn(value);
+        const d = Math.abs(yy - (hover.y ?? yy));
+        if (!closest || d < closest.d) closest = { yy, d };
+      };
+      norm.forEach((s) => consider(m[s.key], yL));
+      unit.forEach((s) => consider(m[s.key], yU));
+      if (closest) {
+        ctx.strokeStyle = "#e6edf3"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(hx, closest.yy, 7.5, 0, 7); ctx.stroke();
+      }
     }
     ctx.fillStyle = "#8b949e";
     ctx.fillText("gen " + gmin, padL, H - 7);
@@ -185,7 +203,9 @@ export default function MetricsChart({ metrics }) {
   const tooltipLeft = hover ? Math.min(Math.max(hover.x + 12, 8), Math.max(8, width - 200)) : 0;
   const tooltipTop = hover ? (hover.y > 145 ? Math.max(8, hover.y - 150) : Math.min(210, hover.y + 12)) : 0;
 
-  const legendItems = [...unit, ...norm];
+  // Legend always lists every available series (not just the soloed one) so you
+  // can switch/clear the solo by clicking.
+  const legendItems = [...allUnit, ...allNorm];
 
   return (
     <div
@@ -232,12 +252,21 @@ export default function MetricsChart({ metrics }) {
       </div>
       <div className="legend">
         {legendItems.map((s) => (
-          <span key={s.key}>
+          <button
+            type="button"
+            key={s.key}
+            className={"legend-item" + (solo && solo !== s.key ? " dim" : "")}
+            onClick={() => setSolo((cur) => (cur === s.key ? null : s.key))}
+            title={solo === s.key ? "click to show all series" : "click to show only this series"}
+          >
             <i className="swatch" style={{ background: s.color }} />
             {s.label}
-          </span>
+          </button>
         ))}
-        <span className="muted">solid = 0–1 scale · dashed = normalized · ⚠ = issue indicator</span>
+        <span className="muted">
+          {solo ? "showing one series — click it again for all · " : "click a series to isolate it · "}
+          solid = 0–1 scale · dashed = normalized · ⚠ = issue indicator
+        </span>
       </div>
     </div>
   );

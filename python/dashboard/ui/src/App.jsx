@@ -12,15 +12,27 @@ function Stat({ value, label }) {
   );
 }
 
+const runFromUrl = () => {
+  const m = window.location.pathname.match(/^\/run\/(.+)$/);
+  return m ? decodeURIComponent(m[1].replace(/\/$/, "")) : null;
+};
+
 export default function App() {
   const [runs, setRuns] = useState([]);
-  const [run, setRun] = useState(null);
+  const [run, setRun] = useState(runFromUrl());
   const [status, setStatus] = useState({});
   const [meta, setMeta] = useState({});
   const [metrics, setMetrics] = useState([]);
   const [gamesIndex, setGamesIndex] = useState([]);
   const runRef = useRef(null);
   useEffect(() => { runRef.current = run; }, [run]);
+
+  // Keep the URL in sync with the selected run (/run/<name>) so reloads/bookmarks
+  // return to it.
+  useEffect(() => {
+    const want = run ? `/run/${encodeURIComponent(run)}` : "/";
+    if (window.location.pathname !== want) window.history.replaceState(null, "", want);
+  }, [run]);
 
   useEffect(() => {
     let alive = true;

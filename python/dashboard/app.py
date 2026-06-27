@@ -43,6 +43,13 @@ def index():
     return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/run/{name}")
+def index_run(name: str):
+    # SPA deep-link: /run/<run_name> serves the same app so reloads/bookmarks
+    # return to that run (the client reads the run name from the path).
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/runs")
 def list_runs():
     if not RUNS_DIR.exists():
