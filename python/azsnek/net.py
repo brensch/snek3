@@ -24,6 +24,11 @@ class NetConfig:
     filters: int = 64
     blocks: int = 6
     policy_actions: int = 4
+    # Albatross-style temperature conditioning: when True the network takes a
+    # per-sample temperature and sees it as an extra broadcast input plane, so
+    # policy/value can depend on the (own or opponent) rationality level.
+    temperature_input: bool = False
+    temperature_scale: float = 100.0  # plane value = temp / temperature_scale
 
 
 class ResidualBlock(nn.Module):
@@ -48,8 +53,9 @@ class AZNet(nn.Module):
         self.cfg = cfg or NetConfig()
         c = self.cfg
 
+        in_channels = c.channels + (1 if c.temperature_input else 0)
         self.stem = nn.Sequential(
-            nn.Conv2d(c.channels, c.filters, 3, padding=1, bias=False),
+            nn.Conv2d(in_channels, c.filters, 3, padding=1, bias=False),
             nn.BatchNorm2d(c.filters),
             nn.ReLU(inplace=True),
         )
@@ -75,8 +81,20 @@ class AZNet(nn.Module):
             nn.Linear(c.filters, 1),
         )
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (policy_logits [B,4], value [B] in [-1,1])."""
+    def forward(
+        self, x: torch.Tensor, temp: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (policy_logits [B,4], value [B] in [-1,1]).
+
+        When the net is temperature-conditioned, `temp` (shape [B]) is required
+        and appended as a broadcast input plane (value `temp / temperature_scale`).
+        """
+        if self.cfg.temperature_input:
+            if temp is None:
+                raise ValueError("temperature_input net requires a `temp` tensor")
+            b, _, h_, w_ = x.shape
+            plane = (temp.to(x.dtype).view(b, 1, 1, 1) / self.cfg.temperature_scale).expand(b, 1, h_, w_)
+            x = torch.cat([x, plane], dim=1)
         h = self.tower(self.stem(x))
         p = self.policy_fc(self.policy_conv(h).flatten(1))
         v = torch.tanh(self.value_fc(self.value_conv(h).flatten(1))).squeeze(1)
@@ -84,7 +102,8 @@ class AZNet(nn.Module):
 
     @torch.no_grad()
     def infer(
-        self, obs: torch.Tensor, legal_mask: torch.Tensor | None = None
+        self, obs: torch.Tensor, legal_mask: torch.Tensor | None = None,
+        temp: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Inference helper: returns (policy_probs [B,4], value [B]).
 
@@ -92,7 +111,7 @@ class AZNet(nn.Module):
         the softmax so they receive no probability mass.
         """
         self.eval()
-        logits, value = self.forward(obs)
+        logits, value = self.forward(obs, temp)
         if legal_mask is not None:
             logits = logits.masked_fill(legal_mask == 0, float("-inf"))
         probs = F.softmax(logits, dim=1)

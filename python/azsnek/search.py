@@ -28,13 +28,17 @@ def run_search(
     iters: int = 200,
     eval_batch_size: int = 8192,
     return_root_values: bool = False,
+    temp=None,
 ):
     """Run one equilibrium search over every game in `batch`.
 
     Returns root policies `[count, num_snakes, 4]`. If `return_root_values` is
     set, returns `(policies, root_values)` where `root_values` is `[count,
-    num_snakes]` — the per-agent equilibrium value of the current state (used as
-    a bootstrapped TD target during training).
+    num_snakes]` — the per-agent equilibrium value of the current state.
+
+    `temp` conditions a temperature-aware (proxy) value net at the leaves; it may
+    be a scalar (all agents) or a per-agent array of length `num_snakes`. Leaf
+    observations are laid out `[eval_id, agent]` with agent innermost.
     """
     obs = batch.prepare_search(depth)  # [M, C, H, W] float32
     if obs.shape[0] == 0:
@@ -45,14 +49,27 @@ def run_search(
         return batch.backup_search(values, tau, iters)
 
     net.eval()
+    use_temp = getattr(net.cfg, "temperature_input", False) and temp is not None
+    temp_all = None
+    if use_temp:
+        n = int(batch.num_snakes)
+        temp_arr = np.asarray(temp, dtype=np.float32).reshape(-1)
+        if temp_arr.size == 1:
+            temp_all = np.full(obs.shape[0], float(temp_arr[0]), dtype=np.float32)
+        else:  # per-agent, tiled over leaves ([eval, agent], agent innermost)
+            temp_all = np.tile(temp_arr, obs.shape[0] // n)
     if eval_batch_size <= 0:
         eval_batch_size = obs.shape[0]
     values = np.empty((obs.shape[0],), dtype=np.float32)
     for start in range(0, obs.shape[0], eval_batch_size):
         end = min(start + eval_batch_size, obs.shape[0])
         obs_t = torch.from_numpy(obs[start:end]).to(device, non_blocking=True)
+        temp_t = (
+            torch.from_numpy(temp_all[start:end]).to(device, non_blocking=True)
+            if use_temp else None
+        )
         with net_autocast(device):
-            _, value = net(obs_t)  # value: [M] in [-1, 1]
+            _, value = net(obs_t, temp_t)  # value: [M] in [-1, 1]
         values[start:end] = value.detach().to("cpu", dtype=torch.float32).numpy()
         del obs_t, value
     if return_root_values:
