@@ -207,7 +207,8 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
 
 
 @torch.no_grad()
-def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -> Samples:
+def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int,
+                   progress_cb=None) -> Samples:
     """Albatross PROXY self-play. A per-generation temperature `tau` is sampled
     from [tau_min, tau_max]; all agents play the logit equilibrium at `tau`
     (fixed-depth equilibrium search), and the net is conditioned on `tau`. Both
@@ -229,8 +230,12 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
     turns_total = 0
     games_total = 0
     draws_total = 0
+    next_report = 0.25
 
     while collected < cfg.samples_per_gen:
+        if progress_cb is not None and collected >= next_report * cfg.samples_per_gen:
+            progress_cb(collected, cfg.samples_per_gen)
+            next_report += 0.25
         policy, root_vals = run_search(
             batch, net, device, cfg.depth, tau, cfg.iters,
             cfg.eval_batch_size, return_root_values=True, temp=tau,
@@ -276,6 +281,7 @@ def generate_response(
     device: torch.device,
     cfg: SelfPlayConfig,
     seed: int,
+    progress_cb=None,
 ) -> Samples:
     """Albatross RESPONSE self-play (2-player). Agent 0 is the rational responder
     at fixed temperature `response_tau` (tau_R); agent 1 is a weak opponent at a
@@ -299,8 +305,12 @@ def generate_response(
     collected = 0
     turns_total = 0
     games_total = 0
+    next_report = 0.25
 
     while collected < cfg.samples_per_gen:
+        if progress_cb is not None and collected >= next_report * cfg.samples_per_gen:
+            progress_cb(collected, cfg.samples_per_gen)
+            next_report += 0.25
         # Leaf values from the frozen proxy, conditioned on the opponent's tau
         # (the weak agent sets the game's character).
         policy, root_vals = run_search_hetero(

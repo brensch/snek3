@@ -214,8 +214,11 @@ def main():
         if cuda:
             torch.cuda.reset_peak_memory_stats()
         # --- proxy self-play + train ---
-        ps = generate_proxy(proxy, device, spcfg, seed=1000 + gen)
+        log_phase(logger, "PLAYING", f"gen={gen} proxy self-play (LE, target {args.samples:,} samples)")
+        prog = lambda c, t: log_phase(logger, "PLAYING", f"gen={gen} proxy {c:,}/{t:,} samples")
+        ps = generate_proxy(proxy, device, spcfg, seed=1000 + gen, progress_cb=prog)
         proxy_buf.add(ps)
+        log_phase(logger, "TRAINING", f"gen={gen} proxy steps={args.train_steps} buffer={len(proxy_buf):,}")
         pstats = train_on_samples(proxy, proxy_opt, proxy_buf.dataset(), device,
                                   steps=args.train_steps, batch_size=args.batch_size)
         ptgt = policy_target_stats(ps.pol)
@@ -224,8 +227,11 @@ def main():
         train_response = gen >= args.response_after and args.num_snakes == 2
         rstats = {}
         if train_response:
-            rs = generate_response(response, proxy, device, spcfg, seed=5000 + gen)
+            log_phase(logger, "PLAYING", f"gen={gen} response self-play (best-response vs proxy)")
+            rprog = lambda c, t: log_phase(logger, "PLAYING", f"gen={gen} response {c:,}/{t:,} samples")
+            rs = generate_response(response, proxy, device, spcfg, seed=5000 + gen, progress_cb=rprog)
             response_buf.add(rs)
+            log_phase(logger, "TRAINING", f"gen={gen} response steps={args.train_steps}")
             rstats = train_on_samples(response, response_opt, response_buf.dataset(), device,
                                       steps=args.train_steps, batch_size=args.batch_size)
 
@@ -254,6 +260,7 @@ def main():
 
         # --- eval ---
         if args.eval_every and gen % args.eval_every == 0:
+            log_phase(logger, "EVALUATING", f"gen={gen} vs pool (baseline, UCT) games={args.eval_games}")
             ev = evaluate_albatross(
                 proxy, response if train_response else None, device, spcfg,
                 games=args.eval_games, seed=7000 + gen, eval_opp_tau=args.eval_opp_tau,
