@@ -13,7 +13,7 @@ from azsnek.runlog import RunWriter
 def test_recorder_frames_are_wellformed():
     device = device_auto()
     net = AZNet(NetConfig(channels=snek.CHANNELS, filters=8, blocks=1)).to(device)
-    games = record_games(net, device, n_games=1, depth=1, iters=20, opponent="baseline", seed=1)
+    games = record_games(net, device, n_games=1, sims=4, opponent="baseline", seed=1)
     assert len(games) == 1
     g = games[0]
     assert g["num_turns"] == len(g["frames"]) and g["frames"]
@@ -26,7 +26,7 @@ def test_recorder_frames_are_wellformed():
 def test_dashboard_serves_run_data(tmp_path):
     device = device_auto()
     net = AZNet(NetConfig(channels=snek.CHANNELS, filters=8, blocks=1)).to(device)
-    games = record_games(net, device, n_games=1, depth=1, iters=20, opponent="baseline", seed=2)
+    games = record_games(net, device, n_games=1, sims=4, opponent="baseline", seed=2)
 
     rw = RunWriter(tmp_path, run_id="testrun", meta={"board": 11, "filters": 8, "blocks": 1, "depth": 1})
     rw.append_metric({"gen": 0, "win_rate": 0.5, "policy_loss": 1.0, "value_loss": 0.3, "samples": 100})

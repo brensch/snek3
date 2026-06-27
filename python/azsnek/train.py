@@ -673,13 +673,13 @@ def main():
             t_phase = time.time()
             recorded_games = record_games(
                 net, device, board=sp.board, n_games=args.record_games,
-                depth=args.depth, tau=args.tau, iters=args.iters,
+                sims=args.sims, c_puct=args.c_puct,
                 eval_batch_size=args.eval_batch_size, max_turns=args.max_turns,
                 opponent="baseline", seed=7000 + gen,
             )
             recorded_games += record_games(
                 net, device, board=sp.board, n_games=args.record_games,
-                depth=args.depth, tau=args.tau, iters=args.iters,
+                sims=args.sims, c_puct=args.c_puct,
                 eval_batch_size=args.eval_batch_size, max_turns=args.max_turns,
                 opponent="net", seed=9000 + gen,
             )

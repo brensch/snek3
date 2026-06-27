@@ -10,7 +10,7 @@ import snek
 import torch
 
 from .net import AZNet
-from .search import greedy_actions, run_search
+from .search import greedy_actions, mcts_search
 
 
 @torch.no_grad()
@@ -19,9 +19,8 @@ def record_games(
     device: torch.device,
     board: int = 11,
     n_games: int = 2,
-    depth: int = 2,
-    tau: float = 6.0,
-    iters: int = 120,
+    sims: int = 32,
+    c_puct: float = 1.5,
     eval_batch_size: int = 8192,
     max_turns: int = 0,
     opponent: str = "baseline",  # "baseline" (snake1=flood-fill) or "net" (self-play)
@@ -33,6 +32,12 @@ def record_games(
     the flood-fill baseline (`opponent="baseline"`) or the net again
     (`opponent="net"`, i.e. self-play). Returns a list of game dicts:
     `{opponent, winner, num_turns, frames: [snapshot, ...]}`.
+
+    Uses the same MCTS (both policy and value heads) as self-play, so recorded
+    replays reflect the net's real playing strength. The old equilibrium
+    `run_search` here used the value head only, discarding the policy head where
+    most of an MCTS-trained net's strength lives -- which made recorded games
+    (esp. vs the baseline) look far weaker than the agent actually plays.
     """
     batch = snek.GameBatch(board, board, 2, count=n_games, seed=seed)
     frames: list[list[dict]] = [[] for _ in range(n_games)]
@@ -50,7 +55,8 @@ def record_games(
                     recorded_terminal[g] = True  # this was the final frame
         if all(recorded_terminal):
             break
-        policy = run_search(batch, net, device, depth, tau, iters, eval_batch_size)
+        policy, _ = mcts_search(batch, net, device, sims=sims, c_puct=c_puct,
+                                eval_batch_size=eval_batch_size)
         agent = greedy_actions(policy)[:, 0]
         if opponent == "net":
             opp = greedy_actions(policy)[:, 1]
