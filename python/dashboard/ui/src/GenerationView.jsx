@@ -11,6 +11,7 @@ export default function GenerationView({ run, gamesIndex, metrics }) {
   const [fps, setFps] = useState(18);
   const [tileWidth, setTileWidth] = useState(210);
   const [tick, setTick] = useState(0);
+  const [matchFilter, setMatchFilter] = useState("all"); // matchup-type filter
   const cache = useRef(new Map());
 
   useEffect(() => { setPicked(null); setGenData(null); cache.current.clear(); }, [run]);
@@ -57,23 +58,26 @@ export default function GenerationView({ run, gamesIndex, metrics }) {
   const pct = (value) => value == null ? "—" : `${(Number(value) * 100).toFixed(1)}%`;
   const num = (value, digits = 0) => value == null ? "—" : Number(value).toLocaleString(undefined, { maximumFractionDigits: digits });
 
-  const gameGroups = useMemo(() => {
-    const games = genData?.games || [];
-    // One group per distinct opponent label (e.g. proxy-v-uct, response-v-baseline),
-    // ordered by first appearance.
-    const order = [];
-    const byOpp = {};
-    for (const g of games) {
-      const key = g.opponent || "baseline";
-      if (!byOpp[key]) { byOpp[key] = []; order.push(key); }
-      byOpp[key].push(g);
+  // Distinct matchup labels present this gen (for the filter bar), first-seen order.
+  const matchTypes = useMemo(() => {
+    const seen = [];
+    for (const g of genData?.games || []) {
+      const k = g.opponent || "baseline";
+      if (!seen.includes(k)) seen.push(k);
     }
-    const title = (k) =>
-      k === "net" ? "Net self-play"
-      : k === "baseline" ? "Net vs baseline"
-      : k.replace(/-v-/g, " vs ");
-    return order.map((k) => ({ key: k, title: title(k), games: byOpp[k] }));
+    return seen;
   }, [genData]);
+
+  // All games in one flat list, filtered to the selected matchup ("all" = no filter).
+  const shownGames = useMemo(() => {
+    const games = genData?.games || [];
+    return matchFilter === "all"
+      ? games
+      : games.filter((g) => (g.opponent || "baseline") === matchFilter);
+  }, [genData, matchFilter]);
+
+  const prettyMatch = (k) =>
+    k === "net" ? "self-play" : k === "baseline" ? "net vs baseline" : k.replace(/-v-/g, " vs ");
 
   const selfplay = genData?.selfplay;
   const maxBucket = Math.max(1, ...(selfplay?.length_histogram || []).map((b) => b.count || 0));
@@ -137,32 +141,40 @@ export default function GenerationView({ run, gamesIndex, metrics }) {
         </div>
 
         <div className="board-scroll">
-          <div className="board-groups">
-            {genData
-              ? gameGroups.map((group) => (
-                  <div className="board-group" key={group.key}>
-                    <div className="board-group-head">
-                      <h3>{group.title}</h3>
-                      <span className="muted">{group.games.length} samples · {summarize(group.games)}</span>
-                    </div>
-                    <div
-                      className="board-grid"
-                      style={{ "--tile-width": `${tileWidth}px` }}
-                    >
-                      {group.games.map((g, i) => (
-                        <MiniBoard
-                          key={`${group.key}-${i}`}
-                          game={g}
-                          tick={tick}
-                          playing={playing}
-                          onPlay={() => setPlaying(true)}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ))
-              : <p className="muted">no games recorded yet</p>}
-          </div>
+          {genData ? (
+            <>
+              <div className="match-filter">
+                <button
+                  className={matchFilter === "all" ? "active" : ""}
+                  onClick={() => setMatchFilter("all")}
+                >
+                  all ({(genData.games || []).length})
+                </button>
+                {matchTypes.map((k) => (
+                  <button
+                    key={k}
+                    className={matchFilter === k ? "active" : ""}
+                    onClick={() => setMatchFilter(k)}
+                  >
+                    {prettyMatch(k)}
+                  </button>
+                ))}
+              </div>
+              <div className="board-grid" style={{ "--tile-width": `${tileWidth}px` }}>
+                {shownGames.map((g, i) => (
+                  <MiniBoard
+                    key={`${g.opponent}-${i}`}
+                    game={g}
+                    tick={tick}
+                    playing={playing}
+                    onPlay={() => setPlaying(true)}
+                  />
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="muted">no games recorded yet</p>
+          )}
         </div>
       </div>
     </section>

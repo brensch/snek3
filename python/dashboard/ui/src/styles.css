@@ -110,6 +110,23 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
   width: 100%;
   min-width: 100%;
 }
+.match-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.match-filter button {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.match-filter button.active {
+  color: #34d399;
+  border-color: #10532f;
+  background: #0f1f17;
+}
 .board-groups {
   display: flex;
   flex-direction: column;

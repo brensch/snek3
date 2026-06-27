@@ -127,58 +127,65 @@ def evaluate_albatross(proxy, response, device, cfg: SelfPlayConfig, games, seed
 
 @torch.no_grad()
 def record_albatross_games(proxy, response, device, cfg: SelfPlayConfig, n_games, seed, uct_iters):
-    """Record replay games (snake 0 = our agent, snake 1 = pool opponent) for the
-    dashboard. Proxy plays via the LE search (near-optimal tau); response plays
-    via the heterogeneous-tau best-response search. Opponents: flood-fill
-    baseline and the CPU UCT agent. Returns a list of {opponent, winner,
-    num_turns, frames} dicts."""
-    def proxy_move(batch):
+    """Record replay games for the dashboard, snake 0 = first named player.
+    Matchups (each a joint move fn -> [count, 2] actions): proxy vs {proxy,
+    baseline, uct} and, when the response exists, response vs {proxy, baseline,
+    uct}. proxy plays the LE search (near-optimal tau); response plays the
+    heterogeneous-tau best-response; baseline/uct are the fixed CPU opponents.
+    Returns a list of {opponent, winner, num_turns, frames} dicts."""
+    def proxy_pol(batch):  # [count, 2] greedy moves for both snakes from the proxy LE
         pol, _ = run_search(batch, proxy, device, cfg.depth, cfg.tau_max, cfg.iters,
                             cfg.eval_batch_size, return_root_values=True, temp=cfg.tau_max)
-        return greedy_actions(pol)[:, 0]
+        return greedy_actions(pol)
 
-    def response_move(batch):
+    def response_a0(batch):  # responder (snake 0) best-response move
         pol, _ = run_search_hetero(batch, proxy, device, cfg.depth,
                                    [cfg.response_tau, cfg.tau_min], cfg.iters,
                                    cfg.eval_batch_size, temp=cfg.tau_min)
         return greedy_actions(pol)[:, 0]
 
-    opps = {
-        "baseline": lambda b: b.baseline_actions()[:, 1],
-        "uct": lambda b: np.asarray(b.heuristic_actions(iters=uct_iters, seed=seed))[:, 1],
-    }
-    agents = [("proxy", proxy_move)]
+    baseline_a1 = lambda b: b.baseline_actions()[:, 1]
+    uct_a1 = lambda b: np.asarray(b.heuristic_actions(iters=uct_iters, seed=seed))[:, 1]
+    j = lambda a0, a1: np.stack([a0, a1], axis=1).astype(np.uint8)
+
+    matchups = [
+        ("proxy-v-proxy", lambda b: proxy_pol(b).astype(np.uint8)),
+        ("proxy-v-baseline", lambda b: j(proxy_pol(b)[:, 0], baseline_a1(b))),
+        ("proxy-v-uct", lambda b: j(proxy_pol(b)[:, 0], uct_a1(b))),
+    ]
     if response is not None:
-        agents.append(("response", response_move))
+        matchups += [
+            ("response-v-proxy", lambda b: j(response_a0(b), proxy_pol(b)[:, 1])),
+            ("response-v-baseline", lambda b: j(response_a0(b), baseline_a1(b))),
+            ("response-v-uct", lambda b: j(response_a0(b), uct_a1(b))),
+        ]
 
     games = []
-    for aname, agent_fn in agents:
-        for oname, opp_fn in opps.items():
-            batch = snek.GameBatch(cfg.board, cfg.board, cfg.num_snakes, count=n_games, seed=seed)
-            frames = [[] for _ in range(n_games)]
-            term = [False] * n_games
-            steps = 0
-            cap = cfg.max_turns if cfg.max_turns > 0 else SAFETY_TURNS
-            while steps < cap:
-                done = batch.done().astype(bool)
-                for g in range(n_games):
-                    if not term[g]:
-                        frames[g].append(json.loads(batch.snapshot(g)))
-                        if done[g]:
-                            term[g] = True
-                if all(term):
-                    break
-                actions = np.stack([agent_fn(batch), opp_fn(batch)], axis=1).astype(np.uint8)
-                batch.step(actions)
-                steps += 1
-            winners = batch.winners()
+    for label, joint_fn in matchups:
+        batch = snek.GameBatch(cfg.board, cfg.board, cfg.num_snakes, count=n_games, seed=seed)
+        frames = [[] for _ in range(n_games)]
+        term = [False] * n_games
+        steps = 0
+        cap = cfg.max_turns if cfg.max_turns > 0 else SAFETY_TURNS
+        while steps < cap:
+            done = batch.done().astype(bool)
             for g in range(n_games):
-                games.append({
-                    "opponent": f"{aname}-v-{oname}",
-                    "winner": int(winners[g]),
-                    "num_turns": len(frames[g]),
-                    "frames": frames[g],
-                })
+                if not term[g]:
+                    frames[g].append(json.loads(batch.snapshot(g)))
+                    if done[g]:
+                        term[g] = True
+            if all(term):
+                break
+            batch.step(joint_fn(batch))
+            steps += 1
+        winners = batch.winners()
+        for g in range(n_games):
+            games.append({
+                "opponent": label,
+                "winner": int(winners[g]),
+                "num_turns": len(frames[g]),
+                "frames": frames[g],
+            })
     return games
 
 
