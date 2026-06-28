@@ -28,6 +28,7 @@ import json
 import random
 import time
 from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 import snek
@@ -470,6 +471,30 @@ def _run_cfg(args, name: str, overrides: dict):
     return a
 
 
+def _resume_cfg(args, name: str):
+    """Build a config to RESUME an existing run from its checkpoint: take the
+    run's own saved config (meta.json, so the net matches the weights) and resume
+    (fresh=False). Live params (lr, train_steps, ...) default to the server's;
+    they can be retuned live."""
+    a = copy.copy(args)
+    a.run_id = name
+    a.fresh = False
+    a.generations = 0
+    try:
+        meta = json.loads((Path(args.runs_dir) / name / "meta.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        meta = {}
+    for attr, key in (("board", "board"), ("num_snakes", "num_snakes"),
+                      ("filters", "filters"), ("blocks", "blocks"), ("depth", "depth"),
+                      ("iters", "iters"), ("tau_min", "tau_min"), ("tau_max", "tau_max"),
+                      ("response_tau", "response_tau"), ("response_after", "response_after"),
+                      ("samples", "samples_per_gen"), ("count", "count"),
+                      ("max_turns", "max_turns"), ("buffer_size", "buffer_size")):
+        if key in meta:
+            setattr(a, attr, meta[key])
+    return a
+
+
 def main():
     args = build_args()
     logger = setup_logger()
@@ -512,6 +537,9 @@ def main():
 
         if pending.get("cli"):
             a = args  # resume/start exactly as launched
+        elif pending.get("resume"):
+            a = _resume_cfg(args, pending["name"])
+            log_phase(logger, "RESUME", f"{a.run_id} from checkpoint")
         else:
             a = _run_cfg(args, pending["name"], pending["overrides"])
             log_phase(logger, "NEWRUN", f"{a.run_id} overrides={pending['overrides']}")

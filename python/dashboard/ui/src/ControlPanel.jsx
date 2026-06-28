@@ -4,7 +4,7 @@ import { api } from "./api.js";
 // Live control for the running trainer: status + pause/resume/stop, and an
 // editable grid of the live-tunable params (applied at the next generation).
 // Token is stored in localStorage and sent on write requests.
-export default function ControlPanel({ status, params, liveKeys, lockedKeys, live }) {
+export default function ControlPanel({ run, status, params, liveKeys, lockedKeys, live }) {
   const [token, setToken] = useState(() => localStorage.getItem("snek_token") || "");
   const [draft, setDraft] = useState({});
   const [msg, setMsg] = useState(null);
@@ -12,11 +12,30 @@ export default function ControlPanel({ status, params, liveKeys, lockedKeys, liv
 
   useEffect(() => { localStorage.setItem("snek_token", token); }, [token]);
 
-  if (!live) {
-    return <p className="muted">Viewing an archived run — controls apply to the live run only.</p>;
-  }
-
   const flash = (text, ok = true) => { setMsg({ text, ok }); setTimeout(() => setMsg(null), 4000); };
+
+  // Archived run: not the live one. Offer to resume it from its checkpoint
+  // (continues weights + gen count; switches the trainer to it).
+  if (!live) {
+    const resume = async () => {
+      setBusy(true);
+      try { await api.resumeRun(run, token); flash(`resuming ${run}…`); }
+      catch (e) { flash(String(e.message || e), false); }
+      finally { setBusy(false); }
+    };
+    return (
+      <div className="control">
+        <p className="muted">This is an archived run — it isn't currently training.</p>
+        <div className="control-row">
+          <input type="password" className="token" placeholder="write token"
+            value={token} onChange={(e) => setToken(e.target.value)} />
+          <button disabled={busy} onClick={resume}>Resume this run</button>
+          {msg && <span className={msg.ok ? "ok" : "err"}>{msg.text}</span>}
+        </div>
+        <p className="muted">Resuming continues from the saved checkpoint and makes it the live run (any currently-live run is checkpointed first).</p>
+      </div>
+    );
+  }
 
   const doControl = async (action) => {
     setBusy(true);

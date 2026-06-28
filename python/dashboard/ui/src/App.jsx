@@ -125,7 +125,7 @@ export default function App() {
         <main className="stacked">
           <section className="card">
             <h2>Control</h2>
-            <ControlPanel status={status} params={params} liveKeys={liveKeys}
+            <ControlPanel run={run} status={status} params={params} liveKeys={liveKeys}
               lockedKeys={lockedKeys} live={isLive} />
           </section>
 

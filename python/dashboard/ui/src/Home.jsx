@@ -31,6 +31,14 @@ export default function Home({ runs, liveRun, onSelect }) {
     finally { setBusy(false); }
   };
 
+  const resume = async (r, e) => {
+    e.stopPropagation();
+    setBusy(true);
+    try { await api.resumeRun(r, token); flash(`resuming ${r}…`); onSelect(r); }
+    catch (err) { flash(String(err.message || err), false); }
+    finally { setBusy(false); }
+  };
+
   return (
     <div className="home">
       <section className="card">
@@ -65,12 +73,17 @@ export default function Home({ runs, liveRun, onSelect }) {
         {runs.length ? (
           <ul className="run-list">
             {runs.map((r) => (
-              <li key={r}>
+              <li key={r} className="run-row">
                 <button className="run-item" onClick={() => onSelect(r)}>
                   <span className={"run-dot " + (r === liveRun ? "live" : "")} />
                   <span className="run-name">{r}</span>
                   {r === liveRun && <span className="run-badge">live</span>}
                 </button>
+                {r !== liveRun && (
+                  <button className="run-resume" disabled={busy}
+                    title="Continue this run from its checkpoint"
+                    onClick={(e) => resume(r, e)}>Resume</button>
+                )}
               </li>
             ))}
           </ul>

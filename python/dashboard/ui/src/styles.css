@@ -307,3 +307,7 @@ button:disabled { opacity: .5; cursor: default; }
 .run-dot.live { background: #34d399; animation: pulse 1.6s infinite; }
 .run-name { flex: 1; color: var(--fg); font-size: 13px; }
 .run-badge { color: #34d399; font-size: 11px; border: 1px solid #10532f; border-radius: 999px; padding: 1px 8px; }
+
+.run-row { display: flex; align-items: center; gap: 8px; }
+.run-row .run-item { flex: 1; }
+.run-resume { font-size: 12px; padding: 6px 12px; }

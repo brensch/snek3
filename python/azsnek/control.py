@@ -126,9 +126,9 @@ class RunState:
         self._stop_run = True
         self.set_status(phase="stopping")
 
-    def request_new_run(self, name: str, overrides: dict) -> None:
-        self._new_run = {"name": name, "overrides": dict(overrides or {})}
-        if self.run_id:  # interrupt the active run to switch to the new one
+    def request_new_run(self, name: str, overrides: dict, resume: bool = False) -> None:
+        self._new_run = {"name": name, "overrides": dict(overrides or {}), "resume": bool(resume)}
+        if self.run_id:  # interrupt the active run to switch to the requested one
             self.set_status(phase="switching")
 
     def take_new_run(self) -> dict | None:
@@ -290,17 +290,24 @@ def build_app(state: RunState, runs_dir: Path, static_dir: Path, token: str | No
 
     @app.post("/api/runs")
     async def create_run(request: Request):
-        """Start (or switch to) a fresh named run. Stops the active run first
-        (its checkpoint is saved) and begins the new one at the next boundary."""
+        """Start a run. With `resume: true` for an existing run, continue it from
+        its checkpoint (keeps weights + gen count); otherwise create a fresh named
+        run. Either way the active run, if any, is checkpointed first."""
         require_token(request)
-        body = await request.json()
-        name = str((body or {}).get("name", "")).strip()
+        body = await request.json() or {}
+        name = str(body.get("name", "")).strip()
         if not name or "/" in name or "\\" in name or name in (".", ".."):
             raise HTTPException(status_code=400, detail="bad run name")
-        if (runs_dir / name).exists():
-            raise HTTPException(status_code=409, detail="a run with that name already exists")
+        exists = (runs_dir / name).exists()
+        if body.get("resume"):
+            if not exists:
+                raise HTTPException(status_code=404, detail="run not found")
+            state.request_new_run(name, {}, resume=True)
+            return {"ok": True, "name": name, "resume": True}
+        if exists:
+            raise HTTPException(status_code=409, detail="a run with that name already exists (use resume)")
         overrides = {}
-        for k, v in ((body or {}).get("params") or {}).items():
+        for k, v in (body.get("params") or {}).items():
             if k not in NEW_RUN_PARAMS:
                 raise HTTPException(status_code=400, detail=f"unknown param: {k}")
             try:
