@@ -45,26 +45,54 @@ export default function ControlPanel({ status, params, liveKeys, lockedKeys, liv
   const paused = status?.paused;
   const running = status?.running;
   const prog = status?.progress;
+  const stateClass = running ? (paused ? "paused" : "running") : "stopped";
+  const stateWord = running ? (paused ? "PAUSED" : "RUNNING") : "STOPPED";
+  const determinate = prog && prog.total > 1;
+  const pct = determinate ? Math.min(100, Math.round(100 * prog.done / prog.total)) : null;
+  const busyPhase = prog && prog.total <= 1;  // training/eval/recording = indeterminate
+
+  const last = status?.last || {};
+  const chip = (label, key, fmt = (v) => v) =>
+    last[key] != null ? <span className="chip" key={key}><em>{label}</em><b>{fmt(last[key])}</b></span> : null;
 
   return (
     <div className="control">
-      <div className="control-row">
-        <span className={"pill " + (running ? (paused ? "warn" : "live") : "done")}>
-          {running ? (paused ? "❚❚ paused" : "● running") : "■ stopped"}
-          {status?.generation != null ? ` · gen ${status.generation}` : ""}
-        </span>
-        {status?.phase && <span className="muted">{status.phase}</span>}
-        {prog && prog.total > 1 && (
-          <span className="progress"><i style={{ width: `${Math.min(100, 100 * prog.done / prog.total)}%` }} /></span>
-        )}
-        <div className="grow" />
-        {paused
-          ? <button disabled={busy} onClick={() => doControl("resume")}>Resume</button>
-          : <button disabled={busy} onClick={() => doControl("pause")}>Pause</button>}
-        <button className="danger" disabled={busy}
-          onClick={() => { if (confirm("Stop the run? It will finish the current generation and exit.")) doControl("stop"); }}>
-          Stop
-        </button>
+      <div className={"hero " + stateClass}>
+        <div className="hero-main">
+          <span className={"state-dot " + stateClass} />
+          <span className="state-word">{stateWord}</span>
+          {status?.generation != null && <span className="state-gen">gen {status.generation}</span>}
+          <div className="grow" />
+          {running && (paused
+            ? <button disabled={busy} onClick={() => doControl("resume")}>Resume</button>
+            : <button disabled={busy} onClick={() => doControl("pause")}>Pause</button>)}
+          {running && <button className="danger" disabled={busy}
+            onClick={() => { if (confirm("Stop the run? It will finish the current generation and exit.")) doControl("stop"); }}>
+            Stop
+          </button>}
+        </div>
+
+        <div className="hero-phase">
+          <span className="phase-now">{status?.phase || "—"}</span>
+          {determinate && <span className="phase-count">{prog.done.toLocaleString()} / {prog.total.toLocaleString()}</span>}
+        </div>
+        <div className={"hero-bar " + (busyPhase ? "busy" : "")}>
+          <i style={determinate ? { width: `${pct}%` } : undefined} />
+          {determinate && <span className="bar-pct">{pct}%</span>}
+        </div>
+
+        <div className="hero-stats">
+          {chip("game len", "proxy_game_len")}
+          {chip("games", "proxy_games")}
+          {chip("draw %", "proxy_draw_rate", (v) => `${Math.round(v * 100)}%`)}
+          {chip("entropy", "target_entropy")}
+          {chip("gen s", "gen_seconds")}
+          {chip("GPU %", "selfplay_gpu_pct", (v) => `${v}%`)}
+          {chip("resp v base", "response_vs_baseline")}
+          {chip("resp v uct", "response_vs_uct")}
+          {chip("proxy v base", "proxy_vs_baseline")}
+          {chip("proxy v uct", "proxy_vs_uct")}
+        </div>
       </div>
 
       <div className="control-row">
