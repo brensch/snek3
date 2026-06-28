@@ -215,7 +215,7 @@ def export_onnx(net, channels: int, board: int, device, path) -> None:
     import warnings
 
     net.eval()
-    side = 2 * board - 1  # egocentric (head-centred) canvas side = obs_side(board)
+    side = board  # absolute board coords: obs_side(board) == board
     dummy = torch.zeros(1, channels, side, side, device=device)
     dyn = {"obs": {0: "batch"}, "policy_logits": {0: "batch"}, "value": {0: "batch"}}
     # Temperature-conditioned nets (Albatross) take a second [batch] `temp` input.
@@ -240,6 +240,9 @@ def main():
     logger = setup_logger()
     ap = argparse.ArgumentParser()
     ap.add_argument("--generations", type=int, default=50)
+    ap.add_argument("--board", type=int, default=11, help="board side (square)")
+    ap.add_argument("--num-snakes", type=int, default=4,
+                    help="snakes per game; 4-player FFA subsumes 2-player as snakes die")
     ap.add_argument("--samples", type=int, default=50_000)
     ap.add_argument("--count", type=int, default=32)
     ap.add_argument("--depth", type=int, default=2)
@@ -278,6 +281,12 @@ def main():
     ap.add_argument("--relative-games", type=int, default=64, help="games per relative (net-vs-past) eval")
     ap.add_argument("--filters", type=int, default=64)
     ap.add_argument("--blocks", type=int, default=6)
+    # Network architecture (default = KataGo-style grid trunk; see net.py).
+    ap.add_argument("--arch", type=str, default="grid", choices=["grid", "pyramid"])
+    ap.add_argument("--trunk-channels", type=int, default=96, help="grid trunk width")
+    ap.add_argument("--trunk-blocks", type=int, default=8, help="grid trunk depth")
+    ap.add_argument("--gpool-every", type=int, default=3,
+                    help="grid: every Nth block gets a global-pooling bias")
     ap.add_argument("--ckpt-dir", type=str, default=None, help="serving weights dir (default: runs/<run-id>/ckpt)")
     ap.add_argument("--runs-dir", type=str, default="runs", help="dashboard run root")
     ap.add_argument("--run-id", type=str, default=None, help="run dir name (default: timestamp)")
@@ -311,6 +320,8 @@ def main():
         log_phase(logger, "SETUP", f"search_threads={args.search_threads} ({status})")
 
     sp = SelfPlayConfig(
+        board=args.board,
+        num_snakes=args.num_snakes,
         count=args.count,
         sims=args.sims,
         c_puct=args.c_puct,
@@ -318,6 +329,7 @@ def main():
         samples_per_gen=args.samples,
         max_turns=args.max_turns,
         exploration_prob=args.exploration_prob,
+        draw_value=args.draw_value,
     )
     run = RunWriter(
         args.runs_dir,
@@ -363,7 +375,10 @@ def main():
         if args.fresh and run.has_state():
             run.reset()
             log_phase(logger, "RESUME", f"--fresh cleared previous progress in {run.dir}")
-        cfg = NetConfig(channels=snek.CHANNELS, filters=args.filters, blocks=args.blocks)
+        cfg = NetConfig(channels=snek.CHANNELS, height=args.board, width=args.board,
+                        arch=args.arch, trunk_channels=args.trunk_channels,
+                        trunk_blocks=args.trunk_blocks, gpool_every=args.gpool_every,
+                        filters=args.filters, blocks=args.blocks)
 
     net = AZNet(cfg).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, weight_decay=1e-4)
