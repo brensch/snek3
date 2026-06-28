@@ -166,7 +166,11 @@ def _spawn_eval(run, proxy, cfg, spcfg, device, gen, games, uct_iters, eval_bin,
         "SNEK_RESPONSE_TAU": str(spcfg.response_tau),
         "SNEK_DRAW_VALUE": str(spcfg.draw_value),
         "SNEK_EVAL_CHUNK": str(spcfg.eval_batch_size),
-        "SNEK_EVAL_MAXTURNS": str(spcfg.max_turns),
+        # Give the eval its own turn cap (independent of self-play's max_turns, which
+        # is often 0 = uncapped). Normal games end well under this; the cap only
+        # bounds pathological circling games so one stuck game can't stall the whole
+        # eval. Cap-reached games are excluded from the win-rate, so it stays honest.
+        "SNEK_EVAL_MAXTURNS": str(spcfg.max_turns if spcfg.max_turns > 0 else 400),
     })
     # Cap CPU usage so the eval doesn't pin every core. Each worker uses a
     # single-intra-op-thread ONNX session, so the worker count bounds the load.
