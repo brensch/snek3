@@ -10,7 +10,7 @@ Endpoints (live run is whatever this process is training):
     GET  /api/state              snapshot: run, meta, status, params, metrics
     GET  /api/stream             SSE: snapshot then metric/progress/status/params
     POST /api/params             patch live-tunable params -> next gen
-    POST /api/control            {action: pause|resume|stop|checkpoint}
+    POST /api/control            {action: pause|resume|stop|shutdown}
     GET  /api/runs               list run ids (live + archived on disk)
     GET  /api/runs/{id}/...      meta/metrics/games for any run (file-backed)
     GET  /  /run/{name}          dashboard SPA

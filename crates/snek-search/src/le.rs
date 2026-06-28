@@ -59,7 +59,7 @@ pub fn solve(
         for qi in q.iter_mut() {
             qi.iter_mut().for_each(|x| *x = 0.0);
         }
-        for joint in 0..total {
+        for (joint, payoff) in payoffs.iter().enumerate().take(total) {
             for i in 0..n {
                 let ai = (joint / stride[i]) % cand_lens[i];
                 // Weight = product of the other agents' probabilities.
@@ -70,7 +70,7 @@ pub fn solve(
                         w *= pi[k][ak];
                     }
                 }
-                q[i][ai] += w * payoffs[joint][i];
+                q[i][ai] += w * payoff[i];
             }
         }
     };
@@ -197,7 +197,10 @@ mod tests {
         // Agent 1 weak (tau 0.5), agent 0 rational (tau 12).
         let exploit = solve(&[2, 2], &payoffs, &[12.0, 0.5], 500);
         // Agent 1 near-uniform because it's near-indifferent and low-tau.
-        assert!((exploit.policies[1][0] - 0.5).abs() < 0.15, "weak agent ~uniform");
+        assert!(
+            (exploit.policies[1][0] - 0.5).abs() < 0.15,
+            "weak agent ~uniform"
+        );
         // Agent 0 strongly prefers action 0 (its better action given a1 uniform).
         assert!(exploit.policies[0][0] > 0.9, "rational agent exploits");
     }

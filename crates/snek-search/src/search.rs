@@ -83,8 +83,8 @@ pub(crate) fn terminal_values_with_draw(board: &Board, draw_value: f32) -> [f32;
     let mut v = [0.0f32; MAX_SNAKES];
     match board.winner() {
         Some(w) => {
-            for i in 0..board.snakes.len() {
-                v[i] = if i == w { 1.0 } else { -1.0 };
+            for (i, value) in v.iter_mut().enumerate().take(board.snakes.len()) {
+                *value = if i == w { 1.0 } else { -1.0 };
             }
         }
         None => {
@@ -94,11 +94,6 @@ pub(crate) fn terminal_values_with_draw(board: &Board, draw_value: f32) -> [f32;
         }
     }
     v
-}
-
-/// Exact per-agent value at a terminal board: winner +1, losers -1, draw 0.
-pub(crate) fn terminal_values(board: &Board) -> [f32; MAX_SNAKES] {
-    terminal_values_with_draw(board, 0.0)
 }
 
 /// Recursively expand `board`, pushing nodes into `nodes` and returning the
@@ -253,7 +248,13 @@ impl Forest {
         for board in boards {
             let mut nodes = Vec::new();
             let mut eval_boards = Vec::new();
-            let root = expand_node(board.clone(), depth, &mut nodes, &mut eval_boards, draw_value);
+            let root = expand_node(
+                board.clone(),
+                depth,
+                &mut nodes,
+                &mut eval_boards,
+                draw_value,
+            );
             let mut tree = Tree { nodes, root };
             let offset = forest.eval_boards.len();
             offset_eval_ids(&mut tree, offset);

@@ -134,16 +134,9 @@ impl Node {
 
 /// Run `iters` of decoupled-UCB search on one board; return the most-visited
 /// move per snake (alive snakes; eliminated snakes get `Move::Up`).
-fn uct_one(board: &Board, iters: usize, c_uct: f32, rng_seed: u64) -> [Move; MAX_SNAKES] {
+fn uct_one(board: &Board, iters: usize, c_uct: f32) -> [Move; MAX_SNAKES] {
     let n = board.snakes.len();
     let mut nodes: Vec<Node> = vec![Node::leaf(board.clone())];
-    let mut rng = rng_seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(1);
-    let mut next_rand = || {
-        rng ^= rng >> 12;
-        rng ^= rng << 25;
-        rng ^= rng >> 27;
-        rng.wrapping_mul(0x2545F4914F6CDD1D)
-    };
 
     for _ in 0..iters {
         let mut path: Vec<(usize, [usize; MAX_SNAKES])> = Vec::new();
@@ -157,7 +150,8 @@ fn uct_one(board: &Board, iters: usize, c_uct: f32, rng_seed: u64) -> [Move; MAX
             if !nodes[id].expanded {
                 // Expand with this node's candidate moves, then use its (already
                 // computed) heuristic value as the rollout estimate.
-                let cands: Vec<Vec<Move>> = (0..n).map(|i| candidates(&nodes[id].board, i)).collect();
+                let cands: Vec<Vec<Move>> =
+                    (0..n).map(|i| candidates(&nodes[id].board, i)).collect();
                 let nvisit = cands.iter().map(|c| vec![0.0f32; c.len()]).collect();
                 let wsum = cands.iter().map(|c| vec![0.0f32; c.len()]).collect();
                 let node = &mut nodes[id];
@@ -184,9 +178,12 @@ fn uct_one(board: &Board, iters: usize, c_uct: f32, rng_seed: u64) -> [Move; MAX
                 let ln = total.ln();
                 let mut best_a = 0usize;
                 let mut best = f32::NEG_INFINITY;
-                for a in 0..nodes[id].cands[i].len() {
-                    let na = nv[a];
-                    let q = if na > 0.0 { nodes[id].wsum[i][a] / na } else { 0.0 };
+                for (a, &na) in nv.iter().enumerate().take(nodes[id].cands[i].len()) {
+                    let q = if na > 0.0 {
+                        nodes[id].wsum[i][a] / na
+                    } else {
+                        0.0
+                    };
                     let u = if na > 0.0 {
                         c_uct * (ln / na).sqrt()
                     } else {
@@ -202,7 +199,12 @@ fn uct_one(board: &Board, iters: usize, c_uct: f32, rng_seed: u64) -> [Move; MAX
                 joint += best_a as u32 * strides[i];
             }
             path.push((id, action_idx));
-            match nodes[id].children.iter().find(|(j, _)| *j == joint).map(|(_, c)| *c) {
+            match nodes[id]
+                .children
+                .iter()
+                .find(|(j, _)| *j == joint)
+                .map(|(_, c)| *c)
+            {
                 Some(cid) => id = cid,
                 None => {
                     let mut mv = [Move::Up; MAX_SNAKES];
@@ -217,7 +219,6 @@ fn uct_one(board: &Board, iters: usize, c_uct: f32, rng_seed: u64) -> [Move; MAX
                     nodes.push(child);
                     nodes[id].children.push((joint, cid));
                     value = v;
-                    let _ = &mut next_rand; // rng reserved for future stochastic rollouts
                     break;
                 }
             }
@@ -225,8 +226,7 @@ fn uct_one(board: &Board, iters: usize, c_uct: f32, rng_seed: u64) -> [Move; MAX
         // Backup along the path.
         for &(node_id, action_idx) in &path {
             let node = &mut nodes[node_id];
-            for i in 0..n {
-                let a = action_idx[i];
+            for (i, &a) in action_idx.iter().enumerate().take(n) {
                 node.nvisit[i][a] += 1.0;
                 node.wsum[i][a] += value[i];
             }
@@ -237,7 +237,7 @@ fn uct_one(board: &Board, iters: usize, c_uct: f32, rng_seed: u64) -> [Move; MAX
     let mut out = [Move::Up; MAX_SNAKES];
     let root = &nodes[0];
     if root.expanded {
-        for i in 0..n {
+        for (i, slot) in out.iter_mut().enumerate().take(n) {
             let mut best_a = 0usize;
             let mut best = -1.0f32;
             for a in 0..root.cands[i].len() {
@@ -247,7 +247,7 @@ fn uct_one(board: &Board, iters: usize, c_uct: f32, rng_seed: u64) -> [Move; MAX
                 }
             }
             if !root.cands[i].is_empty() {
-                out[i] = root.cands[i][best_a];
+                *slot = root.cands[i][best_a];
             }
         }
     }
@@ -260,12 +260,11 @@ pub fn uct_actions(
     boards: &[Board],
     iters: usize,
     c_uct: f32,
-    seed: u64,
+    _seed: u64,
 ) -> Vec<[Move; MAX_SNAKES]> {
     boards
         .par_iter()
-        .enumerate()
-        .map(|(g, b)| uct_one(b, iters, c_uct, seed ^ (g as u64).wrapping_mul(0x100000001B3)))
+        .map(|b| uct_one(b, iters, c_uct))
         .collect()
 }
 

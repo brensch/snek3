@@ -13,6 +13,7 @@
 //!   2. the caller runs the net once on those observations.
 //!   3. [`MctsForest::expand_backup`] expands each evaluated leaf with its priors
 //!      and propagates its value up the path.
+//!
 //! Repeat for `sims` simulations, then read [`MctsForest::root_targets`].
 
 use crate::search::{candidates, terminal_values_with_draw};
@@ -106,8 +107,7 @@ impl MctsTree {
             let sqrt_total = total_n.max(1.0).sqrt();
             let mut best_a = 0usize;
             let mut best_score = f32::NEG_INFINITY;
-            for a in 0..node.cands[i].len() {
-                let n_a = nv[a];
+            for (a, &n_a) in nv.iter().enumerate().take(node.cands[i].len()) {
                 let q = if n_a > 0.0 {
                     node.wsum[i][a] / n_a
                 } else {
@@ -196,10 +196,10 @@ impl MctsTree {
     fn backup(&mut self, value: &[f32; MAX_SNAKES]) {
         for edge in &self.pending_path {
             let node = &mut self.nodes[edge.node];
-            for i in 0..self.n_snakes {
+            for (i, &agent_value) in value.iter().enumerate().take(self.n_snakes) {
                 let a = edge.action_idx[i];
                 node.nvisit[i][a] += 1.0;
-                node.wsum[i][a] += value[i];
+                node.wsum[i][a] += agent_value;
             }
         }
         self.pending_path.clear();

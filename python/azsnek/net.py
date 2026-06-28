@@ -9,11 +9,9 @@ The value is **egocentric**: it predicts the expected game outcome for the snake
 whose perspective produced the observation (+1 win, 0 draw, -1 loss). The search
 backs these up through per-node equilibria.
 
-Note vs the paper: Albatross feeds a 21x21 *head-centered* observation so the
-pyramid collapses to 1x1x512 via valid convolutions. We feed the native 11x11
-board, so the padding schedule is adapted to keep the spatial size valid and the
-final `AdaptiveAvgPool2d(1)` produces the same 512-d latent. (A 21x21 centered
-encoding is a possible follow-up for bit-exact fidelity.)
+The encoder feeds a 21x21 *head-centered* observation for the standard 11x11
+board. The final `AdaptiveAvgPool2d(1)` keeps the heads independent of the exact
+spatial size, which is useful for tests and non-standard board sizes.
 """
 
 from __future__ import annotations
@@ -25,10 +23,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Albatross `default_centered_11x11` channel pyramid, adapted to a native 11x11
-# input. Each entry is (out_channels, padding); kernel is 3, one residual block
-# per layer, GroupNorm(8) throughout. padding=1 keeps the spatial size, padding=0
-# shrinks it by 4 (two valid 3x3 convs). 11 ->11->7->7->3->3->3->3, then avgpool.
+# Albatross `default_centered_11x11` channel pyramid. Each entry is
+# (out_channels, padding); kernel is 3, one residual block per layer,
+# GroupNorm(8) throughout. padding=1 keeps the spatial size, padding=0 shrinks
+# it by 4 (two valid 3x3 convs), then avgpool collapses the final map.
 DEFAULT_LAYER_SPECS: list[tuple[int, int]] = [
     (32, 1),
     (64, 0),

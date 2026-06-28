@@ -180,7 +180,11 @@ mod tests {
             .filter(|(_, &v)| v != 0.0)
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(set, vec![10 * ow + 10], "head must be the single centre cell");
+        assert_eq!(
+            set,
+            vec![10 * ow + 10],
+            "head must be the single centre cell"
+        );
 
         // Mask plane (8): exactly width*height real cells marked.
         let mask = &out[plane(8)..plane(9)];

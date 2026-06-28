@@ -16,13 +16,15 @@ def _train(runs_dir: Path, run_id: str, generations: int, fresh: bool = False):
     cmd = [
         sys.executable, "-m", "azsnek.train",
         "--runs-dir", str(runs_dir), "--run-id", run_id,
-        "--generations", str(generations), "--samples", "120", "--count", "8",
-        "--depth", "1", "--iters", "12", "--blocks", "1", "--filters", "8",
-        "--eval-every", "999", "--record-games", "0", "--ckpt-dir", str(runs_dir / "ckpt"),
+        "--generations", str(generations), "--samples", "40", "--count", "4",
+        "--sims", "4", "--blocks", "1", "--filters", "8",
+        "--train-steps", "1", "--batch-size", "16", "--eval-every", "0",
+        "--relative-every", "0", "--league-every", "0", "--record-games", "0",
+        "--sample-games", "0", "--ckpt-dir", str(runs_dir / "ckpt"),
     ]
     if fresh:
         cmd.append("--fresh")
-    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300, env=dict(os.environ))
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120, env=dict(os.environ))
 
 
 def test_rerunning_same_run_id_auto_resumes(tmp_path):

@@ -519,7 +519,7 @@ def main():
     log_phase(logger, "SETUP", f"device={device}")
     cuda = device.type == "cuda"
 
-    # --no-serve: headless single run (old behaviour).
+    # --no-serve: headless single run.
     if not args.serve:
         train_one_run(args, None, device, logger)
         return
