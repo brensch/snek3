@@ -12,12 +12,13 @@ REPO="${REPO:-https://github.com/brensch/snek3.git}"
 BRANCH="${BRANCH:-albatross-learning-signal}"
 DIR="${DIR:-$HOME/snek3}"
 
-# 1. build deps + Rust toolchain (maturin compiles the pyo3 extension)
+# 1. system deps (works on a bare image too) + Rust toolchain for the pyo3 build
+if command -v apt-get >/dev/null 2>&1 && ! command -v cargo >/dev/null 2>&1; then
+  apt-get update -y && apt-get install -y --no-install-recommends \
+    git curl build-essential pkg-config ca-certificates \
+    python3 python3-venv python3-pip || true
+fi
 if ! command -v cargo >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -y && apt-get install -y --no-install-recommends \
-      git curl build-essential pkg-config ca-certificates || true
-  fi
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 fi
 # shellcheck disable=SC1091
