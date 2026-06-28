@@ -40,6 +40,10 @@ import snek
 import torch
 import torch.nn.functional as F
 
+import copy
+import itertools
+
+from . import control
 from .net import AZNet, NetConfig, autocast as net_autocast, device_auto
 from .runlog import RunWriter
 from .symmetry import augment_batch
@@ -300,6 +304,53 @@ def main():
         status = "configured" if search_threads_configured else "already initialized"
         log_phase(logger, "SETUP", f"search_threads={args.search_threads} ({status})")
 
+    # Headless single run, or serve the dashboard and run on request.
+    if not args.serve:
+        train_one_run(args, None, device, logger)
+        return
+    from pathlib import Path as _Path
+    state = control.RunState()
+    state.set_base_spec({k: getattr(args, k) for k in control.NEW_RUN_PARAMS if hasattr(args, k)})
+    static_dir = _Path(__file__).resolve().parent.parent / "dashboard" / "static"
+    control.serve_in_thread(state, args.serve_host, args.serve_port, _Path(args.runs_dir), static_dir)
+    log_phase(logger, "SERVE",
+              f"http://{args.serve_host}:{args.serve_port}  "
+              + (f"auto-starting {args.run_id}" if args.run_id
+                 else "idle — log in and start a run from the dashboard"))
+    # A CLI run-id (or ARGS) auto-starts; otherwise idle until the dashboard asks.
+    pending = {"name": args.run_id, "cli": True} if args.run_id else None
+    while not state.shutdown:
+        if pending is None:
+            state.go_idle()
+            while not state.pending_run and not state.shutdown:
+                time.sleep(0.3)
+            if state.shutdown:
+                break
+            pending = state.take_new_run()
+            if pending is None:
+                continue
+        train_one_run(_args_for_pending(args, pending), state, device, logger)
+        pending = state.take_new_run()  # a switch request ends the run; loop into it
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    state.go_idle()
+    log_phase(logger, "DONE", "shutdown")
+
+
+def _args_for_pending(base, pending):
+    """Build an args namespace for a requested run: CLI run as launched; dashboard
+    'resume' continues from checkpoint; otherwise a fresh named run with overrides."""
+    a = copy.copy(base)
+    a.run_id = pending["name"]
+    if pending.get("cli"):
+        return a
+    a.fresh = not pending.get("resume", False)
+    for k, v in (pending.get("overrides") or {}).items():
+        setattr(a, k, v)
+    return a
+
+
+def train_one_run(args, state, device, logger):
     sp = SelfPlayConfig(
         board=args.board,
         num_snakes=args.num_snakes,
@@ -415,32 +466,23 @@ def main():
                 except ValueError:
                     pass
 
-    # ---- Embedded live dashboard (served in-process by this trainer) ----
-    state = None
-    if args.serve:
-        import itertools
-        from pathlib import Path as _Path
-        from . import control
-        static_dir = _Path(__file__).resolve().parent.parent / "dashboard" / "static"
-        state = control.RunState()
-        control.serve_in_thread(state, args.serve_host, args.serve_port,
-                                _Path(args.runs_dir), static_dir)
+    # Register this run with the already-running dashboard server (if serving).
+    if state is not None:
         init_params = {k: getattr(args, k) for k in control.LIVE_PARAMS if hasattr(args, k)}
         state.begin_run(run.run_id, run.read_json("meta.json"), init_params, metrics_history,
                         persist=lambda p: run.write_json("params.json", p))
-        log_phase(logger, "SERVE", f"http://{args.serve_host}:{args.serve_port}")
 
     onnx_path = run.dir / "model.onnx"
     gen_iter = (
-        itertools.count(start_gen) if args.serve and args.generations == 0
+        itertools.count(start_gen) if (state is not None and args.generations == 0)
         else range(start_gen, args.generations if args.generations else start_gen + 1)
     )
     for gen in gen_iter:
         # pause/stop gate + live-param apply (dashboard control)
         if state is not None:
-            while state.paused and not (state.stopping or state.shutdown):
+            while state.paused and not (state.stopping or state.shutdown or state.pending_run):
                 time.sleep(0.3)
-            if state.stopping or state.shutdown:
+            if state.stopping or state.shutdown or state.pending_run:
                 break
             p = state.params_snapshot()
             args.count = p.get("count", args.count)
