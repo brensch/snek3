@@ -14,7 +14,6 @@ When creating the instance on Vast:
 - **Ports:** expose **8050** (Vast → "Open Ports" / `-p 8050:8050`).
 - **Env:**
   - `SNEK_SERVE=1` — launch the server after setup
-  - `SNEK_SERVE_TOKEN=<your-secret>` — bearer token for write/control/resume
   - `SNEK_RUN_ID=h100-test` — *optional*, auto-start a fresh run (omit to idle)
 - **On-start / entrypoint:**
 
@@ -26,9 +25,9 @@ The script installs Rust, builds the extension (`make venv && make build`), then
 (because `SNEK_SERVE=1`) runs `make server` in a crash-restart loop in the
 foreground, so the instance keeps serving.
 
-Open the dashboard at the public URL Vast maps to port 8050, paste the token,
-and watch `gen_seconds` / `samples_per_sec` / GPU%. **Terminate the instance to
-stop billing.**
+Open the dashboard at the public URL Vast maps to port 8050 and watch
+`gen_seconds` / `samples_per_sec` / GPU%. **Terminate the instance to stop
+billing.**
 
 ## Path B — prebuilt image
 
@@ -37,9 +36,9 @@ docker build -t <you>/snek3 -f deploy/Dockerfile .
 docker push <you>/snek3
 ```
 
-On Vast set Image = `<you>/snek3`, expose 8050, env `SNEK_SERVE_TOKEN=…`. The
-image's CMD boots the idle server; create runs from the dashboard. Faster cold
-starts (no per-boot build), at the cost of building+pushing a multi-GB image.
+On Vast set Image = `<you>/snek3` and expose 8050. The image's CMD boots the
+idle server; create runs from the dashboard. Faster cold starts (no per-boot
+build), at the cost of building+pushing a multi-GB image.
 
 ## Notes
 - The torch cu128 wheel bundles its own CUDA; only the host **driver** must be

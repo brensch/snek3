@@ -7,9 +7,8 @@ async function getJSON(url) {
   return r.json();
 }
 
-async function postJSON(url, body, token) {
+async function postJSON(url, body) {
   const headers = { "Content-Type": "application/json" };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   const r = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || `${url} -> ${r.status}`);
@@ -33,8 +32,8 @@ export const api = {
     };
     return es;
   },
-  setParams: (patch, token) => postJSON("/api/params", patch, token),
-  control: (action, token) => postJSON("/api/control", { action }, token),
-  createRun: (name, params, token) => postJSON("/api/runs", { name, params }, token),
-  resumeRun: (name, token) => postJSON("/api/runs", { name, resume: true }, token),
+  setParams: (patch) => postJSON("/api/params", patch),
+  control: (action) => postJSON("/api/control", { action }),
+  createRun: (name, params) => postJSON("/api/runs", { name, params }),
+  resumeRun: (name) => postJSON("/api/runs", { name, resume: true }),
 };

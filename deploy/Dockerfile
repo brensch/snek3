@@ -2,7 +2,7 @@
 # in, so the pod boots straight into serving; no per-boot build).
 #
 # Built in CI -> ghcr.io/brensch/snek3:latest (see .github/workflows/docker.yml).
-# Run:  docker run --gpus all -p 8050:8050 -e SNEK_SERVE_TOKEN=secret \
+# Run:  docker run --gpus all -p 8050:8050 \
 #         -e SNEK_RUN_ID=h100-test ghcr.io/brensch/snek3:latest
 #
 # torch cu128 wheels bundle their own CUDA runtime, so only a recent host NVIDIA

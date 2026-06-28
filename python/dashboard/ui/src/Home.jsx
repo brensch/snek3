@@ -5,14 +5,12 @@ import { api } from "./api.js";
 const NEW_FIELDS = ["board", "filters", "blocks", "depth", "count", "samples"];
 
 export default function Home({ runs, liveRun, onSelect }) {
-  const [token, setToken] = useState(() => localStorage.getItem("snek_token") || "");
   const [name, setName] = useState("");
   const [draft, setDraft] = useState({});
   const [base, setBase] = useState({});
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { localStorage.setItem("snek_token", token); }, [token]);
   useEffect(() => { api.state().then((s) => s && setBase(s.base_spec || {})); }, []);
 
   const flash = (text, ok = true) => { setMsg({ text, ok }); setTimeout(() => setMsg(null), 5000); };
@@ -24,7 +22,7 @@ export default function Home({ runs, liveRun, onSelect }) {
     for (const [k, v] of Object.entries(draft)) if (v !== "" && v != null) params[k] = Number(v);
     setBusy(true);
     try {
-      await api.createRun(nm, params, token);
+      await api.createRun(nm, params);
       flash(`starting ${nm}…`);
       onSelect(nm);
     } catch (e) { flash(String(e.message || e), false); }
@@ -34,7 +32,7 @@ export default function Home({ runs, liveRun, onSelect }) {
   const resume = async (r, e) => {
     e.stopPropagation();
     setBusy(true);
-    try { await api.resumeRun(r, token); flash(`resuming ${r}…`); onSelect(r); }
+    try { await api.resumeRun(r); flash(`resuming ${r}…`); onSelect(r); }
     catch (err) { flash(String(err.message || err), false); }
     finally { setBusy(false); }
   };
@@ -44,10 +42,8 @@ export default function Home({ runs, liveRun, onSelect }) {
       <section className="card">
         <h2>Start a new run</h2>
         <div className="control-row">
-          <input className="token" placeholder="run name" value={name}
+          <input className="text-input" placeholder="run name" value={name}
             onChange={(e) => setName(e.target.value)} style={{ minWidth: 240 }} />
-          <input type="password" className="token" placeholder="write token"
-            value={token} onChange={(e) => setToken(e.target.value)} />
           <button disabled={busy} onClick={start}>Start run</button>
           {msg && <span className={msg.ok ? "ok" : "err"}>{msg.text}</span>}
         </div>

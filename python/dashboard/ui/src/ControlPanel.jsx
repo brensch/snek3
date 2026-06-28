@@ -1,16 +1,12 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { api } from "./api.js";
 
 // Live control for the running trainer: status + pause/resume/stop, and an
 // editable grid of the live-tunable params (applied at the next generation).
-// Token is stored in localStorage and sent on write requests.
 export default function ControlPanel({ run, status, params, liveKeys, lockedKeys, live }) {
-  const [token, setToken] = useState(() => localStorage.getItem("snek_token") || "");
   const [draft, setDraft] = useState({});
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => { localStorage.setItem("snek_token", token); }, [token]);
 
   const flash = (text, ok = true) => { setMsg({ text, ok }); setTimeout(() => setMsg(null), 4000); };
 
@@ -19,7 +15,7 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
   if (!live) {
     const resume = async () => {
       setBusy(true);
-      try { await api.resumeRun(run, token); flash(`resuming ${run}…`); }
+      try { await api.resumeRun(run); flash(`resuming ${run}…`); }
       catch (e) { flash(String(e.message || e), false); }
       finally { setBusy(false); }
     };
@@ -27,8 +23,6 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
       <div className="control">
         <p className="muted">This is an archived run — it isn't currently training.</p>
         <div className="control-row">
-          <input type="password" className="token" placeholder="write token"
-            value={token} onChange={(e) => setToken(e.target.value)} />
           <button disabled={busy} onClick={resume}>Resume this run</button>
           {msg && <span className={msg.ok ? "ok" : "err"}>{msg.text}</span>}
         </div>
@@ -39,7 +33,7 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
 
   const doControl = async (action) => {
     setBusy(true);
-    try { await api.control(action, token); flash(`${action} sent`); }
+    try { await api.control(action); flash(`${action} sent`); }
     catch (e) { flash(String(e.message || e), false); }
     finally { setBusy(false); }
   };
@@ -52,7 +46,7 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
     if (!Object.keys(patch).length) { flash("nothing changed", false); return; }
     setBusy(true);
     try {
-      const r = await api.setParams(patch, token);
+      const r = await api.setParams(patch);
       const rej = Object.entries(r.rejected || {});
       flash(rej.length ? `applied; rejected: ${rej.map(([k, why]) => `${k} (${why})`).join(", ")}`
                        : `applied ${Object.keys(r.applied).join(", ")}`, !rej.length);
@@ -114,11 +108,7 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
         </div>
       </div>
 
-      <div className="control-row">
-        <input type="password" placeholder="write token" value={token}
-          onChange={(e) => setToken(e.target.value)} className="token" />
-        {msg && <span className={msg.ok ? "ok" : "err"}>{msg.text}</span>}
-      </div>
+      {msg && <div className="control-row"><span className={msg.ok ? "ok" : "err"}>{msg.text}</span></div>}
 
       <div className="params">
         {(liveKeys || []).map((k) => (

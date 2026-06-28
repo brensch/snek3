@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Container entrypoint: everything is already built into the image, so just
 # launch the trainer-server. Configure via env:
-#   SNEK_SERVE_TOKEN  bearer token for write/control/resume (required for control)
 #   SNEK_RUN_ID       optional: auto-start a run with this name (omit = idle)
 #   SNEK_PORT         dashboard/API port (default 8050)
 #   SNEK_COUNT/SNEK_SAMPLES  optional self-play overrides (defaults 64 / 8000)

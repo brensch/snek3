@@ -3,7 +3,7 @@
 #
 # Install:
 #   sudo cp deploy/snek-server.service /etc/systemd/system/
-#   # edit User=, WorkingDirectory=, the token, and any training flags below
+#   # edit User=, WorkingDirectory=, and any training flags below
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now snek-server
 #   journalctl -u snek-server -f          # logs (incl. the dashboard URL)
@@ -21,7 +21,6 @@ Type=simple
 User=brensch
 WorkingDirectory=/home/brensch/snek3
 Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-Environment=SNEK_SERVE_TOKEN=CHANGEME
 # Direct python (no make) so a restart never rebuilds. Mirrors `make server`
 # defaults so dashboard-created runs share the meta.
 ExecStart=/home/brensch/snek3/.venv/bin/python -m azsnek.train_albatross \

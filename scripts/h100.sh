@@ -43,10 +43,10 @@ ok = torch.cuda.is_available()
 print(" torch", torch.__version__, "cuda", ok, torch.cuda.get_device_name(0) if ok else "")
 PY
 
-# Non-interactive launch (for a Vast/RunPod on-start command): set SNEK_SERVE=1
-# and SNEK_SERVE_TOKEN=... in the instance env. Optionally SNEK_RUN_ID=name to
-# auto-start a run, SNEK_PORT to change the port. Runs in the foreground with a
-# crash-restart loop so the box keeps serving.
+# Non-interactive launch (for a Vast/RunPod on-start command): set SNEK_SERVE=1.
+# Optionally set SNEK_RUN_ID=name to auto-start a run and SNEK_PORT to change
+# the port. Runs in the foreground with a crash-restart loop so the box keeps
+# serving.
 if [ "${SNEK_SERVE:-0}" = "1" ]; then
   echo "=== launching server (SNEK_SERVE=1) on :${SNEK_PORT:-8050} ==="
   # shellcheck disable=SC2086
@@ -60,16 +60,16 @@ fi
 cat <<'EOF'
 
 === ready ===
-Start the server (public on :8050, token-protected). Pick your own token:
+Start the server (public on :8050):
 
-  make server ALB_SERVE_PORT=8050 ALB_SERVE_TOKEN=CHANGEME RUN_ID=h100-test
+  make server ALB_SERVE_PORT=8050 RUN_ID=h100-test
 
   - RUN_ID=h100-test  -> auto-start a fresh run named h100-test
   - omit RUN_ID       -> idle; start a run from the dashboard homepage
 
 Open the dashboard at your box's public URL for port 8050 (e.g. RunPod's
-"Connect -> HTTP :8050" proxy URL), paste the token, and watch gen_seconds /
-samples_per_sec / GPU% vs your local baseline.
+"Connect -> HTTP :8050" proxy URL), and watch gen_seconds / samples_per_sec /
+GPU% vs your local baseline.
 
 To stop being billed: TERMINATE/DESTROY the instance (not just "stop").
 Grab results first if you want them:  scp the runs/h100-test dir down, or

@@ -285,7 +285,7 @@ label.chk { color: var(--muted); font-size: 12px; display: flex; align-items: ce
 .chip { display: inline-flex; gap: 6px; align-items: baseline; background: #161b22; border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; }
 .chip em { color: var(--muted); font-size: 10px; font-style: normal; text-transform: uppercase; letter-spacing: .4px; }
 .chip b { color: var(--fg); font-size: 13px; font-variant-numeric: tabular-nums; }
-.token { background: #0d1117; color: var(--fg); border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; font-size: 12px; min-width: 220px; }
+.text-input { background: #0d1117; color: var(--fg); border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; font-size: 12px; min-width: 220px; }
 button.danger { border-color: #5c1111; color: #f87171; }
 button.danger:hover { border-color: #f87171; }
 button:disabled { opacity: .5; cursor: default; }

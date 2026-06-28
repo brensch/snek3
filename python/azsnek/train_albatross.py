@@ -247,9 +247,6 @@ def build_args():
                     help="host the live API + dashboard in-process (--no-serve to disable)")
     ap.add_argument("--serve-host", type=str, default="0.0.0.0")
     ap.add_argument("--serve-port", type=int, default=8050)
-    ap.add_argument("--serve-token", type=str, default=os.environ.get("SNEK_SERVE_TOKEN"),
-                    help="bearer token for write endpoints (or set SNEK_SERVE_TOKEN); "
-                         "if unset a random one is generated and printed at startup")
     return ap.parse_args()
 
 
@@ -527,18 +524,15 @@ def main():
         train_one_run(args, None, device, logger)
         return
 
-    import secrets
     from pathlib import Path as _Path
     from . import control
 
-    token = args.serve_token or secrets.token_urlsafe(16)
     state = control.RunState()
     state.set_base_spec({k: getattr(args, k) for k in control.NEW_RUN_PARAMS})
     static_dir = _Path(__file__).resolve().parent.parent / "dashboard" / "static"
     control.serve_in_thread(state, args.serve_host, args.serve_port,
-                            _Path(args.runs_dir), static_dir, token)
+                            _Path(args.runs_dir), static_dir)
     log_phase(logger, "SERVE", f"http://{args.serve_host}:{args.serve_port}")
-    log_phase(logger, "SERVE", f"write token: {token}")
 
     # Auto-start a run iff a run id was passed on the CLI; otherwise idle.
     pending = {"name": args.run_id, "overrides": {}, "cli": True} if args.run_id else None

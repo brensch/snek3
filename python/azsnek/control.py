@@ -9,14 +9,13 @@ still written by RunWriter for durability/resume and for browsing past runs.
 Endpoints (live run is whatever this process is training):
     GET  /api/state              snapshot: run, meta, status, params, metrics
     GET  /api/stream             SSE: snapshot then metric/progress/status/params
-    POST /api/params             patch live-tunable params (token)        -> next gen
-    POST /api/control            {action: pause|resume|stop|checkpoint}   (token)
+    POST /api/params             patch live-tunable params -> next gen
+    POST /api/control            {action: pause|resume|stop|checkpoint}
     GET  /api/runs               list run ids (live + archived on disk)
     GET  /api/runs/{id}/...      meta/metrics/games for any run (file-backed)
     GET  /  /run/{name}          dashboard SPA
 
-Write endpoints require `Authorization: Bearer <token>` (or ?token=) when a
-token is configured; read endpoints are open so the dashboard "just works".
+This server is intended for local use. Read and write endpoints are open.
 """
 
 from __future__ import annotations
@@ -225,17 +224,9 @@ def _sse(obj: dict) -> str:
     return f"data: {json.dumps(obj)}\n\n"
 
 
-def build_app(state: RunState, runs_dir: Path, static_dir: Path, token: str | None):
+def build_app(state: RunState, runs_dir: Path, static_dir: Path):
     app = FastAPI(title="snek3 trainer")
     runs_dir = Path(runs_dir).resolve()
-
-    def require_token(request: Request) -> None:
-        if not token:
-            return
-        auth = request.headers.get("authorization", "")
-        supplied = auth[7:] if auth.lower().startswith("bearer ") else request.query_params.get("token")
-        if supplied != token:
-            raise HTTPException(status_code=401, detail="bad or missing token")
 
     def safe_run(run: str) -> Path:
         if "/" in run or "\\" in run or run in ("", ".", ".."):
@@ -275,7 +266,6 @@ def build_app(state: RunState, runs_dir: Path, static_dir: Path, token: str | No
 
     @app.post("/api/params")
     async def set_params(request: Request):
-        require_token(request)
         patch = await request.json()
         if not isinstance(patch, dict):
             raise HTTPException(status_code=400, detail="expected a JSON object")
@@ -283,7 +273,6 @@ def build_app(state: RunState, runs_dir: Path, static_dir: Path, token: str | No
 
     @app.post("/api/control")
     async def control(request: Request):
-        require_token(request)
         body = await request.json()
         action = (body or {}).get("action")
         if action == "pause":
@@ -303,7 +292,6 @@ def build_app(state: RunState, runs_dir: Path, static_dir: Path, token: str | No
         """Start a run. With `resume: true` for an existing run, continue it from
         its checkpoint (keeps weights + gen count); otherwise create a fresh named
         run. Either way the active run, if any, is checkpointed first."""
-        require_token(request)
         body = await request.json() or {}
         name = str(body.get("name", "")).strip()
         if not name or "/" in name or "\\" in name or name in (".", ".."):
@@ -401,11 +389,10 @@ def build_app(state: RunState, runs_dir: Path, static_dir: Path, token: str | No
         return json.loads(p.read_text())
 
     @app.get("/api/runs/{run}/export")
-    def export_run(run: str, request: Request):
+    def export_run(run: str):
         """Download the whole run dir (metrics, state.pt checkpoint, params,
         games) as a .tar.gz — so checkpoints can be pulled off an ephemeral pod
-        before it's terminated. Token-protected (it includes model weights)."""
-        require_token(request)
+        before it's terminated."""
         import io
         import tarfile
         p = safe_run(run)
@@ -437,12 +424,12 @@ def build_app(state: RunState, runs_dir: Path, static_dir: Path, token: str | No
 
 
 def serve_in_thread(state: RunState, host: str, port: int, runs_dir: Path,
-                    static_dir: Path, token: str | None) -> threading.Thread:
+                    static_dir: Path) -> threading.Thread:
     """Start uvicorn on a daemon thread (signal handlers disabled since we're not
     on the main thread) and return once it's accepting connections."""
     import uvicorn
 
-    app = build_app(state, runs_dir, static_dir, token)
+    app = build_app(state, runs_dir, static_dir)
     config = uvicorn.Config(app, host=host, port=port, log_level="warning",
                             access_log=False)
     server = uvicorn.Server(config)
