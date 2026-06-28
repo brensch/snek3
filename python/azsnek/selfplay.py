@@ -9,6 +9,7 @@ that game's recorded positions.
 from __future__ import annotations
 
 import json
+import os
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -98,6 +99,60 @@ class ReplayBuffer:
             z=np.concatenate(self._z, axis=0),
             temp=np.concatenate(self._temp, axis=0) if self._has_temp else None,
         )
+
+    def restore(self, shard_dir) -> int:
+        """Repopulate the buffer from per-gen shards written by `save_shard`, so a
+        restarted run keeps its recency-weighted window instead of refilling from
+        scratch. Loads the most-recent shards up to `capacity` (oldest-first, so
+        recency order is preserved). Returns the number of samples restored."""
+        from pathlib import Path
+        files = sorted(Path(shard_dir).glob("gen_*_n*.npz"))  # ascending by gen
+        if not files:
+            return 0
+        # Walk newest-first, keep shards until we'd exceed capacity.
+        chosen, total = [], 0
+        for f in reversed(files):
+            n = int(f.stem.split("_n")[-1])
+            chosen.append(f)
+            total += n
+            if total >= self.capacity:
+                break
+        for f in reversed(chosen):  # oldest-first
+            with np.load(f) as d:
+                self.add(Samples(obs=d["obs"], pol=d["pol"], z=d["z"]))
+        return len(self)
+
+
+def save_shard(shard_dir, gen: int, s: Samples) -> None:
+    """Persist one generation's samples as a compressed shard (obs is mostly
+    0/1 so it compresses well). Sample count is in the filename so prune/restore
+    never have to open the large arrays."""
+    from pathlib import Path
+    d = Path(shard_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    n = int(s.z.shape[0])
+    # NB: np.savez_compressed appends ".npz" if the name lacks it, so the tmp
+    # name must already end in ".npz" for os.replace to find it.
+    tmp = d / f".tmp_gen_{gen:06d}_n{n}.npz"
+    final = d / f"gen_{gen:06d}_n{n}.npz"
+    np.savez_compressed(tmp, obs=s.obs, pol=s.pol, z=s.z)
+    os.replace(tmp, final)
+
+
+def prune_shards(shard_dir, capacity: int) -> None:
+    """Delete shards older than the most-recent `capacity` samples (+1 kept as
+    margin, matching the in-memory buffer which keeps one extra gen)."""
+    from pathlib import Path
+    files = sorted(Path(shard_dir).glob("gen_*_n*.npz"))  # ascending
+    total = 0
+    keep_from = 0
+    for i in range(len(files) - 1, -1, -1):
+        total += int(files[i].stem.split("_n")[-1])
+        if total >= capacity:
+            keep_from = i  # keep files[i:]; older ones are redundant
+            break
+    for f in files[:keep_from]:
+        f.unlink(missing_ok=True)
 
 
 def add_root_noise(policy: np.ndarray, rng: np.random.Generator, frac: float, alpha: float) -> np.ndarray:

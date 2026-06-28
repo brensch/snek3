@@ -43,7 +43,7 @@ import torch.nn.functional as F
 from .net import AZNet, NetConfig, autocast as net_autocast, device_auto
 from .runlog import RunWriter
 from .symmetry import augment_batch
-from .selfplay import ReplayBuffer, Samples, SelfPlayConfig, generate
+from .selfplay import ReplayBuffer, Samples, SelfPlayConfig, generate, save_shard, prune_shards
 
 
 PHASE_COLORS = {
@@ -398,6 +398,14 @@ def main():
     )
 
     buffer = ReplayBuffer(args.buffer_size)
+    buffer_dir = run.dir / "buffer"
+    if not args.fresh:
+        restored = buffer.restore(buffer_dir)
+        if restored:
+            log_phase(logger, "RESUME", f"restored replay buffer: {restored:,} samples from {buffer_dir}")
+    elif buffer_dir.exists():
+        for f in buffer_dir.glob("gen_*_n*.npz"):
+            f.unlink(missing_ok=True)  # --fresh: drop stale shards
     metrics_history = []
     if run.metrics_path.exists() and not args.fresh:
         for line in run.metrics_path.read_text().splitlines():
@@ -481,6 +489,9 @@ def main():
         samples = Samples(obs=obs, pol=pol, z=z, turns=int(z.shape[0]), games=0)
         target_stats = policy_target_stats(samples.pol)
         buffer.add(samples)
+        # Persist this gen's samples so a restart keeps the recency window.
+        save_shard(buffer_dir, gen, samples)
+        prune_shards(buffer_dir, args.buffer_size)
         t_gen = time.time() - t0
         n_samp = samples.obs.shape[0]
         sampled_games = []
