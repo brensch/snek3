@@ -1,71 +1,90 @@
-# Albatross training — current architecture
+# How the training works (plain version)
 
-How the live `train_albatross` run actually works (the Python equilibrium path).
+We're teaching a neural network to play snake by having it **play games against
+itself over and over, then learn from those games.** Repeat forever; it slowly
+gets better.
 
-## Why the GPU stays busy (and the CPU mostly doesn't)
-Each self-play move is **serial**, not pipelined:
+A few ideas in plain words:
+- **The brain** = the neural network. Given a board, it outputs *how good this
+  position looks* (a score) and *what move it likes*.
+- **Looking ahead** = before each move we don't just trust the brain blindly. We
+  list out the positions that could happen a couple of moves from now, ask the
+  brain to score all of them, then work backwards to pick the best move. This is
+  a small search, and it's what makes play stronger than the raw brain.
+- **Skill dial** = a number we feed the brain that says "play this well." Low =
+  sloppy/random, high = near-optimal. We train across the whole range so the
+  brain can imitate weak *and* strong players.
+- **Two brains**: one learns *how players of each skill level play*; the second
+  learns *how to beat a player of a given skill level*. (That second one is the
+  whole point — it's how you exploit a weaker opponent.)
 
-`prepare_search` (Rust builds the tree) → **net forward on all leaves (GPU)** → `backup_search` (Rust solves the equilibrium) → step.
+## Who does what
+- **Rust (on the CPU)** runs the actual snake game and does the "look ahead" math
+  (listing future positions, and the working-backwards to pick a move). It's
+  fast.
+- **The neural net (on the GPU)** does only one job: score a big pile of
+  positions at once. This is the slow/expensive part, which is why the GPU stays
+  busy — each move asks it to score ~40,000 positions in one go.
+- **Python** is just the conductor: it asks Rust for positions, hands them to the
+  GPU, hands the scores back to Rust, saves the results, and trains the brain.
 
-The GPU reads ~95% busy because the leaf evaluation is a **huge batch** — the
-full-width depth-2 tree across all 256 games on the 21×21 egocentric board is
-~40k leaf positions per move, so the GPU forward dominates each move's wall-time.
-The Rust parts (tree build + logit-equilibrium solve) are fast enough that the
-GPU doesn't idle long between moves. So it's *GPU-dominated work helped by fast
-Rust* — **not** a continuous Rust→GPU feeder pipeline (that's the unused
-`generate_selfplay_le` fast path). The CPU is still largely idle.
+## Sequence — what happens, step by step
 
-## Diagram
+```mermaid
+sequenceDiagram
+    participant T as Python (conductor)
+    participant R as Rust (game + look-ahead, CPU)
+    participant G as Neural net (GPU)
+
+    Note over T: Start a generation:<br/>play games until we have 8000 example positions
+    loop every move, until 8000 positions collected
+        T->>R: From the current boards, list the positions<br/>that could happen a couple of moves ahead
+        R-->>T: ~40,000 possible future positions
+        T->>G: Score how good each of these positions is<br/>(one big batch)
+        G-->>T: a goodness score for every position
+        T->>R: Using those scores, work backwards:<br/>what's the best move now, and how good is this spot?
+        R-->>T: best-move choice + position value, for every game
+        T->>T: Save (board, best move, value); pick a move;<br/>advance every game one step
+    end
+    T->>G: Train the brain on the 8000 saved positions
+    Note over T: (do the above twice: once for the "skill-level" brain,<br/>once for the "counter" brain)
+    T->>R: Play test games vs the two fixed bots
+    R-->>T: who won each game
+    T->>T: Save the win-rates and a few games to watch,<br/>then start the next generation
+```
+
+## Big-picture flow
 
 ```mermaid
 flowchart TB
-  subgraph GEN["ONE GENERATION — train_albatross (Python loop)"]
-    direction TB
-    P["PROXY self-play (generate_proxy)<br/>sample one τ ∈ [0.5,10] for the gen"]
-    PB["ReplayBuffer (+τ per sample)"]
-    PT["train PROXY net<br/>256 steps · D4 symmetry aug · temp=τ"]
-    R["RESPONSE self-play (generate_response)<br/>agent τ_R=12 vs frozen proxy at opp τ"]
-    RT["train RESPONSE net"]
-    E["EVAL + RECORD<br/>proxy/response vs baseline, UCT<br/>+ proxy-v-proxy, response-v-proxy<br/>→ metrics.jsonl + games/"]
-    P --> PB --> PT --> R --> RT --> E -->|next gen| P
-  end
+    A["Play ~8000 positions of self-play<br/>(brain vs itself, looking ahead each move)"]
+    B["Train the brain on those positions:<br/>learn the good moves + how good positions were"]
+    C["Test vs two fixed bots<br/>(a simple one and a stronger search bot)<br/>and save a few games to watch"]
+    A --> B --> C --> A
 
-  subgraph MOVE["INNER LOOP — one move of self-play (run_search), repeated until 8000 samples"]
-    direction LR
-    GB["GameBatch boards<br/>(Rust snek-core engine)"]
-    PS["prepare_search(depth=2, draw=-0.9)<br/>build full-width tree, emit ALL leaf obs<br/>egocentric 21×21 · ~40k leaves<br/>RUST (snek-search) · CPU"]
-    NET["AZNet forward on leaves<br/>VALUE head · temp=τ<br/>GPU (torch, chunked @2048)"]
-    BK["backup_search(τ, iters=120)<br/>logit-equilibrium solve per node (SFP)<br/>→ root policy + root value<br/>RUST (le.rs) · CPU"]
-    REC["record (obs, LE policy, LE value, τ)<br/>sample move (+explore) · step<br/>Python + Rust"]
-    GB --> PS --> NET --> BK --> REC --> GB
-  end
-
-  P -. uses .-> MOVE
-  R -. uses .-> MOVE
-
-  subgraph COMP["Components"]
-    direction LR
-    C1["snek-core (Rust)<br/>engine · egocentric encoding · flood-fill baseline"]
-    C2["snek-search (Rust)<br/>fixed-depth search · le.rs LE solver · UCT agent"]
-    C3["AZNet (Python/torch)<br/>temp-conditioned ResNet<br/>policy + value heads"]
-    C4["dashboard (FastAPI + React)<br/>reads metrics.jsonl + games/"]
-  end
+    subgraph inside["What 'looking ahead' does for ONE move"]
+        D["Rust: list every position a couple moves ahead"]
+        E["GPU brain: score all of them at once"]
+        F["Rust: work backwards to the best move + this spot's value"]
+        D --> E --> F
+    end
+    A -. each move uses .-> inside
 ```
 
-## Notes
-- **τ (temperature) is the whole self-play**: proxy plays the logit equilibrium
-  at a sampled τ; response best-responds (τ_R) to the frozen proxy at a sampled
-  opponent τ. Test-time exploitation = estimate opponent τ by MLE → feed the
-  response.
-- **baseline / UCT are test opponents only** — used in EVAL and recorded
-  replays, never in self-play (Albatross trains purely via self-play; this is
-  also "GPU purity"). Training against them would be the optional "league" lever.
-- **draw_value = −0.9** in the equilibrium search (was hardcoded 0, which made
-  mutual head-to-head death "free" → proxy-vs-proxy suicide-draws).
-- **Speed**: bottleneck is the leaf-eval inference volume (full-width depth-2 ×
-  21×21 egocentric). The faster future path is the Rust ORT loop
-  (`generate_selfplay_le`) with GPU-worker double-buffering — natural fit for a
-  cloud H100 to cut iteration time.
+## Why the GPU is busy but the CPU isn't
+It's not a clever pipeline — it's just that **scoring 40,000 positions on the GPU
+takes far longer than the Rust look-ahead around it**, so almost all the time is
+spent waiting on the GPU. Rust does its part quickly and then sits idle while the
+GPU works. (A future version could overlap them and run on a beefier cloud GPU to
+go faster.)
 
-See [[albatross-overhaul]] (memory) for the build history and
-`docs/albatross-option-matrix.md` for the levers/options.
+## A few specifics (for later, ignore if confusing)
+- The two brains are the **proxy** (skill-level imitator) and **response**
+  (counter / best-responder). The "skill dial" is the **temperature τ**.
+- The fixed test bots are the **flood-fill baseline** and the **UCT** search
+  agent. They're only used for testing/replays, never for training.
+- A drawn game is scored **−0.9** (almost as bad as losing) so the brains stop
+  killing each other head-on just to force a draw.
+- The look-ahead + "work backwards" is a fixed-depth search with a
+  logit-equilibrium solve; see `docs/albatross-option-matrix.md` and the
+  `albatross-overhaul` memory for the gory details.
