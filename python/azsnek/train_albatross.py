@@ -69,61 +69,62 @@ def estimate_opponent_tau(proxy, device, obs_hist, act_hist) -> float:
 
 
 @torch.no_grad()
-def _winrate_vs(agent_fn, opp_fn, board, num_snakes, games, seed, max_turns) -> float:
-    """Snake 0 = our agent (`agent_fn(batch) -> [count] move idx`), snake 1 =
-    pool opponent (`opp_fn(batch) -> [count] move idx`). Win rate (draws=half)."""
-    batch = snek.GameBatch(board, board, num_snakes, count=games, seed=seed)
-    cap = max_turns if max_turns > 0 else SAFETY_TURNS  # hang-guard when uncapped
+def _eval_agent(pol_fn, board, num_snakes, games, seed, cap, uct_iters):
+    """Evaluate one agent (snake 0, moves from `pol_fn(batch) -> [count, N, 4]`)
+    against BOTH pool opponents in a single batch: the first `games` use the
+    flood-fill baseline as snake 1, the next `games` use the CPU UCT agent. The
+    agent's (expensive) search runs once over the whole 2*games batch each step.
+    Returns {'baseline': win_rate, 'uct': win_rate}."""
+    batch = snek.GameBatch(board, board, num_snakes, count=2 * games, seed=seed)
     steps = 0
     while not np.all(batch.done()) and steps < cap:
-        agent = agent_fn(batch)
-        opp = opp_fn(batch)
-        actions = np.stack([agent, opp], axis=1).astype(np.uint8)
-        batch.step(actions)
+        a0 = greedy_actions(pol_fn(batch))[:, 0]
+        base = batch.baseline_actions()[:, 1]
+        uct = np.asarray(batch.heuristic_actions(iters=uct_iters, seed=seed))[:, 1]
+        a1 = np.concatenate([base[:games], uct[games:]])
+        batch.step(np.stack([a0, a1], axis=1).astype(np.uint8))
         steps += 1
-    winners = batch.winners()
+    w = batch.winners()
     done = batch.done().astype(bool)
-    wins = int(np.sum(winners == 0))
-    draws = int(np.sum(done & (winners == -1)))
-    decided = int(np.sum(done))
-    return (wins + 0.5 * draws) / decided if decided else 0.0
+
+    def wr(sl):
+        ww, dd = w[sl], done[sl]
+        wins = int(np.sum(ww == 0)); draws = int(np.sum(dd & (ww == -1))); dec = int(np.sum(dd))
+        return (wins + 0.5 * draws) / dec if dec else 0.0
+
+    return {"baseline": wr(slice(0, games)), "uct": wr(slice(games, 2 * games))}
 
 
 @torch.no_grad()
 def evaluate_albatross(proxy, response, device, cfg: SelfPlayConfig, games, seed,
                        eval_opp_tau, uct_iters):
     """Win rate of the proxy (near-optimal tau) and the response (best-responding
-    at tau_R to an assumed-weak opponent at `eval_opp_tau`) against the opponent
-    pool: the 1-ply flood-fill baseline and the CPU UCT agent (stronger)."""
-    def proxy_action(batch):
+    at tau_R to an assumed-weak opponent at `eval_opp_tau`) against the pool
+    (flood-fill baseline + CPU UCT). Each agent plays both opponents in one
+    batched pass so the search is shared (lets `games` be large for low noise)."""
+    cap = cfg.max_turns if cfg.max_turns > 0 else SAFETY_TURNS
+
+    def proxy_pol(batch):
         pol, _ = run_search(batch, proxy, device, cfg.depth, cfg.tau_max, cfg.iters,
                             cfg.eval_batch_size, return_root_values=True, temp=cfg.tau_max,
                             draw_value=cfg.draw_value)
-        return greedy_actions(pol)[:, 0]
+        return pol
 
-    def response_action(batch):
-        # Leaf values from proxy; for serving, use the response net + per-opponent
-        # MLE tau (estimate_opponent_tau) instead of a fixed eval_opp_tau.
+    def response_pol(batch):
+        # Leaf values from proxy; for serving, use per-opponent MLE tau
+        # (estimate_opponent_tau) instead of the fixed eval_opp_tau here.
         pol, _ = run_search_hetero(batch, proxy, device, cfg.depth,
                                    [cfg.response_tau, eval_opp_tau], cfg.iters,
                                    cfg.eval_batch_size, temp=eval_opp_tau,
                                    draw_value=cfg.draw_value)
-        return greedy_actions(pol)[:, 0]
+        return pol
 
-    # Opponent pool: name -> action fn for snake 1.
-    pool = {
-        "baseline": lambda b: b.baseline_actions()[:, 1],
-        "uct": lambda b: np.asarray(b.heuristic_actions(iters=uct_iters, seed=seed))[:, 1],
-    }
-    agents = {"proxy": proxy_action}
+    pa = _eval_agent(proxy_pol, cfg.board, cfg.num_snakes, games, seed, cap, uct_iters)
+    out = {"proxy_vs_baseline": pa["baseline"], "proxy_vs_uct": pa["uct"]}
     if response is not None:
-        agents["response"] = response_action
-
-    out = {}
-    for aname, afn in agents.items():
-        for oname, ofn in pool.items():
-            out[f"{aname}_vs_{oname}"] = _winrate_vs(
-                afn, ofn, cfg.board, cfg.num_snakes, games, seed, cfg.max_turns)
+        ra = _eval_agent(response_pol, cfg.board, cfg.num_snakes, games, seed + 1, cap, uct_iters)
+        out["response_vs_baseline"] = ra["baseline"]
+        out["response_vs_uct"] = ra["uct"]
     return out
 
 
