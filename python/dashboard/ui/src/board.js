@@ -1,6 +1,23 @@
 // Shared board renderer used by every mini-board.
 
-export const COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#ec4899", "#a78bfa", "#f87171", "#2dd4bf", "#facc15"];
+export const ROLE_COLORS = {
+  net: "#3b82f6",
+  baseline: "#22c55e",
+};
+export const COLORS = [ROLE_COLORS.net, ROLE_COLORS.baseline, "#f59e0b", "#ec4899", "#a78bfa", "#f87171", "#2dd4bf", "#facc15"];
+
+export function snakeRole(opponent, index) {
+  if (opponent === "net") return "net";
+  // "agent-v-opp" labels (e.g. proxy-v-uct): snake 0 is our agent, snake 1 the opponent.
+  const parts = (opponent || "").split("-v-");
+  if (parts.length === 2) return index === 0 ? parts[0] : parts[1];
+  return index === 0 ? "net" : "baseline";
+}
+
+export function snakeColor(opponent, index) {
+  // Snake 0 (our agent) blue, snake 1 (opponent) green; fall back by index.
+  return ROLE_COLORS[snakeRole(opponent, index)] || COLORS[index % COLORS.length];
+}
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -13,7 +30,7 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 // Draw one snapshot frame onto a square canvas.
-export function drawFrame(canvas, fr) {
+export function drawFrame(canvas, fr, opponent = "baseline") {
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!fr) {
@@ -39,7 +56,7 @@ export function drawFrame(canvas, fr) {
   (fr.food || []).forEach(([x, y]) => { ctx.fillStyle = "#ef4444"; ctx.beginPath(); ctx.arc(px(x) + cell / 2, py(y) + cell / 2, cell * 0.22, 0, 7); ctx.fill(); });
   (fr.hazards || []).forEach(([x, y]) => { ctx.fillStyle = "rgba(234,179,8,0.12)"; ctx.fillRect(px(x), py(y), cell, cell); });
   fr.snakes.forEach((s, si) => {
-    const col = COLORS[si % COLORS.length];
+    const col = snakeColor(opponent, si);
     ctx.globalAlpha = s.alive ? 1 : 0.22;
     s.body.forEach(([x, y], bi) => {
       ctx.fillStyle = col;

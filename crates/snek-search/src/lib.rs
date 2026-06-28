@@ -5,7 +5,11 @@
 //! - [`search`] — the fixed-depth tree with a two-phase batched-eval interface.
 
 pub mod le;
+pub mod mcts;
 pub mod search;
+pub mod uct;
 
 pub use le::{solve as solve_le, LeSolution};
+pub use mcts::MctsForest;
 pub use search::Forest;
+pub use uct::uct_actions;

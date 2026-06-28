@@ -1,98 +1,161 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api.js";
 import MetricsChart from "./MetricsChart.jsx";
 import GenerationView from "./GenerationView.jsx";
+import ControlPanel from "./ControlPanel.jsx";
+import Home from "./Home.jsx";
 
-function Stat({ value, label }) {
-  return (
-    <div className="stat">
-      <b>{value}</b>
-      <span>{label}</span>
-    </div>
-  );
-}
+const runFromUrl = () => {
+  const m = window.location.pathname.match(/^\/run\/(.+)$/);
+  return m ? decodeURIComponent(m[1].replace(/\/$/, "")) : null;
+};
 
 export default function App() {
   const [runs, setRuns] = useState([]);
-  const [run, setRun] = useState(null);
+  const [liveRun, setLiveRun] = useState(null);
+  const [run, setRun] = useState(runFromUrl());
   const [status, setStatus] = useState({});
   const [meta, setMeta] = useState({});
   const [metrics, setMetrics] = useState([]);
+  const [params, setParams] = useState({});
+  const [liveKeys, setLiveKeys] = useState([]);
+  const [lockedKeys, setLockedKeys] = useState([]);
   const [gamesIndex, setGamesIndex] = useState([]);
+  const [evalIndex, setEvalIndex] = useState([]);
   const runRef = useRef(null);
   useEffect(() => { runRef.current = run; }, [run]);
 
+  const isLive = run && run === liveRun;
+
+  // Keep the URL in sync with the selected run.
+  useEffect(() => {
+    const want = run ? `/run/${encodeURIComponent(run)}` : "/";
+    if (window.location.pathname !== want) window.history.replaceState(null, "", want);
+  }, [run]);
+
+  // Discover runs + which one is live; default to the live run.
   useEffect(() => {
     let alive = true;
-    const refresh = async () => {
-      try {
-        const rs = await api.runs();
-        if (!alive) return;
-        setRuns(rs);
-        let r = runRef.current;
-        if (!r || !rs.includes(r)) r = rs[0] || null;
-        runRef.current = r;
-        setRun(r);
-        if (!r) return;
-        const [st, mt, me, gi] = await Promise.all([
-          api.status(r), api.metrics(r), api.meta(r), api.games(r),
-        ]);
-        if (!alive) return;
-        setStatus(st); setMetrics(mt); setMeta(me); setGamesIndex(gi);
-      } catch (_) { /* transient; next tick retries */ }
+    const tick = async () => {
+      const { runs: rs, live } = await api.runs();
+      if (!alive) return;
+      setRuns(rs || []);
+      setLiveRun(live || null);
+      // Don't auto-pick a run: the landing page (run === null) lets the user
+      // start or choose one. Only clear a selection that has vanished.
+      if (runRef.current && !(rs || []).includes(runRef.current)) {
+        setRun(null);
+      }
     };
-    refresh();
-    const id = setInterval(refresh, 2500);
+    tick();
+    const id = setInterval(tick, 5000);
     return () => { alive = false; clearInterval(id); };
   }, []);
 
-  const m = status.last || {};
-  const best = status.best_win_rate;
-  const num = (v, d = 0) => (v == null ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: d }));
+  // LIVE run: subscribe to the SSE stream.
+  useEffect(() => {
+    if (!isLive) return;
+    const es = api.stream((ev) => {
+      if (ev.type === "snapshot") {
+        setMeta(ev.meta || {}); setStatus(ev.status || {});
+        setParams(ev.params || {}); setMetrics(ev.metrics || []);
+        setLiveKeys(ev.live_params || []); setLockedKeys(ev.locked_params || []);
+      } else if (ev.type === "metric") {
+        setMetrics((m) => [...m, ev.metric]);
+      } else if (ev.type === "status") {
+        setStatus(ev.status || {});
+      } else if (ev.type === "params") {
+        setParams(ev.params || {});
+      }
+    });
+    return () => es.close();
+  }, [isLive, run]);
+
+  // ARCHIVED run: poll REST.
+  useEffect(() => {
+    if (isLive || !run) return;
+    let alive = true;
+    const tick = async () => {
+      const [st, mt, me] = await Promise.all([api.status(run), api.metrics(run), api.meta(run)]);
+      if (!alive) return;
+      setStatus(st); setMetrics(mt); setMeta(me);
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => { alive = false; clearInterval(id); };
+  }, [isLive, run]);
+
+  // Games + eval indexes (both modes): refetch when the generation advances.
+  const gen = status?.generation;
+  useEffect(() => {
+    if (!run) return;
+    let alive = true;
+    api.games(run).then((g) => { if (alive) setGamesIndex(g); });
+    api.evalIndex(run).then((e) => { if (alive) setEvalIndex(e); });
+    return () => { alive = false; };
+  }, [run, gen]);
+
+  // The faithful win-rates live in the async eval artifacts, not metrics.jsonl;
+  // merge them onto each metric row by gen so the Results chart can plot them
+  // (sparse — only the gens that were actually eval'd).
+  const metricsWithEval = useMemo(() => {
+    if (!evalIndex.length) return metrics;
+    const byGen = new Map();
+    for (const e of evalIndex) if (e.gen != null) byGen.set(e.gen, e);
+    return metrics.map((m) => {
+      const e = byGen.get(m.gen);
+      return e ? { ...m, vs_base: e.vs_base, vs_uct: e.vs_uct } : m;
+    });
+  }, [metrics, evalIndex]);
+
   const running = status.running;
 
   return (
     <>
       <header>
-        <h1>snek3<span className="dot">·</span>training</h1>
-        <select value={run || ""} onChange={(e) => setRun(e.target.value)}>
-          {runs.length ? runs.map((r) => <option key={r}>{r}</option>) : <option>(no runs)</option>}
+        <h1 className="brand" onClick={() => setRun(null)} title="Home">
+          snek3<span className="dot">·</span>training
+        </h1>
+        <select value={run || ""} onChange={(e) => setRun(e.target.value || null)}>
+          <option value="">＋ home / new run</option>
+          {runs.map((r) => (
+            <option key={r} value={r}>{r === liveRun ? `● ${r}` : r}</option>
+          ))}
         </select>
-        <span className={"pill " + (running ? "live" : "done")}>
-          {status.generation == null
-            ? "no data"
-            : `${running ? "● live" : "■ done"} · gen ${status.generation + 1}/${status.total_generations ?? "?"}`}
-        </span>
+        {run && (
+          <span className={"pill " + (running ? "live" : "done")}>
+            {status.generation == null ? "no data"
+              : `${running ? (status.paused ? "❚❚ paused" : "● live") : "■ done"} · gen ${status.generation}`}
+          </span>
+        )}
         <div className="grow" />
-        <span className="pill">
-          {meta.board ? `${meta.board}×${meta.board} · ${meta.filters}f/${meta.blocks}b · depth ${meta.depth} · ${meta.device || ""}` : "—"}
-        </span>
+        {run && (
+          <span className="pill">
+            {meta.board ? `${meta.board}×${meta.board} · ${meta.filters}f/${meta.blocks}b · depth ${meta.depth}` : "—"}
+          </span>
+        )}
       </header>
 
-      <main className="stacked">
-        <section className="card">
-          <h2>Training metrics</h2>
-          <MetricsChart metrics={metrics} />
-          <div className="stats-row">
-            <Stat value={m.gen ?? "—"} label="generation" />
-            <Stat value={m.win_rate != null ? m.win_rate.toFixed(3) : "—"} label={`win-rate (best ${best != null ? best.toFixed(2) : "—"})`} />
-            <Stat value={num(m.turns_per_sec)} label="turns / sec" />
-            <Stat value={m.games_per_sec != null ? m.games_per_sec.toFixed(1) : "—"} label="games / sec" />
-            <Stat value={m.policy_loss != null ? m.policy_loss.toFixed(3) : "—"} label="policy loss" />
-            <Stat value={m.target_entropy != null ? m.target_entropy.toFixed(3) : "—"} label="target entropy" />
-            <Stat value={m.target_max_prob != null ? m.target_max_prob.toFixed(3) : "—"} label="target max prob" />
-            <Stat value={m.value_loss != null ? m.value_loss.toFixed(3) : "—"} label="value loss" />
-            <Stat value={num(m.samples)} label="samples/gen" />
-            <Stat value={num(m.buffer)} label="replay buffer" />
-          </div>
-        </section>
+      {run ? (
+        <main className="stacked">
+          <section className="card">
+            <h2>Control</h2>
+            <ControlPanel run={run} status={status} params={params} liveKeys={liveKeys}
+              lockedKeys={lockedKeys} live={isLive} />
+          </section>
 
-        {run ? (
-          <GenerationView run={run} gamesIndex={gamesIndex} metrics={metrics} />
-        ) : (
-          <section className="card"><h2>Games</h2><p className="muted">no run selected</p></section>
-        )}
-      </main>
+          <section className="card">
+            <h2>Training metrics</h2>
+            <MetricsChart metrics={metricsWithEval} />
+          </section>
+
+          <GenerationView run={run} gamesIndex={gamesIndex} evalIndex={evalIndex} />
+        </main>
+      ) : (
+        <main className="stacked">
+          <Home runs={runs} liveRun={liveRun} onSelect={setRun} />
+        </main>
+      )}
     </>
   );
 }

@@ -32,6 +32,11 @@ class TuneSettings:
     blocks: int = 6
     eval_games: int = 64
     max_turns: int = 0
+    exploration_prob: float = 0.15
+    draw_value: float = -0.25
+    skip_short_draw_turns: int = 0
+    sample_games: int = 16
+    sample_every: int = 1
     record_games: int = 8
     record_every: int = 5
 
@@ -194,6 +199,16 @@ def build_train_command(args, settings: TuneSettings, fresh: bool) -> list[str]:
         str(settings.eval_games),
         "--max-turns",
         str(settings.max_turns),
+        "--exploration-prob",
+        str(settings.exploration_prob),
+        "--draw-value",
+        str(settings.draw_value),
+        "--skip-short-draw-turns",
+        str(settings.skip_short_draw_turns),
+        "--sample-games",
+        str(settings.sample_games),
+        "--sample-every",
+        str(settings.sample_every),
         "--record-games",
         str(settings.record_games),
         "--record-every",
@@ -245,6 +260,11 @@ def main() -> None:
     ap.add_argument("--filters", type=int, default=64)
     ap.add_argument("--blocks", type=int, default=6)
     ap.add_argument("--max-turns", type=int, default=0)
+    ap.add_argument("--exploration-prob", type=float, default=0.15)
+    ap.add_argument("--draw-value", type=float, default=-0.25)
+    ap.add_argument("--skip-short-draw-turns", type=int, default=0)
+    ap.add_argument("--sample-games", type=int, default=16)
+    ap.add_argument("--sample-every", type=int, default=1)
     ap.add_argument("--record-games", type=int, default=8)
     ap.add_argument("--record-every", type=int, default=5)
     ap.add_argument("--min-train-steps", type=int, default=64)
@@ -272,6 +292,11 @@ def main() -> None:
         blocks=args.blocks,
         eval_games=args.eval_games,
         max_turns=args.max_turns,
+        exploration_prob=args.exploration_prob,
+        draw_value=args.draw_value,
+        skip_short_draw_turns=args.skip_short_draw_turns,
+        sample_games=args.sample_games,
+        sample_every=args.sample_every,
         record_games=args.record_games,
         record_every=args.record_every,
     )

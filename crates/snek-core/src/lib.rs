@@ -22,7 +22,7 @@ pub mod setup;
 pub mod json;
 
 pub use body::{Body, MAX_BODY};
-pub use encode::{encode_into, obs_len, NUM_CHANNELS};
+pub use encode::{encode_into, obs_h, obs_len, obs_side, obs_w, NUM_CHANNELS};
 pub use setup::standard_start;
 
 /// Maximum number of snakes supported in a single game.
@@ -117,6 +117,11 @@ impl Snake {
     #[inline]
     pub fn len(&self) -> usize {
         self.body.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.body.is_empty()
     }
 }
 
@@ -275,7 +280,6 @@ impl Board {
         }
     }
 
-
     fn reduce_health(&mut self) {
         for snake in self.snakes.iter_mut() {
             if snake.eliminated.is_none() {
@@ -297,12 +301,7 @@ impl Board {
             // Hazard damage is skipped if the head is also on food this turn.
             if self.hazards.contains(&head) && !self.food.contains(&head) {
                 snake.health -= self.hazard_damage;
-                if snake.health < 0 {
-                    snake.health = 0;
-                }
-                if snake.health > SNAKE_MAX_HEALTH {
-                    snake.health = SNAKE_MAX_HEALTH;
-                }
+                snake.health = snake.health.clamp(0, SNAKE_MAX_HEALTH);
                 if snake.health <= 0 {
                     snake.eliminated = Some(EliminatedCause::Hazard);
                 }
@@ -318,7 +317,7 @@ impl Board {
         for &food in &self.food {
             let mut eaten = false;
             for snake in self.snakes.iter_mut() {
-                if snake.eliminated.is_some() || snake.body.len() == 0 {
+                if snake.eliminated.is_some() || snake.body.is_empty() {
                     continue;
                 }
                 if snake.body.head() == food {
@@ -424,7 +423,7 @@ mod food_tests {
             }
         }
         assert!(seen_food, "food should spawn to maintain the minimum");
-        assert!(b.food.len() >= 1);
+        assert!(!b.food.is_empty());
     }
 
     #[test]

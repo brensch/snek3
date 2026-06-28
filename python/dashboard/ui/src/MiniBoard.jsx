@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { drawFrame, resultOf, COLORS } from "./board.js";
+import { drawFrame, resultOf, snakeColor, snakeRole } from "./board.js";
 
 // One game's replay; `tick` is a shared clock so every board on the page plays
 // together (each loops over its own length).
@@ -8,7 +8,8 @@ export default function MiniBoard({ game, tick, playing, onPlay }) {
   const [autoplay, setAutoplay] = useState(true);
   const [manualFrame, setManualFrame] = useState(0);
   const n = game.frames.length;
-  const autoplayFrame = n ? tick % n : 0;
+  const holdTicks = 10;
+  const autoplayFrame = n ? Math.min(tick % (n + holdTicks), n - 1) : 0;
   const frame = autoplay ? autoplayFrame : Math.min(manualFrame, Math.max(0, n - 1));
   const fr = game.frames[frame];
 
@@ -18,11 +19,12 @@ export default function MiniBoard({ game, tick, playing, onPlay }) {
   }, [game]);
 
   useEffect(() => {
-    if (ref.current) drawFrame(ref.current, fr);
-  }, [fr]);
+    if (ref.current) drawFrame(ref.current, fr, game.opponent);
+  }, [fr, game.opponent]);
 
   const [r, cls] = resultOf(game.winner);
-  const type = game.opponent === "net" ? "self-play" : "vs baseline";
+  const type = game.opponent === "net" ? "net self-play"
+    : (game.opponent || "net vs baseline").replace(/-v-/g, " vs ");
   const isPlaying = autoplay && playing && n > 1;
   const stopAutoplay = () => {
     setManualFrame(autoplayFrame);
@@ -74,8 +76,8 @@ export default function MiniBoard({ game, tick, playing, onPlay }) {
       <div className="board-snakes">
         {game.frames[0].snakes.map((_, i) => (
           <span key={i}>
-            <i className="swatch" style={{ background: COLORS[i] }} />
-            {i === 0 ? "net" : game.opponent === "net" ? "net" : "baseline"}
+            <i className="swatch" style={{ background: snakeColor(game.opponent, i) }} />
+            {snakeRole(game.opponent, i)}
             {game.winner === i ? " ✓" : ""}
           </span>
         ))}

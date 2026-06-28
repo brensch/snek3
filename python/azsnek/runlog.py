@@ -28,6 +28,10 @@ class RunWriter:
         self.dir = self.root / self.run_id
         self.games_dir = self.dir / "games"
         self.games_dir.mkdir(parents=True, exist_ok=True)
+        # Out-of-band "real games": faithful (proxy ONNX + serve search) eval vs
+        # the fixed pool, written here directly by the Rust `snek-eval` binary.
+        self.eval_dir = self.dir / "eval"
+        self.eval_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_path = self.dir / "metrics.jsonl"
         self.state_path = self.dir / "state.pt"  # full resumable training state
         self.started = time.time()
@@ -48,10 +52,13 @@ class RunWriter:
     def reset(self) -> None:
         """Clear a run's progress (metrics, status, state, replays) for a fresh
         restart under the same run id. Keeps meta.json."""
-        for p in (self.metrics_path, self.state_path, self.dir / "status.json"):
+        for p in (self.metrics_path, self.state_path, self.dir / "status.json",
+                  self.dir / "params.json"):
             p.unlink(missing_ok=True)
         for g in self.games_dir.glob("gen_*.json"):
             g.unlink(missing_ok=True)
+        for e in self.eval_dir.glob("gen_*.json"):
+            e.unlink(missing_ok=True)
 
     def write_json(self, name: str, obj) -> None:
         path = self.dir / name
@@ -73,12 +80,28 @@ class RunWriter:
             {"updated": datetime.now(timezone.utc).isoformat(), **status},
         )
 
-    def save_games(self, gen: int, games: list[dict]) -> None:
-        self.write_json(f"games/gen_{gen:04d}.json", {"gen": gen, "games": games})
+    def save_games(self, gen: int, games: list[dict], summary: dict | None = None) -> None:
+        payload = {"gen": gen, "games": games}
+        if summary is not None:
+            payload["selfplay"] = summary
+        self.write_json(f"games/gen_{gen:04d}.json", payload)
 
     def prune_games(self, keep: int) -> None:
         """Keep only the `keep` most recent game files to bound disk usage."""
         files = sorted(self.games_dir.glob("gen_*.json"))
+        for f in files[: max(0, len(files) - keep)]:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+    def eval_artifact_path(self, gen: int) -> Path:
+        """Where the Rust evaluator writes gen `gen`'s win-rates + real games."""
+        return self.eval_dir / f"gen_{gen:04d}.json"
+
+    def prune_eval(self, keep: int) -> None:
+        """Keep only the `keep` most recent eval artifacts."""
+        files = sorted(self.eval_dir.glob("gen_*.json"))
         for f in files[: max(0, len(files) - keep)]:
             try:
                 f.unlink()

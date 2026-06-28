@@ -43,6 +43,13 @@ def index():
     return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/run/{name}")
+def index_run(name: str):
+    # SPA deep-link: /run/<run_name> serves the same app so reloads/bookmarks
+    # return to that run (the client reads the run name from the path).
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/runs")
 def list_runs():
     if not RUNS_DIR.exists():
@@ -94,10 +101,13 @@ def list_games(run: str):
             data = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
             continue
+        selfplay = data.get("selfplay") or {}
+        selfplay_index = {k: v for k, v in selfplay.items() if k != "games"}
         files.append(
             {
                 "file": f.name,
                 "gen": data.get("gen"),
+                "selfplay": selfplay_index,
                 "games": [
                     {
                         "opponent": g.get("opponent"),
@@ -118,4 +128,46 @@ def get_game_file(run: str, name: str):
     p = _safe_run(run) / "games" / name
     if not p.is_file():
         raise HTTPException(status_code=404, detail="game file not found")
+    return json.loads(p.read_text())
+
+
+@app.get("/api/runs/{run}/eval")
+def list_eval(run: str):
+    """Index of faithful eval artifacts: per-gen win-rates + real-game list."""
+    edir = _safe_run(run) / "eval"
+    if not edir.exists():
+        return {"files": []}
+    files = []
+    for f in sorted(edir.glob("gen_*.json"), reverse=True):
+        try:
+            data = json.loads(f.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        files.append(
+            {
+                "file": f.name,
+                "gen": data.get("gen"),
+                "vs_base": data.get("vs_base"),
+                "vs_uct": data.get("vs_uct"),
+                "summary": data.get("summary"),
+                "games": [
+                    {
+                        "opponent": g.get("opponent"),
+                        "winner": g.get("winner"),
+                        "num_turns": g.get("num_turns"),
+                    }
+                    for g in data.get("games", [])
+                ],
+            }
+        )
+    return {"files": files}
+
+
+@app.get("/api/runs/{run}/eval/{name}")
+def get_eval_file(run: str, name: str):
+    if "/" in name or "\\" in name or ".." in name or not name.endswith(".json"):
+        raise HTTPException(status_code=400, detail="bad file")
+    p = _safe_run(run) / "eval" / name
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="eval file not found")
     return json.loads(p.read_text())

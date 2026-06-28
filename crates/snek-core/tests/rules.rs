@@ -14,22 +14,36 @@ fn board_with(width: i8, height: i8, snakes: &[&[Point]]) -> Board {
 
 #[test]
 fn movement_prepends_head_and_drops_tail() {
-    let mut b = board_with(11, 11, &[&[Point::new(5, 5), Point::new(5, 4), Point::new(5, 3)]]);
+    let mut b = board_with(
+        11,
+        11,
+        &[&[Point::new(5, 5), Point::new(5, 4), Point::new(5, 3)]],
+    );
     b.step(&[Move::Up]);
     let body: Vec<_> = b.snakes[0].body.iter().collect();
-    assert_eq!(body, vec![Point::new(5, 6), Point::new(5, 5), Point::new(5, 4)]);
+    assert_eq!(
+        body,
+        vec![Point::new(5, 6), Point::new(5, 5), Point::new(5, 4)]
+    );
     // Health decremented by one each turn.
     assert_eq!(b.snakes[0].health, 99);
 }
 
 #[test]
 fn eating_food_grows_and_restores_health() {
-    let mut b = board_with(11, 11, &[&[Point::new(5, 5), Point::new(5, 4), Point::new(5, 3)]]);
+    let mut b = board_with(
+        11,
+        11,
+        &[&[Point::new(5, 5), Point::new(5, 4), Point::new(5, 3)]],
+    );
     b.snakes[0].health = 50;
     b.food.push(Point::new(5, 6));
     b.step(&[Move::Up]);
     assert_eq!(b.snakes[0].len(), 4, "snake grows by one after eating");
-    assert_eq!(b.snakes[0].health, 100, "health restored to max after eating");
+    assert_eq!(
+        b.snakes[0].health, 100,
+        "health restored to max after eating"
+    );
     assert!(b.food.is_empty(), "food consumed");
     // Tail is duplicated, so the last two segments coincide.
     let body: Vec<_> = b.snakes[0].body.iter().collect();

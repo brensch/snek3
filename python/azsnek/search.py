@@ -12,10 +12,25 @@ forward pass per search, no per-node evaluation.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import torch
 
 from .net import AZNet, autocast as net_autocast
+
+# Lightweight per-call timing so the dashboard can show throughput / GPU-vs-CPU
+# split. fwd_s = time in the net forward (GPU), search_s = time in the Rust
+# tree-build + equilibrium backup (CPU), infer = leaf evaluations.
+_PERF = {"fwd_s": 0.0, "search_s": 0.0, "infer": 0}
+
+
+def perf_reset():
+    _PERF.update(fwd_s=0.0, search_s=0.0, infer=0)
+
+
+def perf_snapshot() -> dict:
+    return dict(_PERF)
 
 
 @torch.no_grad()
@@ -27,29 +42,178 @@ def run_search(
     tau: float = 6.0,
     iters: int = 200,
     eval_batch_size: int = 8192,
-) -> np.ndarray:
+    return_root_values: bool = False,
+    temp=None,
+    draw_value: float = 0.0,
+):
     """Run one equilibrium search over every game in `batch`.
 
-    Returns root policies as a float32 array of shape `[count, num_snakes, 4]`.
+    Returns root policies `[count, num_snakes, 4]`. If `return_root_values` is
+    set, returns `(policies, root_values)` where `root_values` is `[count,
+    num_snakes]` — the per-agent equilibrium value of the current state.
+
+    `temp` conditions a temperature-aware (proxy) value net at the leaves; it may
+    be a scalar (all agents) or a per-agent array of length `num_snakes`. Leaf
+    observations are laid out `[eval_id, agent]` with agent innermost.
+    `draw_value` is the terminal value of a draw (negative discourages the
+    degenerate mutual-suicide draw equilibrium).
     """
-    obs = batch.prepare_search(depth)  # [M, C, H, W] float32
+    _t = time.perf_counter()
+    obs = batch.prepare_search(depth, draw_value)  # [M, C, H, W] float32
+    _PERF["search_s"] += time.perf_counter() - _t
     if obs.shape[0] == 0:
         # Every root already terminal; backup still needs a (length-0) value array.
         values = np.zeros((0,), dtype=np.float32)
+        if return_root_values:
+            return batch.backup_search_values(values, tau, iters)
         return batch.backup_search(values, tau, iters)
 
     net.eval()
+    use_temp = getattr(net.cfg, "temperature_input", False) and temp is not None
+    temp_all = None
+    if use_temp:
+        n = int(batch.num_snakes)
+        temp_arr = np.asarray(temp, dtype=np.float32).reshape(-1)
+        if temp_arr.size == 1:
+            temp_all = np.full(obs.shape[0], float(temp_arr[0]), dtype=np.float32)
+        else:  # per-agent, tiled over leaves ([eval, agent], agent innermost)
+            temp_all = np.tile(temp_arr, obs.shape[0] // n)
     if eval_batch_size <= 0:
         eval_batch_size = obs.shape[0]
     values = np.empty((obs.shape[0],), dtype=np.float32)
+    _t = time.perf_counter()
     for start in range(0, obs.shape[0], eval_batch_size):
         end = min(start + eval_batch_size, obs.shape[0])
         obs_t = torch.from_numpy(obs[start:end]).to(device, non_blocking=True)
+        temp_t = (
+            torch.from_numpy(temp_all[start:end]).to(device, non_blocking=True)
+            if use_temp else None
+        )
         with net_autocast(device):
-            _, value = net(obs_t)  # value: [M] in [-1, 1]
+            _, value = net(obs_t, temp_t)  # value: [M] in [-1, 1]
         values[start:end] = value.detach().to("cpu", dtype=torch.float32).numpy()
         del obs_t, value
-    return batch.backup_search(values, tau, iters)
+    _PERF["fwd_s"] += time.perf_counter() - _t
+    _PERF["infer"] += int(obs.shape[0])
+    _t = time.perf_counter()
+    out = batch.backup_search_values(values, tau, iters) if return_root_values else batch.backup_search(values, tau, iters)
+    _PERF["search_s"] += time.perf_counter() - _t
+    return out
+
+
+@torch.no_grad()
+def run_search_hetero(
+    batch,
+    net: AZNet,
+    device: torch.device,
+    depth: int,
+    tau_per_agent,
+    iters: int = 200,
+    eval_batch_size: int = 8192,
+    temp=None,
+    draw_value: float = 0.0,
+):
+    """Heterogeneous-temperature equilibrium search: per-agent `tau_per_agent`
+    (length num_snakes) instead of one shared value, for SBRLE-style play where a
+    rational agent (high tau) best-responds to weaker agents (low tau). Leaf
+    values come from `net` (optionally temperature-conditioned via `temp`, a
+    scalar applied to all leaves). Returns `(policies [count, N, 4],
+    root_values [count, N])`.
+    """
+    tau_list = [float(t) for t in tau_per_agent]
+    _t = time.perf_counter()
+    obs = batch.prepare_search(depth, draw_value)  # [M, C, H, W] float32
+    _PERF["search_s"] += time.perf_counter() - _t
+    if obs.shape[0] == 0:
+        values = np.zeros((0,), dtype=np.float32)
+        return batch.backup_search_hetero(values, tau_list, iters)
+
+    net.eval()
+    use_temp = getattr(net.cfg, "temperature_input", False) and temp is not None
+    temp_all = (
+        np.full(obs.shape[0], float(temp), dtype=np.float32) if use_temp else None
+    )
+    if eval_batch_size <= 0:
+        eval_batch_size = obs.shape[0]
+    values = np.empty((obs.shape[0],), dtype=np.float32)
+    _t = time.perf_counter()
+    for start in range(0, obs.shape[0], eval_batch_size):
+        end = min(start + eval_batch_size, obs.shape[0])
+        obs_t = torch.from_numpy(obs[start:end]).to(device, non_blocking=True)
+        temp_t = (
+            torch.from_numpy(temp_all[start:end]).to(device, non_blocking=True)
+            if use_temp else None
+        )
+        with net_autocast(device):
+            _, value = net(obs_t, temp_t)
+        values[start:end] = value.detach().to("cpu", dtype=torch.float32).numpy()
+        del obs_t, value
+    _PERF["fwd_s"] += time.perf_counter() - _t
+    _PERF["infer"] += int(obs.shape[0])
+    _t = time.perf_counter()
+    out = batch.backup_search_hetero(values, tau_list, iters)
+    _PERF["search_s"] += time.perf_counter() - _t
+    return out
+
+
+@torch.no_grad()
+def mcts_search(
+    batch,
+    net: AZNet,
+    device: torch.device,
+    sims: int = 128,
+    c_puct: float = 1.5,
+    eval_batch_size: int = 8192,
+    temp=None,
+):
+    """AlphaZero MCTS over every game in `batch` (decoupled-PUCT, simultaneous
+    moves). Uses BOTH heads: policy = priors, value = leaf eval. Returns
+    `(policies, root_values)` — visit-count policy targets `[count, num_snakes,
+    4]` and mean root values `[count, num_snakes]`.
+
+    `temp` optionally conditions a temperature-aware net at the leaves (scalar or
+    per-agent length `num_snakes`).
+    """
+    net.eval()
+    n = int(batch.num_snakes)
+    use_temp = getattr(net.cfg, "temperature_input", False) and temp is not None
+    temp_arr = None
+    if use_temp:
+        t = np.asarray(temp, dtype=np.float32).reshape(-1)
+        temp_arr = t  # tiled per leaf below
+
+    batch.mcts_new(c_puct)
+    for _ in range(sims):
+        pending, obs = batch.mcts_select()  # obs: [k, n, C, H, W]
+        k = int(pending.shape[0])
+        if k == 0:
+            continue
+        m = k * n
+        flat = obs.reshape(m, *obs.shape[2:])
+        leaf_temp = None
+        if use_temp:
+            leaf_temp = (
+                np.full(m, float(temp_arr[0]), dtype=np.float32)
+                if temp_arr.size == 1
+                else np.tile(temp_arr, k)
+            )
+        pol_out = np.empty((m, 4), dtype=np.float32)
+        val_out = np.empty((m,), dtype=np.float32)
+        ebs = eval_batch_size if eval_batch_size > 0 else m
+        for s in range(0, m, ebs):
+            e = min(s + ebs, m)
+            obs_t = torch.from_numpy(flat[s:e]).to(device, non_blocking=True)
+            temp_t = (
+                torch.from_numpy(leaf_temp[s:e]).to(device, non_blocking=True)
+                if use_temp else None
+            )
+            with net_autocast(device):
+                logits, value = net(obs_t, temp_t)
+                probs = torch.softmax(logits.float(), dim=1)
+            pol_out[s:e] = probs.cpu().numpy()
+            val_out[s:e] = value.detach().float().cpu().numpy()
+        batch.mcts_expand_backup(pending, pol_out.reshape(-1), val_out.reshape(-1))
+    return batch.mcts_root_targets()
 
 
 def sample_actions(policy: np.ndarray, rng: np.random.Generator) -> np.ndarray:

@@ -11,7 +11,7 @@
 
 use crate::le;
 use rayon::prelude::*;
-use snek_core::{encode_into, Board, Move, MAX_SNAKES, NUM_CHANNELS};
+use snek_core::{encode_into, obs_side, Board, Move, MAX_SNAKES, NUM_CHANNELS};
 
 /// Placeholder move for eliminated snakes (ignored by `step`).
 const DUMMY_MOVE: Move = Move::Up;
@@ -53,7 +53,7 @@ pub struct Forest {
 /// Candidate moves for one snake: drop strictly-dominated suicides (reversing
 /// onto the neck, stepping off the board). A trapped snake keeps all moves (it
 /// dies regardless). Eliminated snakes get a single dummy move.
-fn candidates(board: &Board, i: usize) -> Vec<Move> {
+pub(crate) fn candidates(board: &Board, i: usize) -> Vec<Move> {
     let s = &board.snakes[i];
     if !s.alive() {
         return vec![DUMMY_MOVE];
@@ -78,16 +78,20 @@ fn candidates(board: &Board, i: usize) -> Vec<Move> {
     v
 }
 
-/// Exact per-agent value at a terminal board: winner +1, losers -1, draw 0.
-fn terminal_values(board: &Board) -> [f32; MAX_SNAKES] {
+/// Exact per-agent value at a terminal board: winner +1, losers -1, draw configurable.
+pub(crate) fn terminal_values_with_draw(board: &Board, draw_value: f32) -> [f32; MAX_SNAKES] {
     let mut v = [0.0f32; MAX_SNAKES];
     match board.winner() {
         Some(w) => {
-            for i in 0..board.snakes.len() {
-                v[i] = if i == w { 1.0 } else { -1.0 };
+            for (i, value) in v.iter_mut().enumerate().take(board.snakes.len()) {
+                *value = if i == w { 1.0 } else { -1.0 };
             }
         }
-        None => { /* draw: all zero */ }
+        None => {
+            for x in v.iter_mut().take(board.snakes.len()) {
+                *x = draw_value;
+            }
+        }
     }
     v
 }
@@ -100,12 +104,13 @@ fn expand_node(
     depth: u32,
     nodes: &mut Vec<Node>,
     eval_boards: &mut Vec<Board>,
+    draw_value: f32,
 ) -> usize {
     if board.is_terminal() {
         let id = nodes.len();
         nodes.push(Node {
             kind: NodeKind::Terminal,
-            value: terminal_values(&board),
+            value: terminal_values_with_draw(&board, draw_value),
         });
         return id;
     }
@@ -142,7 +147,7 @@ fn expand_node(
         }
         let mut child_board = board.clone();
         child_board.step(&mv);
-        let child_id = expand_node(child_board, depth - 1, nodes, eval_boards);
+        let child_id = expand_node(child_board, depth - 1, nodes, eval_boards, draw_value);
         children.push(child_id);
     }
 
@@ -170,7 +175,7 @@ fn backup_node(
     tree: &mut Tree,
     node_id: usize,
     values: &[f32],
-    tau: f32,
+    tau: &[f32],
     iters: usize,
 ) -> Option<Vec<Vec<f32>>> {
     // Resolve this node's value, recursing into children first.
@@ -223,11 +228,12 @@ fn backup_node(
 
 impl Forest {
     /// Build the search forest for `boards`, expanding each to `depth` plies.
-    pub fn build(boards: &[Board], depth: u32) -> Forest {
+    pub fn build(boards: &[Board], depth: u32, draw_value: f32) -> Forest {
         let n_snakes = boards.first().map(|b| b.snakes.len()).unwrap_or(0);
+        // Observation canvas dims are absolute board coords (obs_side = side).
         let (height, width) = boards
             .first()
-            .map(|b| (b.height as usize, b.width as usize))
+            .map(|b| (obs_side(b.height as usize), obs_side(b.width as usize)))
             .unwrap_or((0, 0));
 
         let mut forest = Forest {
@@ -242,7 +248,13 @@ impl Forest {
         for board in boards {
             let mut nodes = Vec::new();
             let mut eval_boards = Vec::new();
-            let root = expand_node(board.clone(), depth, &mut nodes, &mut eval_boards);
+            let root = expand_node(
+                board.clone(),
+                depth,
+                &mut nodes,
+                &mut eval_boards,
+                draw_value,
+            );
             let mut tree = Tree { nodes, root };
             let offset = forest.eval_boards.len();
             offset_eval_ids(&mut tree, offset);
@@ -279,19 +291,28 @@ impl Forest {
     }
 
     /// Back up `values` (length `eval_count()`, indexed `[eval_id, agent]`) and
-    /// return root equilibrium policies as a flat `[num_roots * n_snakes * 4]`
-    /// array (probability per move; non-candidate moves are 0).
-    pub fn backup(&mut self, values: &[f32], tau: f32, iters: usize) -> Vec<f32> {
+    /// return `(policies, root_values)`:
+    /// * `policies` — root equilibrium policies, flat `[num_roots * n_snakes * 4]`
+    ///   (probability per move; non-candidate moves are 0).
+    /// * `root_values` — per-agent equilibrium expected value at each root, flat
+    ///   `[num_roots * n_snakes]`. This is the bootstrapped value the search
+    ///   assigns to the current state, used as a TD target during training.
+    pub fn backup(&mut self, values: &[f32], tau: &[f32], iters: usize) -> (Vec<f32>, Vec<f32>) {
         debug_assert_eq!(values.len(), self.eval_count());
         let n = self.n_snakes;
         let mut out = vec![0.0f32; self.trees.len() * n * 4];
+        let mut root_vals = vec![0.0f32; self.trees.len() * n];
 
         self.trees
             .par_iter_mut()
             .zip(out.par_chunks_mut(n * 4))
-            .for_each(|(tree, out_chunk)| {
+            .zip(root_vals.par_chunks_mut(n))
+            .for_each(|((tree, out_chunk), val_chunk)| {
                 let root = tree.root;
                 let policies = backup_node(&self.eval_boards, n, tree, root, values, tau, iters);
+                // Root per-agent equilibrium value (set on the root node by backup_node).
+                let rv = tree.nodes[root].value;
+                val_chunk.copy_from_slice(&rv[..n]);
 
                 // A single-snake (or already-terminal-root) game yields no policy;
                 // leave it uniform-free (all zeros) and let the caller handle it.
@@ -302,6 +323,6 @@ impl Forest {
                     }
                 }
             });
-        out
+        (out, root_vals)
     }
 }

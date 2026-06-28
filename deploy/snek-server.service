@@ -1,0 +1,38 @@
+# snek3 trainer-server as a systemd service (for a VM / bare-metal GPU box you
+# own — NOT needed on managed GPU pods, which are already containers).
+#
+# Install:
+#   sudo cp deploy/snek-server.service /etc/systemd/system/
+#   # edit User=, WorkingDirectory=, and any training flags below
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now snek-server
+#   journalctl -u snek-server -f          # logs (incl. the dashboard URL)
+#
+# Starts a training server and dashboard. To give the run a stable name, append
+# e.g. --run-id myrun to ExecStart.
+
+[Unit]
+Description=snek3 training server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=brensch
+WorkingDirectory=/home/brensch/snek3
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Direct python (no make) so a restart never rebuilds. Mirrors `make server`
+# defaults so dashboard-created runs share the meta.
+ExecStart=/home/brensch/snek3/.venv/bin/python -m azsnek.train \
+    --serve --serve-host 0.0.0.0 --serve-port 8050 \
+    --generations 100000 --board 11 --num-snakes 4 \
+    --count 1024 --samples 30000 --sims 32 --c-puct 1.5 \
+    --trunk-channels 96 --trunk-blocks 8 --lr 1e-3 \
+    --train-steps 256 --batch-size 2048 --buffer-size 500000 \
+    --exploration-prob 0.15 --draw-value -0.25 --max-turns 200 \
+    --eval-batch-size 8192 --sample-games 16 --sample-every 1 --keep-games 40
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

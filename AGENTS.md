@@ -14,8 +14,6 @@
 - `make test-py`: build and run Python tests.
 - `make test`: run Rust and Python tests.
 - `make train`: foreground fixed-parameter training.
-- `make overnight`: background fixed-parameter training via `scripts/overnight_train.sh`.
-- `make adaptive`: foreground adaptive training; Ctrl-C stops it.
 - `make dashboard`: serve the training dashboard on `PORT` default `8050`.
 
 ## Training State
@@ -26,31 +24,6 @@
 - `metrics.jsonl` is one JSON object per generation and feeds the dashboard.
 - `meta.json` records run config and may be updated by adaptive tuning.
 - The replay buffer is currently in memory only. Restarting `azsnek.train` resumes the net/optimizer but does not restore the replay buffer.
-
-## Adaptive Training
-
-Adaptive tuning is implemented in-process inside `python/azsnek/train.py` via `--adaptive`. This is important: the earlier chunked controller restarted training and lost the in-memory replay buffer at every chunk.
-
-`python/azsnek/autotune.py` now mainly provides:
-
-- testable tuning rules (`TuneSettings`, `TuneLimits`, `tune_next`)
-- a launcher that starts one long `azsnek.train --adaptive` process
-
-The adaptive policy is conservative:
-
-- starts from lower training pressure (`ADAPTIVE_TRAIN_STEPS ?= 256`)
-- caps `train_steps` by replay-buffer epochs
-- cuts optimization pressure when policy/value loss regress
-- increases fresh samples and eval games around plateaus
-- adjusts `tau` only when targets are clearly too soft or too sharp
-
-Useful adaptive command:
-
-```bash
-make adaptive RUN_ID=adaptive-tau30 TOTAL_GENERATIONS=100000
-```
-
-Tuning cadence is controlled with `ADAPTIVE_EVERY` default `4`.
 
 ## Current Training Interpretation
 

@@ -23,6 +23,7 @@ runs/
 logs/
 *.pt
 *.pth.tar
+*.onnx
 
 # Editor / OS
 .DS_Store

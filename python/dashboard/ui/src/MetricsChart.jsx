@@ -1,150 +1,214 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-// Full-width responsive line chart: win-rate (0..1) + normalized policy/value
-// losses, x = generation. Resizes to its container.
-export default function MetricsChart({ metrics }) {
+// Three grouped charts. Each chart is a list of series; a series is plotted on
+// the chart's y-treatment (`kind`):
+//   unit   -> value on a fixed 0..1 axis (win rates, draw rate)
+//   shared -> value / (max of this chart's series)  (losses share a scale)
+//   series -> value / (this series' own max), so each series peaks at the top
+//             (mixed scales; tooltip shows the real value)
+// Only series present in the run are drawn, so legacy MCTS runs still render.
+const CHARTS = [
+  {
+    title: "Strength — relative win rate (0–1)",
+    kind: "unit",
+    series: [
+      // AlphaZero progress signal: current net vs frozen past-selves.
+      { key: "self_vs_anchor", label: "vs anchor (phase start)", color: "#34d399" },
+      { key: "self_vs_recent", label: "vs recent self", color: "#22d3ee" },
+      { key: "win_rate", label: "vs baseline (if eval on)", color: "#a3e635", dash: true },
+    ],
+  },
+  {
+    title: "Losses (shared scale)",
+    kind: "shared",
+    series: [
+      { key: "value_loss", label: "value loss", color: "#60a5fa" },
+      { key: "policy_loss", label: "policy loss", color: "#f59e0b" },
+    ],
+  },
+  {
+    title: "Policy targets",
+    kind: "series",
+    series: [
+      { key: "target_entropy", label: "target entropy (visit-count π)", color: "#ec4899" },
+      { key: "target_max_prob", label: "target max prob", color: "#c084fc" },
+    ],
+  },
+  {
+    title: "Throughput / utilization",
+    kind: "series",
+    series: [
+      { key: "completed_games", label: "games finished", color: "#f472b6" },
+      { key: "turns_per_sec", label: "turns/sec", color: "#f59e0b" },
+      { key: "inference_per_sec", label: "inferences/sec", color: "#60a5fa" },
+      { key: "gpu_busy_pct", label: "GPU busy %", color: "#34d399" },
+      { key: "gen_seconds", label: "gen seconds", color: "#94a3b8" },
+    ],
+  },
+];
+
+const present = (metrics, key) => metrics.some((m) => m[key] != null);
+const fmt = (v) => (v == null || Number.isNaN(+v) ? null : Math.abs(+v) >= 10 ? (+v).toFixed(0) : (+v).toFixed(3));
+
+function Chart({ metrics, title, kind, series }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
-  const [width, setWidth] = useState(900);
+  const [width, setWidth] = useState(380);
   const [hover, setHover] = useState(null);
+
+  const used = useMemo(() => series.filter((s) => present(metrics, s.key)), [metrics, series]);
 
   useLayoutEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver((entries) => setWidth(Math.max(320, Math.floor(entries[0].contentRect.width))));
+    const ro = new ResizeObserver((e) => setWidth(Math.max(220, Math.floor(e[0].contentRect.width))));
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  const view = useMemo(() => {
+    if (!metrics.length) return { gmin: 0, gmax: 1, sharedMax: 1, seriesMax: {} };
+    const gens = metrics.map((m) => m.gen);
+    const gmin = Math.min(...gens);
+    const gmax = Math.max(...gens, gmin + 1);
+    let sharedMax = 0.001;
+    const seriesMax = {};
+    if (kind === "shared") {
+      for (const m of metrics) for (const s of used) if (m[s.key] != null) sharedMax = Math.max(sharedMax, m[s.key]);
+    }
+    if (kind === "series") {
+      for (const s of used) {
+        let mx = 0.001;
+        for (const m of metrics) if (m[s.key] != null) mx = Math.max(mx, m[s.key]);
+        seriesMax[s.key] = mx;
+      }
+    }
+    return { gmin, gmax, sharedMax, seriesMax };
+  }, [metrics, used, kind]);
+
+  // value -> 0..1 fraction of the chart height for a given series.
+  const frac = (s, v) => {
+    if (v == null) return null;
+    if (kind === "unit") return Math.min(1, Math.max(0, v));
+    if (kind === "shared") return Math.min(1, Math.max(0, v / view.sharedMax));
+    return Math.min(1, Math.max(0, v / (view.seriesMax[s.key] || 1))); // series: own max
+  };
+  const topLabel = kind === "shared" ? view.sharedMax.toFixed(2) : kind === "unit" ? "1.00" : "max";
+
+  const H = 190;
+  const padL = 38, padR = 10, padT = 12, padB = 20;
 
   useEffect(() => {
     const c = canvasRef.current;
     if (!c) return;
     const ctx = c.getContext("2d");
-    const W = c.width, H = c.height, padL = 42, padR = 14, padT = 14, padB = 24;
-    ctx.clearRect(0, 0, W, H);
-    if (!metrics.length) {
-      ctx.fillStyle = "#8b949e";
-      ctx.font = "12px ui-sans-serif";
-      ctx.fillText("no metrics yet", padL, H / 2);
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (!metrics.length || !used.length) {
+      ctx.fillStyle = "#8b949e"; ctx.font = "12px ui-sans-serif";
+      ctx.fillText("no data", padL, H / 2);
       return;
     }
-    const gens = metrics.map((m) => m.gen);
-    const gmin = Math.min(...gens), gmax = Math.max(...gens, gmin + 1);
-    const x = (g) => padL + (W - padL - padR) * (g - gmin) / ((gmax - gmin) || 1);
-    ctx.strokeStyle = "#21262d";
-    ctx.fillStyle = "#8b949e";
-    ctx.lineWidth = 1;
-    ctx.font = "11px ui-sans-serif";
+    const { gmin, gmax } = view;
+    const plotW = Math.max(1, width - padL - padR);
+    const x = (g) => padL + ((g - gmin) / (gmax - gmin)) * plotW;
+    const y = (f) => padT + (H - padT - padB) * (1 - f);
+
+    ctx.strokeStyle = "#21262d"; ctx.fillStyle = "#8b949e"; ctx.lineWidth = 1; ctx.font = "10px ui-sans-serif";
     for (let i = 0; i <= 4; i++) {
       const yy = padT + (H - padT - padB) * i / 4;
-      ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
-      ctx.fillText((1 - i / 4).toFixed(2), 6, yy + 3);
+      ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(width - padR, yy); ctx.stroke();
     }
-    const losses = metrics.flatMap((m) => [m.policy_loss, m.value_loss, m.target_entropy]).filter((v) => v != null);
-    const lmax = Math.max(0.001, ...losses);
-    const yU = (v) => padT + (H - padT - padB) * (1 - v);
-    const yL = (v) => padT + (H - padT - padB) * (1 - v / lmax);
-    const line = (pts, color, dash) => {
-      if (!pts.length) return;
-      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash(dash ? [4, 4] : []);
-      ctx.beginPath();
-      pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
-      ctx.stroke(); ctx.setLineDash([]);
-      ctx.fillStyle = color;
-      pts.forEach((p) => { ctx.beginPath(); ctx.arc(p[0], p[1], 2.4, 0, 7); ctx.fill(); });
-    };
-    line(metrics.filter((m) => m.policy_loss != null).map((m) => [x(m.gen), yL(m.policy_loss)]), "#f59e0b", true);
-    line(metrics.filter((m) => m.value_loss != null).map((m) => [x(m.gen), yL(m.value_loss)]), "#60a5fa", true);
-    line(metrics.filter((m) => m.target_entropy != null).map((m) => [x(m.gen), yL(m.target_entropy)]), "#ec4899", false);
-    line(metrics.filter((m) => m.win_rate != null).map((m) => [x(m.gen), yU(m.win_rate)]), "#34d399", false);
+    ctx.fillText(topLabel, 4, padT + 4);
+    ctx.fillText("0", 4, H - padB + 2);
+
+    for (const s of used) {
+      const pts = metrics.filter((m) => m[s.key] != null).map((m) => [x(m.gen), y(frac(s, m[s.key]))]);
+      if (!pts.length) continue;
+      ctx.strokeStyle = s.color; ctx.lineWidth = 2; ctx.setLineDash(s.dash ? [4, 4] : []);
+      ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle = s.color;
+      pts.forEach((p) => { ctx.beginPath(); ctx.arc(p[0], p[1], 2, 0, 7); ctx.fill(); });
+    }
+
     if (hover?.metric) {
-      const m = hover.metric;
-      const hx = x(m.gen);
-      ctx.strokeStyle = "rgba(230, 237, 243, 0.42)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(hx, padT); ctx.lineTo(hx, H - padB); ctx.stroke();
-      ctx.setLineDash([]);
-
-      const highlight = (value, yFn, color) => {
-        if (value == null) return;
-        ctx.fillStyle = "#0b0e13";
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(hx, yFn(value), 5, 0, 7); ctx.fill(); ctx.stroke();
-      };
-      highlight(m.policy_loss, yL, "#f59e0b");
-      highlight(m.value_loss, yL, "#60a5fa");
-      highlight(m.target_entropy, yL, "#ec4899");
-      highlight(m.win_rate, yU, "#34d399");
+      const m = hover.metric, hx = x(m.gen);
+      ctx.strokeStyle = "rgba(230,237,243,0.4)"; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(hx, padT); ctx.lineTo(hx, H - padB); ctx.stroke(); ctx.setLineDash([]);
+      for (const s of used) {
+        if (m[s.key] == null) continue;
+        ctx.fillStyle = "#0b0e13"; ctx.strokeStyle = s.color; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(hx, y(frac(s, m[s.key])), s.key === hover.nearKey ? 5 : 3.5, 0, 7); ctx.fill(); ctx.stroke();
+      }
+      if (hover.nearKey) {
+        const s = used.find((u) => u.key === hover.nearKey);
+        if (s && m[s.key] != null) { ctx.strokeStyle = "#e6edf3"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(hx, y(frac(s, m[s.key])), 7.5, 0, 7); ctx.stroke(); }
+      }
     }
-    ctx.fillStyle = "#8b949e";
-    ctx.fillText("gen " + gmin, padL, H - 7);
-    ctx.fillText("gen " + gmax, W - padR - 44, H - 7);
-  }, [metrics, width, hover]);
+  }, [metrics, used, width, hover, view]);
 
-  const updateHover = (event) => {
-    const c = canvasRef.current;
-    if (!c || !metrics.length) return;
-    const rect = c.getBoundingClientRect();
-    const px = (event.clientX - rect.left) * (c.width / rect.width);
-    const py = (event.clientY - rect.top) * (c.height / rect.height);
-    const W = c.width, padL = 42, padR = 14;
-    const gens = metrics.map((m) => m.gen);
-    const gmin = Math.min(...gens), gmax = Math.max(...gens, gmin + 1);
-    const x = (g) => padL + (W - padL - padR) * (g - gmin) / ((gmax - gmin) || 1);
-    const nearest = metrics.reduce((best, metric) => {
-      const dist = Math.abs(x(metric.gen) - px);
-      return dist < best.dist ? { metric, dist } : best;
-    }, { metric: metrics[0], dist: Infinity }).metric;
-    setHover({ metric: nearest, x: x(nearest.gen), y: py });
+  const onMove = (e) => {
+    if (!metrics.length || !used.length) return;
+    const c = canvasRef.current, r = c.getBoundingClientRect();
+    const px = (e.clientX - r.left) * (c.width / r.width);
+    const py = (e.clientY - r.top) * (c.height / r.height);
+    const { gmin, gmax } = view;
+    const plotW = Math.max(1, width - padL - padR);
+    const x = (g) => padL + ((g - gmin) / (gmax - gmin)) * plotW;
+    const y = (f) => padT + (H - padT - padB) * (1 - f);
+    const metric = metrics.reduce((b, m) => (Math.abs(x(m.gen) - px) < b.d ? { m, d: Math.abs(x(m.gen) - px) } : b), { m: metrics[0], d: Infinity }).m;
+    // closest series by vertical distance at this gen
+    let nearKey = null, best = Infinity;
+    for (const s of used) {
+      if (metric[s.key] == null) continue;
+      const d = Math.abs(y(frac(s, metric[s.key])) - py);
+      if (d < best) { best = d; nearKey = s.key; }
+    }
+    setHover({ metric, x: x(metric.gen), y: py, nearKey });
   };
 
-  const fmt = (value, digits = 3) => {
-    if (value == null || Number.isNaN(Number(value))) return null;
-    return Number(value).toFixed(digits);
-  };
-
-  const tooltipRows = hover?.metric ? [
-    ["win rate", fmt(hover.metric.win_rate)],
-    ["policy loss", fmt(hover.metric.policy_loss)],
-    ["value loss", fmt(hover.metric.value_loss)],
-    ["target entropy", fmt(hover.metric.target_entropy)],
-    ["target max prob", fmt(hover.metric.target_max_prob)],
-    ["samples", hover.metric.samples != null ? Number(hover.metric.samples).toLocaleString() : null],
-    ["buffer", hover.metric.buffer_size != null ? Number(hover.metric.buffer_size).toLocaleString() : null],
-  ].filter(([, value]) => value != null) : [];
-
-  const tooltipLeft = hover ? Math.min(Math.max(hover.x + 12, 8), Math.max(8, width - 190)) : 0;
-  const tooltipTop = hover ? (hover.y > 145 ? Math.max(8, hover.y - 124) : Math.min(210, hover.y + 12)) : 0;
+  // tooltip rows: every present series at this gen, ALPHABETICAL by label.
+  const rows = hover?.metric
+    ? used
+        .filter((s) => hover.metric[s.key] != null)
+        .map((s) => ({ key: s.key, label: s.label, color: s.color, val: fmt(hover.metric[s.key]) }))
+        .sort((a, b) => a.label.localeCompare(b.label))
+    : [];
+  const ttLeft = hover ? Math.min(Math.max(hover.x + 10, 6), Math.max(6, width - 190)) : 0;
 
   return (
-    <div ref={wrapRef} className="chart-wrap">
-      <canvas
-        ref={canvasRef}
-        width={width}
-        height={260}
-        style={{ width: "100%" }}
-        onPointerMove={updateHover}
-        onPointerLeave={() => setHover(null)}
-      />
-      {hover?.metric && (
-        <div className="chart-tooltip" style={{ left: tooltipLeft, top: tooltipTop }}>
-          <b>gen {hover.metric.gen}</b>
-          {tooltipRows.map(([label, value]) => (
-            <span key={label}>
-              <em>{label}</em>
-              <strong>{value}</strong>
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="legend">
-        <span><i className="swatch" style={{ background: "#34d399" }} />win-rate vs baseline (0–1)</span>
-        <span><i className="swatch" style={{ background: "#f59e0b" }} />policy loss</span>
-        <span><i className="swatch" style={{ background: "#60a5fa" }} />value loss</span>
-        <span><i className="swatch" style={{ background: "#ec4899" }} />target entropy</span>
+    <div className="chart-card" ref={wrapRef}>
+      <div className="chart-title">{title}</div>
+      <div className="chart-wrap">
+        <canvas ref={canvasRef} width={width} height={H} style={{ width: "100%" }}
+          onPointerMove={onMove} onPointerLeave={() => setHover(null)} />
+        {hover?.metric && rows.length > 0 && (
+          <div className="chart-tooltip" style={{ left: ttLeft, top: 6 }}>
+            <b>gen {hover.metric.gen}</b>
+            {rows.map((r) => (
+              <span key={r.key} className={"tt-row" + (r.key === hover.nearKey ? " near" : "")}>
+                <i className="swatch" style={{ background: r.color }} />
+                <em>{r.label}</em>
+                <strong>{r.val}</strong>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
+      <div className="legend">
+        {used.map((s) => (
+          <span key={s.key}><i className="swatch" style={{ background: s.color }} />{s.label}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export default function MetricsChart({ metrics }) {
+  return (
+    <div className="charts-grid">
+      {CHARTS.map((c) => (
+        <Chart key={c.title} metrics={metrics} title={c.title} kind={c.kind} series={c.series} />
+      ))}
     </div>
   );
 }
