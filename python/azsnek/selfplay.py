@@ -16,7 +16,7 @@ import snek
 import torch
 
 from .net import AZNet
-from .search import mcts_search, run_search, run_search_hetero, sample_actions
+from .search import mcts_search, perf_reset, perf_snapshot, run_search, run_search_hetero, sample_actions
 
 
 @dataclass
@@ -50,6 +50,9 @@ class Samples:
     turns: int = 0  # total board-turns stepped (for throughput)
     games: int = 0  # total games finished
     draws: int = 0  # of `games`, how many ended without a winner (draw/timeout)
+    fwd_seconds: float = 0.0  # time in net forward (GPU)
+    search_seconds: float = 0.0  # time in Rust tree-build + equilibrium backup (CPU)
+    inferences: int = 0  # leaf positions evaluated by the net
 
 
 class ReplayBuffer:
@@ -220,6 +223,7 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
     across the interval, training the temperature-conditioned proxy.
     """
     rng = np.random.default_rng(seed)
+    perf_reset()  # isolate this proxy self-play's GPU/CPU timing
     batch = snek.GameBatch(cfg.board, cfg.board, cfg.num_snakes, count=cfg.count, seed=seed)
     tau = float(rng.uniform(cfg.tau_min, cfg.tau_max))  # per-generation temperature
 
@@ -265,6 +269,7 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
             draws_total += int(np.sum(done & (w == -1)))
         batch.reset_done()
 
+    perf = perf_snapshot()
     return Samples(
         obs=np.concatenate(out_obs, axis=0),
         pol=np.concatenate(out_pol, axis=0),
@@ -273,6 +278,9 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
         turns=turns_total,
         games=games_total,
         draws=draws_total,
+        fwd_seconds=perf["fwd_s"],
+        search_seconds=perf["search_s"],
+        inferences=perf["infer"],
     )
 
 

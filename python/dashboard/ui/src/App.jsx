@@ -3,15 +3,6 @@ import { api } from "./api.js";
 import MetricsChart from "./MetricsChart.jsx";
 import GenerationView from "./GenerationView.jsx";
 
-function Stat({ value, label }) {
-  return (
-    <div className="stat">
-      <b>{value}</b>
-      <span>{label}</span>
-    </div>
-  );
-}
-
 const runFromUrl = () => {
   const m = window.location.pathname.match(/^\/run\/(.+)$/);
   return m ? decodeURIComponent(m[1].replace(/\/$/, "")) : null;
@@ -58,9 +49,6 @@ export default function App() {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
-  const m = status.last || {};
-  const best = status.best_win_rate;
-  const num = (v, d = 0) => (v == null ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: d }));
   const running = status.running;
 
   return (
@@ -85,23 +73,6 @@ export default function App() {
         <section className="card">
           <h2>Training metrics</h2>
           <MetricsChart metrics={metrics} />
-          <div className="stats-row">
-            <Stat value={m.gen ?? "—"} label="generation" />
-            <Stat value={m.win_rate != null ? m.win_rate.toFixed(3) : "—"} label={`win-rate (best ${best != null ? best.toFixed(2) : "—"})`} />
-            <Stat value={num(m.turns_per_sec)} label="turns / sec" />
-            <Stat value={num(m.inference_per_sec)} label="inference / sec" />
-            <Stat value={m.gpu_busy_pct != null ? `${m.gpu_busy_pct.toFixed(1)}%` : "—"} label="GPU busy" />
-            <Stat value={m.games_per_sec != null ? m.games_per_sec.toFixed(1) : "—"} label="games / sec" />
-            <Stat value={m.policy_loss != null ? m.policy_loss.toFixed(3) : "—"} label="policy loss" />
-            <Stat value={m.target_entropy != null ? m.target_entropy.toFixed(3) : "—"} label="target entropy" />
-            <Stat value={m.target_max_prob != null ? m.target_max_prob.toFixed(3) : "—"} label="target max prob" />
-            <Stat value={m.value_loss != null ? m.value_loss.toFixed(3) : "—"} label="value loss" />
-            <Stat value={num(m.samples)} label="samples/gen" />
-            <Stat value={num(m.buffer)} label="replay buffer" />
-            <Stat value={num(m.skipped_short_draw_games)} label="short draws skipped" />
-            <Stat value={m.eval_seconds != null ? `${m.eval_seconds.toFixed(1)}s` : "—"} label="eval" />
-            <Stat value={m.record_seconds != null ? `${m.record_seconds.toFixed(1)}s` : "—"} label="record" />
-          </div>
         </section>
 
         {run ? (

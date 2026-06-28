@@ -334,6 +334,11 @@ def main():
         # len_frac is only meaningful with a turn cap; with no cap, report raw turns.
         if args.max_turns > 0:
             metric["proxy_len_frac"] = round(min(1.0, proxy_mean_turns / args.max_turns), 3)
+        # Throughput / utilization (from proxy self-play timing).
+        fwd, srch = ps.fwd_seconds, ps.search_seconds
+        metric["inference_per_sec"] = round(ps.inferences / fwd) if fwd > 0 else 0
+        metric["selfplay_gpu_pct"] = round(100 * fwd / (fwd + srch), 1) if (fwd + srch) > 0 else 0
+        metric["samples_per_sec"] = round(int(ps.obs.shape[0]) / gen_seconds, 1) if gen_seconds > 0 else 0
         if rstats:
             metric["response_policy_loss"] = round(rstats["policy_loss"], 4)
             metric["response_value_loss"] = round(rstats["value_loss"], 4)

@@ -39,6 +39,18 @@ const CHARTS = [
       { key: "proxy_mean_turns", label: "mean turns (÷200)", color: "#c084fc", div: 200 },
     ],
   },
+  {
+    title: "Throughput / utilization",
+    kind: "div",
+    series: [
+      { key: "selfplay_gpu_pct", label: "self-play GPU % (÷100)", color: "#34d399", div: 100 },
+      { key: "gpu_busy_pct", label: "GPU busy % (÷100)", color: "#34d399", div: 100 }, // legacy
+      { key: "inference_per_sec", label: "inferences/sec (÷30k)", color: "#60a5fa", div: 30000 },
+      { key: "samples_per_sec", label: "samples/sec (÷500)", color: "#f59e0b", div: 500 },
+      { key: "gpu_peak_gb", label: "GPU peak GB (÷16)", color: "#a78bfa", div: 16 },
+      { key: "gen_seconds", label: "gen seconds (÷300)", color: "#94a3b8", div: 300 },
+    ],
+  },
 ];
 
 const present = (metrics, key) => metrics.some((m) => m[key] != null);

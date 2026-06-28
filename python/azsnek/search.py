@@ -12,10 +12,25 @@ forward pass per search, no per-node evaluation.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import torch
 
 from .net import AZNet, autocast as net_autocast
+
+# Lightweight per-call timing so the dashboard can show throughput / GPU-vs-CPU
+# split. fwd_s = time in the net forward (GPU), search_s = time in the Rust
+# tree-build + equilibrium backup (CPU), infer = leaf evaluations.
+_PERF = {"fwd_s": 0.0, "search_s": 0.0, "infer": 0}
+
+
+def perf_reset():
+    _PERF.update(fwd_s=0.0, search_s=0.0, infer=0)
+
+
+def perf_snapshot() -> dict:
+    return dict(_PERF)
 
 
 @torch.no_grad()
@@ -43,7 +58,9 @@ def run_search(
     `draw_value` is the terminal value of a draw (negative discourages the
     degenerate mutual-suicide draw equilibrium).
     """
+    _t = time.perf_counter()
     obs = batch.prepare_search(depth, draw_value)  # [M, C, H, W] float32
+    _PERF["search_s"] += time.perf_counter() - _t
     if obs.shape[0] == 0:
         # Every root already terminal; backup still needs a (length-0) value array.
         values = np.zeros((0,), dtype=np.float32)
@@ -64,6 +81,7 @@ def run_search(
     if eval_batch_size <= 0:
         eval_batch_size = obs.shape[0]
     values = np.empty((obs.shape[0],), dtype=np.float32)
+    _t = time.perf_counter()
     for start in range(0, obs.shape[0], eval_batch_size):
         end = min(start + eval_batch_size, obs.shape[0])
         obs_t = torch.from_numpy(obs[start:end]).to(device, non_blocking=True)
@@ -75,9 +93,12 @@ def run_search(
             _, value = net(obs_t, temp_t)  # value: [M] in [-1, 1]
         values[start:end] = value.detach().to("cpu", dtype=torch.float32).numpy()
         del obs_t, value
-    if return_root_values:
-        return batch.backup_search_values(values, tau, iters)
-    return batch.backup_search(values, tau, iters)
+    _PERF["fwd_s"] += time.perf_counter() - _t
+    _PERF["infer"] += int(obs.shape[0])
+    _t = time.perf_counter()
+    out = batch.backup_search_values(values, tau, iters) if return_root_values else batch.backup_search(values, tau, iters)
+    _PERF["search_s"] += time.perf_counter() - _t
+    return out
 
 
 @torch.no_grad()
@@ -100,7 +121,9 @@ def run_search_hetero(
     root_values [count, N])`.
     """
     tau_list = [float(t) for t in tau_per_agent]
+    _t = time.perf_counter()
     obs = batch.prepare_search(depth, draw_value)  # [M, C, H, W] float32
+    _PERF["search_s"] += time.perf_counter() - _t
     if obs.shape[0] == 0:
         values = np.zeros((0,), dtype=np.float32)
         return batch.backup_search_hetero(values, tau_list, iters)
@@ -113,6 +136,7 @@ def run_search_hetero(
     if eval_batch_size <= 0:
         eval_batch_size = obs.shape[0]
     values = np.empty((obs.shape[0],), dtype=np.float32)
+    _t = time.perf_counter()
     for start in range(0, obs.shape[0], eval_batch_size):
         end = min(start + eval_batch_size, obs.shape[0])
         obs_t = torch.from_numpy(obs[start:end]).to(device, non_blocking=True)
@@ -124,7 +148,12 @@ def run_search_hetero(
             _, value = net(obs_t, temp_t)
         values[start:end] = value.detach().to("cpu", dtype=torch.float32).numpy()
         del obs_t, value
-    return batch.backup_search_hetero(values, tau_list, iters)
+    _PERF["fwd_s"] += time.perf_counter() - _t
+    _PERF["infer"] += int(obs.shape[0])
+    _t = time.perf_counter()
+    out = batch.backup_search_hetero(values, tau_list, iters)
+    _PERF["search_s"] += time.perf_counter() - _t
+    return out
 
 
 @torch.no_grad()
