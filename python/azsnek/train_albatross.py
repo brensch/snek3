@@ -328,7 +328,8 @@ def train_one_run(a, state, device, logger) -> None:
                         history.append(json.loads(ln))
                     except json.JSONDecodeError:
                         pass
-        state.begin_run(run.run_id, run.read_json("meta.json"), init_params, history)
+        state.begin_run(run.run_id, run.read_json("meta.json"), init_params, history,
+                        persist=lambda p: run.write_json("params.json", p))
 
     run.write_status({"generation": start_gen - 1, "running": True,
                       "total_generations": a.generations or None})

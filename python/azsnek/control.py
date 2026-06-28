@@ -72,6 +72,7 @@ class RunState:
         self._stop_run = False               # stop current run -> back to idle
         self._new_run: dict | None = None    # {"name":..., "overrides":{...}}
         self._shutdown = False               # exit the process entirely
+        self._persist = None                 # callback(params_dict) -> write to disk now
         # set by the server thread once its event loop is up
         self.loop: asyncio.AbstractEventLoop | None = None
         self.subscribers: set[asyncio.Queue] = set()  # touched only on loop thread
@@ -81,7 +82,8 @@ class RunState:
         with self._lock:
             self.base_spec = dict(spec)
 
-    def begin_run(self, run_id: str, meta: dict, params: dict, history: list[dict]) -> None:
+    def begin_run(self, run_id: str, meta: dict, params: dict, history: list[dict],
+                  persist=None) -> None:
         with self._lock:
             self.run_id = run_id
             self.meta = dict(meta)
@@ -91,6 +93,7 @@ class RunState:
                            "phase": "starting", "progress": None}
             self._paused = False
             self._stop_run = False
+            self._persist = persist  # write params.json on every UI param change
         self.publish({"type": "snapshot", **self.snapshot()})
 
     def go_idle(self) -> None:
@@ -103,6 +106,7 @@ class RunState:
                            "phase": "idle", "progress": None}
             self._paused = False
             self._stop_run = False
+            self._persist = None
         self.publish({"type": "snapshot", **self.snapshot()})
 
     # ---- control flags (read by the training loop) ----
@@ -164,7 +168,13 @@ class RunState:
                 else:
                     rejected[k] = "unknown"
             snap = dict(self.params)
+            persist = self._persist
         if applied:
+            if persist is not None:
+                try:
+                    persist(snap)  # flush to runs/<id>/params.json immediately
+                except Exception:
+                    pass  # disk hiccup shouldn't break the API; per-gen write is a backstop
             self.publish({"type": "params", "params": snap})
         return {"applied": applied, "rejected": rejected, "params": snap}
 
