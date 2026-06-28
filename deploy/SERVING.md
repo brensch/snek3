@@ -20,10 +20,11 @@ no Python in the request loop.
    the opponents' rationality regime. The equilibrium that comes back is our
    exploitative best response; we play its argmax.
 
-This mirrors `train_albatross.py` exactly — `estimate_opponent_tau` + the hetero-tau
-`response_pol` — reimplemented over `snek-infer`/ONNX. The **proxy** net is what serves
-(it does both the MLE and the leaf eval); the *response* net is a not-yet-used
-distillation, so faithful serving needs only the proxy + the search.
+This mirrors the earlier Albatross-style training design — opponent tau
+estimation plus hetero-tau response policy — reimplemented over
+`snek-infer`/ONNX. The **proxy** net is what serves (it does both the MLE and the
+leaf eval); the *response* net is a not-yet-used distillation, so faithful serving
+needs only the proxy + the search.
 
 > First move(s) of a game have no opponent history yet, so each opponent starts at the
 > grid's geometric-mean `tau` (~2.24) and the estimate sharpens as the game proceeds.

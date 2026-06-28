@@ -96,17 +96,16 @@ ALB_RECORD_EVERY ?= 1   # record replays every N generations
 ALB_MAX_TURNS  ?= 0     # 0 = games play until a snake dies (no artificial cap)
 ALB_DRAW_VALUE ?= -0.9  # equilibrium-search terminal value of a draw (negative kills suicide-draws)
 ALB_GENERATIONS ?= 0    # 0 = run forever until stopped via the dashboard/control API
-ALB_SERVE_PORT ?= 8050  # embedded live dashboard + control API port (0.0.0.0)
 
 .DEFAULT_GOAL := help
-.PHONY: help venv build test test-rust test-py bench lint fmt train albatross overnight adaptive ui dashboard serve export-model api-build api api-docker audit clean clean-all
+.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard serve export-model api-build api api-docker clean clean-all
 
 help: ## Show this help
 	@echo "snek3 targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: GENERATIONS TOTAL_GENERATIONS ADAPTIVE_EVERY SAMPLES COUNT SIMS EXPLORATION_PROB DRAW_VALUE BOOTSTRAP_VALUE SKIP_SHORT_DRAW_TURNS DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS ADAPTIVE_TRAIN_STEPS BATCH_SIZE BUFFER_SIZE FILTERS BLOCKS EVAL_EVERY EVAL_GAMES RELATIVE_EVERY MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY RECORD_GAMES RECORD_EVERY RUN_ID ARGS ALB_COUNT ALB_SAMPLES ALB_EVAL_EVERY ALB_EVAL_GAMES ALB_EVAL_BATCH ALB_BATCH ALB_DRAW_VALUE ALB_MAX_TURNS ALB_RECORD_GAMES ALB_RECORD_EVERY ALB_GENERATIONS ALB_SERVE_PORT NUM_SNAKES TAU_MIN TAU_MAX RESPONSE_TAU RESPONSE_AFTER EVAL_OPP_TAU UCT_ITERS LR PORT SERVE_PORT CKPT TORCH_INDEX"
+	@echo "Vars: GENERATIONS SAMPLES COUNT SIMS C_PUCT EXPLORATION_PROB DRAW_VALUE BOOTSTRAP_VALUE SKIP_SHORT_DRAW_TURNS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS BATCH_SIZE BUFFER_SIZE BOARD NUM_SNAKES TRUNK_CHANNELS TRUNK_BLOCKS MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY KEEP_GAMES RUN_ID FRESH ARGS LR PORT SERVE_PORT CKPT TORCH_INDEX"
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
@@ -138,22 +137,18 @@ fmt: ## Format Rust code
 
 train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENERATIONS, SAMPLES, RUN_ID, FRESH=1, ARGS...
 	$(PY) -m azsnek.train \
-		--generations $(GENERATIONS) --samples $(SAMPLES) --count $(COUNT) \
-		--sims $(SIMS) \
+		--generations $(GENERATIONS) --board $(BOARD) --num-snakes $(NUM_SNAKES) \
+		--samples $(SAMPLES) --count $(COUNT) --sims $(SIMS) --c-puct $(C_PUCT) \
+		--trunk-channels $(TRUNK_CHANNELS) --trunk-blocks $(TRUNK_BLOCKS) \
 		--exploration-prob $(EXPLORATION_PROB) \
 		--draw-value $(DRAW_VALUE) --skip-short-draw-turns $(SKIP_SHORT_DRAW_TURNS) \
 		$(if $(BOOTSTRAP_VALUE),--bootstrap-value,) \
-		--depth $(DEPTH) --tau $(TAU) --iters $(ITERS) \
 		--eval-batch-size $(EVAL_BATCH_SIZE) \
 		--search-threads $(SEARCH_THREADS) \
 		--train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) \
 		--buffer-size $(BUFFER_SIZE) \
-		--filters $(FILTERS) --blocks $(BLOCKS) \
-		--eval-every $(EVAL_EVERY) --eval-games $(EVAL_GAMES) \
-		--relative-every $(RELATIVE_EVERY) \
 		--max-turns $(MAX_TURNS) \
-		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) \
-		--record-games $(RECORD_GAMES) --record-every $(RECORD_EVERY) \
+		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) --keep-games $(KEEP_GAMES) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
 server: build ## Start the AlphaZero run (single grid net, N-player FFA) + in-process live dashboard on DASH_PORT. Override RUN_ID, FRESH=1, COUNT/SIMS/SAMPLES...
@@ -167,29 +162,6 @@ server: build ## Start the AlphaZero run (single grid net, N-player FFA) + in-pr
 		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) --keep-games $(KEEP_GAMES) \
 		--search-threads $(SEARCH_THREADS) --eval-batch-size $(EVAL_BATCH_SIZE) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
-
-overnight: build ## Start a background overnight training run. Override TAU, GENERATIONS, SAMPLES, RUN_ID...
-	TAU=$(TAU) GENERATIONS=$(GENERATIONS) SAMPLES=$(SAMPLES) COUNT=$(COUNT) \
-	DEPTH=$(DEPTH) ITERS=$(ITERS) EVAL_BATCH_SIZE=$(EVAL_BATCH_SIZE) \
-	SEARCH_THREADS=$(SEARCH_THREADS) TRAIN_STEPS=$(TRAIN_STEPS) BATCH_SIZE=$(BATCH_SIZE) \
-	BUFFER_SIZE=$(BUFFER_SIZE) \
-	FILTERS=$(FILTERS) BLOCKS=$(BLOCKS) \
-	EVAL_EVERY=$(EVAL_EVERY) EVAL_GAMES=$(EVAL_GAMES) MAX_TURNS=$(MAX_TURNS) \
-	EXPLORATION_PROB=$(EXPLORATION_PROB) DRAW_VALUE=$(DRAW_VALUE) BOOTSTRAP_VALUE=$(BOOTSTRAP_VALUE) SKIP_SHORT_DRAW_TURNS=$(SKIP_SHORT_DRAW_TURNS) \
-	SAMPLE_GAMES=$(SAMPLE_GAMES) SAMPLE_EVERY=$(SAMPLE_EVERY) \
-	RECORD_GAMES=$(RECORD_GAMES) RECORD_EVERY=$(RECORD_EVERY) \
-	RUN_ID="$(RUN_ID)" FRESH="$(FRESH)" bash scripts/overnight_train.sh
-
-adaptive: build ## Run adaptive training in the foreground; Ctrl-C stops it
-	TOTAL_GENERATIONS=$(TOTAL_GENERATIONS) ADAPTIVE_EVERY=$(ADAPTIVE_EVERY) \
-	TAU=$(TAU) SAMPLES=$(SAMPLES) COUNT=$(COUNT) DEPTH=$(DEPTH) ITERS=$(ITERS) \
-	EVAL_BATCH_SIZE=$(EVAL_BATCH_SIZE) SEARCH_THREADS=$(SEARCH_THREADS) \
-	TRAIN_STEPS=$(ADAPTIVE_TRAIN_STEPS) BATCH_SIZE=$(BATCH_SIZE) BUFFER_SIZE=$(BUFFER_SIZE) \
-	FILTERS=$(FILTERS) BLOCKS=$(BLOCKS) EVAL_GAMES=64 MAX_TURNS=$(MAX_TURNS) \
-	EXPLORATION_PROB=$(EXPLORATION_PROB) DRAW_VALUE=$(DRAW_VALUE) BOOTSTRAP_VALUE=$(BOOTSTRAP_VALUE) SKIP_SHORT_DRAW_TURNS=$(SKIP_SHORT_DRAW_TURNS) \
-	SAMPLE_GAMES=$(SAMPLE_GAMES) SAMPLE_EVERY=$(SAMPLE_EVERY) \
-	RECORD_GAMES=$(RECORD_GAMES) RECORD_EVERY=$(RECORD_EVERY) \
-	RUN_ID="$(RUN_ID)" FRESH="$(FRESH)" ARGS="$(ARGS)" bash scripts/adaptive_train.sh
 
 ui: ## Build the React dashboard UI (-> python/dashboard/static)
 	cd python/dashboard/ui && npm install && npm run build
@@ -214,9 +186,6 @@ api: api-build ## Run the Rust /move API locally (needs `make export-model`; use
 
 api-docker: ## Build the CPU-only Docker image for the Rust API (expects MODEL in repo root)
 	docker build -f deploy/server.Dockerfile -t snek-api .
-
-audit: ## Run the full end-to-end audit script
-	bash scripts/audit.sh
 
 clean: ## Remove build artifacts and caches (keeps .venv and runs/)
 	cargo clean

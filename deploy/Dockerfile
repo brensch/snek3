@@ -2,8 +2,8 @@
 # in, so the pod boots straight into serving; no per-boot build).
 #
 # Built in CI -> ghcr.io/brensch/snek3:latest (see .github/workflows/docker.yml).
-# Run:  docker run --gpus all -p 8050:8050 \
-#         -e SNEK_RUN_ID=h100-test ghcr.io/brensch/snek3:latest
+# Run:
+#   docker run --gpus all -p 8050:8050 ghcr.io/brensch/snek3:latest --run-id a100-test
 #
 # torch cu128 wheels bundle their own CUDA runtime, so only a recent host NVIDIA
 # driver is needed (--gpus all). Backward-compatible with CUDA 12.8 / 13 hosts.
@@ -27,7 +27,8 @@ RUN python -m venv .venv \
 
 # Source + compile the Rust extension (re-runs on code change; ~2-3 min).
 COPY . /app
-RUN .venv/bin/maturin develop --release && chmod +x deploy/entrypoint.sh
+RUN .venv/bin/maturin develop --release
 
 EXPOSE 8050
-CMD ["/app/deploy/entrypoint.sh"]
+ENTRYPOINT ["/app/.venv/bin/python", "-m", "azsnek.train"]
+CMD ["--serve", "--serve-host", "0.0.0.0", "--serve-port", "8050", "--generations", "100000", "--board", "11", "--num-snakes", "4", "--count", "1024", "--samples", "30000", "--sims", "32", "--c-puct", "1.5", "--trunk-channels", "96", "--trunk-blocks", "8", "--lr", "1e-3", "--train-steps", "256", "--batch-size", "2048", "--buffer-size", "500000", "--exploration-prob", "0.15", "--draw-value", "-0.25", "--max-turns", "200", "--eval-batch-size", "8192", "--sample-games", "16", "--sample-every", "1", "--keep-games", "40"]

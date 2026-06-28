@@ -8,7 +8,6 @@ on:
     branches: [albatross-learning-signal]
     paths:
       - 'deploy/Dockerfile'
-      - 'deploy/entrypoint.sh'
       - 'python/**'
       - 'crates/**'
       - 'Cargo.toml'

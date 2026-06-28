@@ -87,7 +87,6 @@ make test        # Rust + Python tests
 make train       # train; writes runs/<id>/  (override GENERATIONS, SAMPLES, RUN_ID, ARGS...)
 make dashboard   # serve the live dashboard (PORT, default 8050)
 make serve       # run the Battlesnake server (CKPT=..., matching FILTERS/BLOCKS)
-make audit       # full end-to-end audit script
 make bench lint fmt clean clean-all
 ```
 

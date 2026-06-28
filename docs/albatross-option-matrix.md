@@ -43,7 +43,8 @@ the Albatross paper targets (temperature-conditioned proxy + best-response model
 - **Search:** fixed-depth equilibrium, depth 2, 120 SFP iters.
 - **Net:** 64 filters, 6 blocks, AdaptiveAvgPool (size-agnostic), temperature plane input.
 - **Opponents:** eval pool = flood-fill baseline + CPU UCT. Self-play = net-vs-net (UCT-in-self-play is built via `uct_opp_frac` but **off/untested**).
-- **Entry point:** `make albatross` → `python -m azsnek.train_albatross` (Python `generate_proxy` path).
+- **Historical entry point:** the earlier Albatross trainer used a separate Python
+  proxy-generation path; current container training uses `python -m azsnek.train`.
 - **Run cadence:** ~146 s/gen at count=512; eval every 5 gens; response starts gen 30 (~70 min in).
 
 ### Measured facts (so we stop guessing)

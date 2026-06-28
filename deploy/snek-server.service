@@ -8,8 +8,8 @@
 #   sudo systemctl enable --now snek-server
 #   journalctl -u snek-server -f          # logs (incl. the dashboard URL)
 #
-# Starts an IDLE server (create runs from the dashboard). To auto-start a run,
-# append e.g. --run-id myrun to ExecStart.
+# Starts a training server and dashboard. To give the run a stable name, append
+# e.g. --run-id myrun to ExecStart.
 
 [Unit]
 Description=snek3 training server
@@ -23,14 +23,14 @@ WorkingDirectory=/home/brensch/snek3
 Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Direct python (no make) so a restart never rebuilds. Mirrors `make server`
 # defaults so dashboard-created runs share the meta.
-ExecStart=/home/brensch/snek3/.venv/bin/python -m azsnek.train_albatross \
-    --serve-host 0.0.0.0 --serve-port 8050 \
-    --num-snakes 2 --count 64 --samples 8000 --depth 2 --iters 120 \
-    --tau-min 0.5 --tau-max 10.0 --response-tau 12.0 --response-after 0 \
-    --draw-value -0.9 --exploration-prob 0.15 --max-turns 0 --eval-batch-size 2048 \
-    --filters 64 --blocks 6 --lr 1e-3 --train-steps 128 --recency 2.0 \
-    --batch-size 1024 --buffer-size 500000 --eval-every 5 --eval-games 64 \
-    --record-games 2 --record-every 1
+ExecStart=/home/brensch/snek3/.venv/bin/python -m azsnek.train \
+    --serve --serve-host 0.0.0.0 --serve-port 8050 \
+    --generations 100000 --board 11 --num-snakes 4 \
+    --count 1024 --samples 30000 --sims 32 --c-puct 1.5 \
+    --trunk-channels 96 --trunk-blocks 8 --lr 1e-3 \
+    --train-steps 256 --batch-size 2048 --buffer-size 500000 \
+    --exploration-prob 0.15 --draw-value -0.25 --max-turns 200 \
+    --eval-batch-size 8192 --sample-games 16 --sample-every 1 --keep-games 40
 Restart=always
 RestartSec=5
 
