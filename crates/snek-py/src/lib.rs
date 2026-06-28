@@ -753,7 +753,13 @@ fn generate_selfplay<'py>(
     // Run the pipeline. On any error we drop the channels, which stops the GPU thread.
     use std::time::{Duration, Instant};
     let (mut t_recv, mut t_mcts, mut t_rp) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let mut run = || -> Result<(), String> {
+    // `run` is a `move` closure so it OWNS the !Sync Receiver (and a cloned
+    // Sender); we keep the original `tx_req` to stop the GPU thread afterwards.
+    // It returns the accumulated outputs since boards/rng/channels aren't needed
+    // after the loop. This lets us run it under `py.allow_threads`.
+    let tx_req_c = tx_req.clone();
+    type SpOut = (Vec<f32>, Vec<f32>, Vec<f32>, usize, usize, usize, Vec<String>, Vec<String>, usize);
+    let run = move || -> Result<SpOut, String> {
         while collected < samples_per_gen {
             let mut forests = [
                 MctsForest::new_with_draw_value(&boards[0], c_puct, draw_value),
@@ -764,7 +770,7 @@ fn generate_selfplay<'py>(
 
             // prime: submit buffer 0, prepare + queue buffer 1
             let (o0, m0) = select_write(&mut forests[0], &mut pend[0], n, obs_size);
-            tx_req.send(Some((0, o0, m0))).map_err(|_| "gpu gone".to_string())?;
+            tx_req_c.send(Some((0, o0, m0))).map_err(|_| "gpu gone".to_string())?;
             let (o1, m1) = select_write(&mut forests[1], &mut pend[1], n, obs_size);
             let mut queued: Option<(u8, Vec<f32>, usize)> = Some((1, o1, m1));
 
@@ -774,7 +780,7 @@ fn generate_selfplay<'py>(
                 let (id, pol, val) = rx_res.recv().map_err(|_| "gpu gone".to_string())?;
                 t_recv += w.elapsed();
                 if let Some(q) = queued.take() {
-                    tx_req.send(Some(q)).map_err(|_| "gpu gone".to_string())?;
+                    tx_req_c.send(Some(q)).map_err(|_| "gpu gone".to_string())?;
                 }
                 let m0 = Instant::now();
                 let bi = id as usize;
@@ -912,21 +918,28 @@ fn generate_selfplay<'py>(
             }
             t_rp += rp0.elapsed();
         }
-        Ok(())
+        if std::env::var("SNEK_PIPELINE_TIMING").is_ok() {
+            eprintln!(
+                "[cpu] recv_wait={:.2}s mcts={:.2}s record/play={:.2}s",
+                t_recv.as_secs_f64(), t_mcts.as_secs_f64(), t_rp.as_secs_f64()
+            );
+        }
+        Ok((out_obs, out_pol, out_z, collected, skipped_short_draw_games,
+            skipped_short_draw_samples, recorded_games_json, completed_games_json,
+            recorded_game_candidates))
     };
-    let run_res = run();
-    if std::env::var("SNEK_PIPELINE_TIMING").is_ok() {
-        eprintln!(
-            "[cpu] recv_wait={:.2}s mcts={:.2}s record/play={:.2}s",
-            t_recv.as_secs_f64(),
-            t_mcts.as_secs_f64(),
-            t_rp.as_secs_f64()
-        );
-    }
+    // Release the GIL for the whole CPU self-play loop (pure Rust; the GPU net
+    // runs in its own thread). Otherwise this multi-minute call would starve the
+    // in-process dashboard's uvicorn thread, freezing the live UI.
+    let run_res = py.allow_threads(run);
     let _ = tx_req.send(None); // stop the GPU thread
     drop(tx_req);
     let join = gpu.join();
-    run_res.map_err(PyValueError::new_err)?;
+    let (
+        out_obs, out_pol, out_z, collected, skipped_short_draw_games,
+        skipped_short_draw_samples, recorded_games_json, completed_games_json,
+        recorded_game_candidates,
+    ) = run_res.map_err(PyValueError::new_err)?;
     let (gpu_forward_seconds, gpu_idle_seconds, inference_count) = match join {
         Ok(Ok(stats)) => stats,
         Ok(Err(e)) => return Err(PyValueError::new_err(format!("gpu thread: {e}"))),
