@@ -273,7 +273,9 @@ def main():
     ap.add_argument("--bootstrap-value", action="store_true",
                     help="value target = search root (equilibrium) value per state instead of the flat game outcome")
     ap.add_argument("--skip-short-draw-turns", type=int, default=0, help="drop terminal draw games up to this many turns from replay; 0 disables")
-    ap.add_argument("--eval-every", type=int, default=1)
+    ap.add_argument("--eval-every", type=int, default=0,
+                    help="absolute eval vs flood-fill baseline every N gens; 0 disables "
+                         "(progress is tracked by relative net-vs-past win-rates instead)")
     ap.add_argument("--eval-games", type=int, default=32)
     ap.add_argument("--league-every", type=int, default=20, help="snapshot a league checkpoint every N gens")
     ap.add_argument("--league-keep", type=int, default=8, help="keep this many recent league checkpoints (plus the anchor)")
@@ -288,6 +290,10 @@ def main():
     ap.add_argument("--gpool-every", type=int, default=3,
                     help="grid: every Nth block gets a global-pooling bias")
     ap.add_argument("--ckpt-dir", type=str, default=None, help="serving weights dir (default: runs/<run-id>/ckpt)")
+    ap.add_argument("--serve", action=argparse.BooleanOptionalAction, default=True,
+                    help="host the live dashboard in-process (--no-serve for headless)")
+    ap.add_argument("--serve-host", type=str, default="0.0.0.0")
+    ap.add_argument("--serve-port", type=int, default=8050)
     ap.add_argument("--runs-dir", type=str, default="runs", help="dashboard run root")
     ap.add_argument("--run-id", type=str, default=None, help="run dir name (default: timestamp)")
     ap.add_argument("--sample-games", type=int, default=16, help="cheap self-play replay samples captured in Rust")
@@ -519,8 +525,49 @@ def main():
             f"eval_games={args.eval_games} tau={args.tau} | " + "; ".join(reasons),
         )
 
+    # ---- Embedded live dashboard (served in-process by this trainer) ----
+    state = None
+    if args.serve:
+        import itertools
+        from pathlib import Path as _Path
+        from . import control
+        static_dir = _Path(__file__).resolve().parent.parent / "dashboard" / "static"
+        state = control.RunState()
+        control.serve_in_thread(state, args.serve_host, args.serve_port,
+                                _Path(args.runs_dir), static_dir)
+        init_params = {k: getattr(args, k) for k in control.LIVE_PARAMS if hasattr(args, k)}
+        state.begin_run(run.run_id, run.read_json("meta.json"), init_params, metrics_history,
+                        persist=lambda p: run.write_json("params.json", p))
+        log_phase(logger, "SERVE", f"http://{args.serve_host}:{args.serve_port}")
+
     onnx_path = run.dir / "model.onnx"
-    for gen in range(start_gen, args.generations):
+    gen_iter = (
+        itertools.count(start_gen) if args.serve and args.generations == 0
+        else range(start_gen, args.generations if args.generations else start_gen + 1)
+    )
+    for gen in gen_iter:
+        # pause/stop gate + live-param apply (dashboard control)
+        if state is not None:
+            while state.paused and not (state.stopping or state.shutdown):
+                time.sleep(0.3)
+            if state.stopping or state.shutdown:
+                break
+            p = state.params_snapshot()
+            args.count = p.get("count", args.count)
+            args.samples = p.get("samples", args.samples)
+            args.sims = p.get("sims", args.sims)
+            args.c_puct = p.get("c_puct", args.c_puct)
+            args.train_steps = p.get("train_steps", args.train_steps)
+            args.batch_size = p.get("batch_size", args.batch_size)
+            args.exploration_prob = p.get("exploration_prob", args.exploration_prob)
+            args.draw_value = p.get("draw_value", args.draw_value)
+            lr = p.get("lr", args.lr)
+            for grp in opt.param_groups:
+                grp["lr"] = lr
+            sp.samples_per_gen = args.samples
+            sp.exploration_prob = args.exploration_prob
+            sp.draw_value = args.draw_value
+            state.set_status(generation=gen, phase="self-play", running=True)
         # ---- GENERATE: Rust MCTS + ONNX/CUDA inference (no Python round-trips) ----
         log_phase(
             logger,
@@ -750,12 +797,15 @@ def main():
         run.write_status(
             {
                 "generation": gen,
-                "running": gen < args.generations - 1,
-                "total_generations": args.generations,
+                "running": args.generations == 0 or gen < args.generations - 1,
+                "total_generations": args.generations or None,
                 "best_win_rate": None if best_win < 0 else round(best_win, 3),
                 "last": metric,
             }
         )
+        if state is not None:
+            state.add_metric(metric)
+            state.set_status(generation=gen, phase="running", running=True, last=metric)
         log_phase(
             logger,
             "METRICS",

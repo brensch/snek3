@@ -29,6 +29,13 @@ ADAPTIVE_EVERY ?= $(CHUNK_GENERATIONS)
 SAMPLES     ?= 30000
 COUNT       ?= 1024
 SIMS        ?= 32
+# AlphaZero net + game (single grid net, N-player FFA). Locked per run.
+BOARD          ?= 11
+NUM_SNAKES     ?= 4     # 4-player FFA subsumes 2-player as snakes die
+C_PUCT         ?= 1.5
+TRUNK_CHANNELS ?= 96
+TRUNK_BLOCKS   ?= 8
+DASH_PORT      ?= 8050  # in-process live dashboard port
 EXPLORATION_PROB ?= 0.15
 DRAW_VALUE ?= -0.25
 BOOTSTRAP_VALUE ?=
@@ -148,24 +155,18 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 		--record-games $(RECORD_GAMES) --record-every $(RECORD_EVERY) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
-server: build ## Trainer-as-server: dashboard + live control API. No RUN_ID = idle (start runs from the dashboard); with RUN_ID/params = auto-start that run. Override ALB_SERVE_PORT, TAU_*, RUN_ID, FRESH=1...
-	$(PY) -m azsnek.train_albatross \
-		--generations $(ALB_GENERATIONS) --num-snakes $(NUM_SNAKES) \
-		--serve-port $(ALB_SERVE_PORT) \
-		--samples $(ALB_SAMPLES) --count $(ALB_COUNT) \
-		--depth $(DEPTH) --iters $(ITERS) \
-		--tau-min $(TAU_MIN) --tau-max $(TAU_MAX) \
-		--response-tau $(RESPONSE_TAU) --response-after $(RESPONSE_AFTER) --draw-value $(ALB_DRAW_VALUE) \
-		--eval-opp-tau $(EVAL_OPP_TAU) --uct-iters $(UCT_ITERS) \
-		--exploration-prob $(EXPLORATION_PROB) --max-turns $(ALB_MAX_TURNS) \
-		--eval-batch-size $(ALB_EVAL_BATCH) \
-		--filters $(FILTERS) --blocks $(BLOCKS) --lr $(LR) \
-		--train-steps $(ALB_TRAIN_STEPS) --recency $(ALB_RECENCY) --batch-size $(ALB_BATCH) --buffer-size $(BUFFER_SIZE) \
-		--eval-every $(ALB_EVAL_EVERY) --eval-games $(ALB_EVAL_GAMES) \
-		--record-games $(ALB_RECORD_GAMES) --record-every $(ALB_RECORD_EVERY) \
+server: build ## Start the AlphaZero run (single grid net, N-player FFA) + in-process live dashboard on DASH_PORT. Override RUN_ID, FRESH=1, COUNT/SIMS/SAMPLES...
+	$(PY) -m azsnek.train \
+		--serve --serve-port $(DASH_PORT) \
+		--generations $(GENERATIONS) --board $(BOARD) --num-snakes $(NUM_SNAKES) \
+		--samples $(SAMPLES) --count $(COUNT) --sims $(SIMS) --c-puct $(C_PUCT) \
+		--trunk-channels $(TRUNK_CHANNELS) --trunk-blocks $(TRUNK_BLOCKS) \
+		--lr $(LR) --train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) --buffer-size $(BUFFER_SIZE) \
+		--exploration-prob $(EXPLORATION_PROB) --draw-value $(DRAW_VALUE) --max-turns $(MAX_TURNS) \
+		--eval-every $(EVAL_EVERY) --relative-every $(RELATIVE_EVERY) \
+		--sample-games $(SAMPLE_GAMES) --record-games $(RECORD_GAMES) --record-every $(RECORD_EVERY) \
+		--search-threads $(SEARCH_THREADS) --eval-batch-size $(EVAL_BATCH_SIZE) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
-
-albatross: server ## alias for `make server` (back-compat)
 
 overnight: build ## Start a background overnight training run. Override TAU, GENERATIONS, SAMPLES, RUN_ID...
 	TAU=$(TAU) GENERATIONS=$(GENERATIONS) SAMPLES=$(SAMPLES) COUNT=$(COUNT) \

@@ -32,25 +32,20 @@ from fastapi.staticfiles import StaticFiles
 
 # Params that can be changed live and take effect at the next generation
 # boundary, with the coercion applied to incoming JSON values.
+# AlphaZero live-tunable knobs (applied at the next generation boundary).
 LIVE_PARAMS: dict[str, type] = {
-    "count": int, "samples": int, "iters": int,
-    "lr": float, "train_steps": int, "batch_size": int, "recency": float,
-    "draw_value": float, "exploration_prob": float,
-    "tau_min": float, "tau_max": float, "response_tau": float,
-    "eval_every": int, "eval_games": int,
-    "record_games": int, "record_every": int,
+    "count": int, "samples": int, "sims": int, "c_puct": float,
+    "lr": float, "train_steps": int, "batch_size": int,
+    "exploration_prob": float, "draw_value": float,
 }
 # Baked into the net / board at startup; cannot change without a fresh run.
-LOCKED_PARAMS = ("filters", "blocks", "board", "num_snakes", "depth")
+LOCKED_PARAMS = ("board", "num_snakes", "trunk_channels", "trunk_blocks", "arch")
 
-# Everything a dashboard-created run may override (live + locked + a few extras),
-# with the coercion applied to incoming JSON values.
+# Everything a dashboard-created run may override (live + locked + a few extras).
 NEW_RUN_PARAMS: dict[str, type] = {
     **LIVE_PARAMS,
-    "filters": int, "blocks": int, "board": int, "num_snakes": int, "depth": int,
-    "response_after": int, "generations": int, "eval_opp_tau": float,
-    "uct_iters": int, "max_turns": int, "eval_batch_size": int,
-    "buffer_size": int, "keep_games": int,
+    "board": int, "num_snakes": int, "trunk_channels": int, "trunk_blocks": int,
+    "generations": int, "max_turns": int, "buffer_size": int, "keep_games": int,
 }
 
 
