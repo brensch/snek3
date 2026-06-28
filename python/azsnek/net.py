@@ -58,6 +58,15 @@ class NetConfig:
     # policy/value can depend on the (own or opponent) rationality level.
     temperature_input: bool = False
     temperature_scale: float = 100.0  # plane value = temp / temperature_scale
+    # Backbone selection:
+    #   "pyramid" — the original Albatross downsampling pyramid (layer_specs).
+    #   "grid"    — KataGo-style constant-resolution residual trunk with
+    #               global-pooling-bias blocks; recommended for AlphaZero on a
+    #               small board + cheap CPU inference (see net_grid below).
+    arch: str = "pyramid"
+    trunk_channels: int = 96   # grid trunk width
+    trunk_blocks: int = 8      # grid trunk depth (residual blocks)
+    gpool_every: int = 3       # grid: every Nth block gets a global-pooling bias
 
 
 class ResNetBlock(nn.Module):
@@ -94,29 +103,86 @@ class ResNetBlock(nn.Module):
         return self.act(skip + y)
 
 
+def _global_pool(x: torch.Tensor) -> torch.Tensor:
+    """Permutation-invariant board summary: concat of channel-wise mean and max
+    over the spatial dims -> [B, 2C]. The aggregation that lets the net reason
+    about board-global facts (who's longest, food scarcity, snake count) and, by
+    pooling over the head-localized per-opponent planes, summarise all opponents
+    regardless of how many there are."""
+    return torch.cat([x.mean(dim=(2, 3)), x.amax(dim=(2, 3))], dim=1)
+
+
+class GPoolResBlock(nn.Module):
+    """KataGo-style pre-activation residual block. When `gpool`, a global-pooled
+    summary of the first conv's output is broadcast back as a per-channel bias,
+    giving every cell access to board-global information at negligible cost."""
+
+    def __init__(self, ch: int, gpool: bool = False):
+        super().__init__()
+        self.gpool = gpool
+        self.norm1 = nn.GroupNorm(GROUP_NORM_GROUPS, ch, affine=True)
+        self.conv1 = nn.Conv2d(ch, ch, 3, padding=1, bias=False)
+        self.norm2 = nn.GroupNorm(GROUP_NORM_GROUPS, ch, affine=True)
+        self.conv2 = nn.Conv2d(ch, ch, 3, padding=1, bias=False)
+        self.act = nn.LeakyReLU(inplace=False)
+        if gpool:
+            self.gp = nn.Linear(2 * ch, ch)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.conv1(self.act(self.norm1(x)))
+        if self.gpool:
+            y = y + self.gp(_global_pool(y))[:, :, None, None]
+        y = self.conv2(self.act(self.norm2(y)))
+        return x + y
+
+
 class AZNet(nn.Module):
-    """Albatross-style ResNet pyramid + linear policy and value heads."""
+    """AlphaZero net. `arch="pyramid"` is the original Albatross downsampling
+    backbone; `arch="grid"` is a KataGo-style constant-resolution residual trunk
+    with global-pooling-bias blocks (recommended for snek)."""
 
     def __init__(self, cfg: NetConfig | None = None):
         super().__init__()
         self.cfg = cfg or NetConfig()
         c = self.cfg
-
         in_channels = c.channels + (1 if c.temperature_input else 0)
+        self.arch = c.arch
+
+        if c.arch == "grid":
+            self._build_grid(in_channels, c)
+        elif c.arch == "pyramid":
+            self._build_pyramid(in_channels, c)
+        else:
+            raise ValueError(f"unknown arch {c.arch!r}")
+
+        self._initialize_weights()
+
+    def _build_pyramid(self, in_channels: int, c: NetConfig) -> None:
         blocks = []
         cur = in_channels
         for out_ch, padding in c.layer_specs:
             blocks.append(ResNetBlock(cur, out_ch, kernel=3, padding=padding))
             cur = out_ch
         self.backbone = nn.Sequential(*blocks)
-        self.latent_size = cur  # last layer's channel count (512)
-
-        # Global average pool -> latent vector, then 1-layer linear heads.
+        self.latent_size = cur
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.policy_head = nn.Linear(self.latent_size, c.policy_actions, bias=True)
         self.value_head = nn.Linear(self.latent_size, 1, bias=True)
 
-        self._initialize_weights()
+    def _build_grid(self, in_channels: int, c: NetConfig) -> None:
+        ch = c.trunk_channels
+        self.stem = nn.Conv2d(in_channels, ch, 3, padding=1, bias=False)
+        self.trunk = nn.ModuleList([
+            GPoolResBlock(ch, gpool=((i + 1) % c.gpool_every == 0))
+            for i in range(c.trunk_blocks)
+        ])
+        self.trunk_norm = nn.GroupNorm(GROUP_NORM_GROUPS, ch, affine=True)
+        self.act = nn.LeakyReLU(inplace=False)
+        # Heads read the permutation-invariant global pool [B, 2*ch].
+        self.policy_head = nn.Linear(2 * ch, c.policy_actions, bias=True)
+        self.value_head = nn.Sequential(
+            nn.Linear(2 * ch, ch), nn.LeakyReLU(inplace=False), nn.Linear(ch, 1)
+        )
 
     def _initialize_weights(self) -> None:
         """Orthogonal init (gain sqrt 2) for conv/linear, ones/zeros for norms."""
@@ -149,6 +215,17 @@ class AZNet(nn.Module):
             b, _, h_, w_ = x.shape
             plane = (temp.to(x.dtype).view(b, 1, 1, 1) / self.cfg.temperature_scale).expand(b, 1, h_, w_)
             x = torch.cat([x, plane], dim=1)
+
+        if self.arch == "grid":
+            h = self.stem(x)
+            for block in self.trunk:
+                h = block(h)
+            h = self.act(self.trunk_norm(h))
+            pooled = _global_pool(h)  # [B, 2*ch]
+            p = self.policy_head(pooled)
+            v = torch.tanh(self.value_head(pooled)).squeeze(1)
+            return p, v
+
         h = self.backbone(x)
         latent = torch.flatten(self.avg_pool(h), 1)
         p = self.policy_head(latent)
