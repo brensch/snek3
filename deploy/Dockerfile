@@ -27,8 +27,9 @@ RUN python -m venv .venv \
 
 # Source + compile the Rust extension (re-runs on code change; ~2-3 min).
 COPY . /app
-RUN .venv/bin/maturin develop --release
+RUN .venv/bin/maturin develop --release \
+ && mkdir -p /workspace/runs
 
 EXPOSE 8050
 ENTRYPOINT ["/app/.venv/bin/python", "-m", "azsnek.train"]
-CMD ["--serve", "--serve-host", "0.0.0.0", "--serve-port", "8050", "--generations", "100000", "--board", "11", "--num-snakes", "4", "--count", "1024", "--samples", "30000", "--sims", "32", "--c-puct", "1.5", "--trunk-channels", "96", "--trunk-blocks", "8", "--lr", "1e-3", "--train-steps", "256", "--batch-size", "2048", "--buffer-size", "500000", "--exploration-prob", "0.15", "--draw-value", "-0.25", "--max-turns", "200", "--eval-batch-size", "8192", "--sample-games", "16", "--sample-every", "1", "--keep-games", "40"]
+CMD ["--serve", "--serve-host", "0.0.0.0", "--serve-port", "8050", "--runs-dir", "/workspace/runs", "--generations", "100000", "--board", "11", "--num-snakes", "4", "--count", "1024", "--samples", "30000", "--sims", "32", "--c-puct", "1.5", "--trunk-channels", "96", "--trunk-blocks", "8", "--lr", "1e-3", "--train-steps", "256", "--batch-size", "2048", "--buffer-size", "500000", "--exploration-prob", "0.15", "--draw-value", "-0.25", "--max-turns", "200", "--eval-batch-size", "8192", "--sample-games", "16", "--sample-every", "1", "--keep-games", "40"]
