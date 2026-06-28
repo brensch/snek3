@@ -57,6 +57,7 @@ RELATIVE_EVERY ?= 20
 MAX_TURNS   ?= 200
 SAMPLE_GAMES ?= 16
 SAMPLE_EVERY ?= 1
+KEEP_GAMES   ?= 40
 RECORD_GAMES ?= 4
 RECORD_EVERY ?= 20
 RUN_ID      ?=
@@ -163,8 +164,7 @@ server: build ## Start the AlphaZero run (single grid net, N-player FFA) + in-pr
 		--trunk-channels $(TRUNK_CHANNELS) --trunk-blocks $(TRUNK_BLOCKS) \
 		--lr $(LR) --train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) --buffer-size $(BUFFER_SIZE) \
 		--exploration-prob $(EXPLORATION_PROB) --draw-value $(DRAW_VALUE) --max-turns $(MAX_TURNS) \
-		--eval-every $(EVAL_EVERY) --relative-every $(RELATIVE_EVERY) \
-		--sample-games $(SAMPLE_GAMES) --record-games $(RECORD_GAMES) --record-every $(RECORD_EVERY) \
+		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) --keep-games $(KEEP_GAMES) \
 		--search-threads $(SEARCH_THREADS) --eval-batch-size $(EVAL_BATCH_SIZE) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 

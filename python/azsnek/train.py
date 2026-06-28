@@ -40,13 +40,10 @@ import snek
 import torch
 import torch.nn.functional as F
 
-from .evaluate import evaluate, evaluate_vs_net
 from .net import AZNet, NetConfig, autocast as net_autocast, device_auto
-from .recorder import record_games
 from .runlog import RunWriter
 from .symmetry import augment_batch
 from .selfplay import ReplayBuffer, Samples, SelfPlayConfig, generate
-from .autotune import TuneLimits, TuneSettings, tune_next
 
 
 PHASE_COLORS = {
@@ -245,9 +242,6 @@ def main():
                     help="snakes per game; 4-player FFA subsumes 2-player as snakes die")
     ap.add_argument("--samples", type=int, default=50_000)
     ap.add_argument("--count", type=int, default=32)
-    ap.add_argument("--depth", type=int, default=2)
-    ap.add_argument("--tau", type=float, default=30.0)
-    ap.add_argument("--iters", type=int, default=120)
     ap.add_argument(
         "--eval-batch-size",
         type=int,
@@ -273,16 +267,6 @@ def main():
     ap.add_argument("--bootstrap-value", action="store_true",
                     help="value target = search root (equilibrium) value per state instead of the flat game outcome")
     ap.add_argument("--skip-short-draw-turns", type=int, default=0, help="drop terminal draw games up to this many turns from replay; 0 disables")
-    ap.add_argument("--eval-every", type=int, default=0,
-                    help="absolute eval vs flood-fill baseline every N gens; 0 disables "
-                         "(progress is tracked by relative net-vs-past win-rates instead)")
-    ap.add_argument("--eval-games", type=int, default=32)
-    ap.add_argument("--league-every", type=int, default=20, help="snapshot a league checkpoint every N gens")
-    ap.add_argument("--league-keep", type=int, default=8, help="keep this many recent league checkpoints (plus the anchor)")
-    ap.add_argument("--relative-every", type=int, default=5, help="measure self-play win_rate vs past checkpoints every N gens")
-    ap.add_argument("--relative-games", type=int, default=64, help="games per relative (net-vs-past) eval")
-    ap.add_argument("--filters", type=int, default=64)
-    ap.add_argument("--blocks", type=int, default=6)
     # Network architecture (default = KataGo-style grid trunk; see net.py).
     ap.add_argument("--arch", type=str, default="grid", choices=["grid", "pyramid"])
     ap.add_argument("--trunk-channels", type=int, default=96, help="grid trunk width")
@@ -296,19 +280,10 @@ def main():
     ap.add_argument("--serve-port", type=int, default=8050)
     ap.add_argument("--runs-dir", type=str, default="runs", help="dashboard run root")
     ap.add_argument("--run-id", type=str, default=None, help="run dir name (default: timestamp)")
-    ap.add_argument("--sample-games", type=int, default=16, help="cheap self-play replay samples captured in Rust")
-    ap.add_argument("--sample-every", type=int, default=1, help="capture Rust replay samples every N generations")
-    ap.add_argument("--record-games", type=int, default=8, help="replays per opponent per recording")
-    ap.add_argument("--record-every", type=int, default=1, help="record replays every N generations")
+    ap.add_argument("--sample-games", type=int, default=16,
+                    help="self-play games serialised per gen (recorded internally during generation)")
+    ap.add_argument("--sample-every", type=int, default=1, help="serialise self-play games every N generations")
     ap.add_argument("--keep-games", type=int, default=40, help="keep this many recent game files")
-    ap.add_argument("--adaptive", action="store_true", help="adapt samples/train_steps/eval_games/tau during this run")
-    ap.add_argument("--adaptive-every", type=int, default=4, help="retune every N generations")
-    ap.add_argument("--min-train-steps", type=int, default=64)
-    ap.add_argument("--max-train-steps", type=int, default=512)
-    ap.add_argument("--min-samples", type=int, default=24_000)
-    ap.add_argument("--max-samples", type=int, default=120_000)
-    ap.add_argument("--target-buffer-epochs", type=float, default=1.5)
-    ap.add_argument("--max-new-sample-epochs", type=float, default=12.0)
     ap.add_argument("--fresh", action="store_true", help="ignore saved state and restart this run-id from scratch")
     ap.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)  # deprecated: resume is the default
     args = ap.parse_args()
@@ -343,17 +318,15 @@ def main():
         meta={
             "board": sp.board,
             "num_snakes": sp.num_snakes,
-            "filters": args.filters,
-            "blocks": args.blocks,
-            "depth": args.depth,
-            "tau": args.tau,
-            "iters": args.iters,
+            "arch": args.arch,
+            "trunk_channels": args.trunk_channels,
+            "trunk_blocks": args.trunk_blocks,
+            "sims": args.sims,
+            "c_puct": args.c_puct,
             "eval_batch_size": args.eval_batch_size,
             "max_turns": args.max_turns,
             "exploration_prob": args.exploration_prob,
             "draw_value": args.draw_value,
-            "bootstrap_value": args.bootstrap_value,
-            "skip_short_draw_turns": args.skip_short_draw_turns,
             "search_threads": args.search_threads,
             "generations": args.generations,
             "samples_per_gen": args.samples,
@@ -362,8 +335,6 @@ def main():
             "train_steps": args.train_steps,
             "batch_size": args.batch_size,
             "buffer_size": args.buffer_size,
-            "adaptive": args.adaptive,
-            "adaptive_every": args.adaptive_every,
             "device": str(device),
         },
     )
@@ -383,18 +354,16 @@ def main():
             log_phase(logger, "RESUME", f"--fresh cleared previous progress in {run.dir}")
         cfg = NetConfig(channels=snek.CHANNELS, height=args.board, width=args.board,
                         arch=args.arch, trunk_channels=args.trunk_channels,
-                        trunk_blocks=args.trunk_blocks, gpool_every=args.gpool_every,
-                        filters=args.filters, blocks=args.blocks)
+                        trunk_blocks=args.trunk_blocks, gpool_every=args.gpool_every)
 
     net = AZNet(cfg).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, weight_decay=1e-4)
-    start_gen, best_win = 0, -1.0
+    start_gen = 0
 
     if resume is not None:
         net.load_state_dict(resume["net"])
         opt.load_state_dict(resume["opt"])
         start_gen = resume["gen"] + 1
-        best_win = resume["best_win"]
         try:  # best-effort RNG restore
             torch.set_rng_state(resume["torch_rng"].cpu())
             if resume.get("cuda_rng") is not None and torch.cuda.is_available():
@@ -412,7 +381,6 @@ def main():
             lambda p: torch.save(
                 {
                     "gen": gen,
-                    "best_win": best_win,
                     "net_cfg": asdict(cfg),
                     "net": net.state_dict(),
                     "opt": opt.state_dict(),
@@ -429,34 +397,6 @@ def main():
         {"generation": start_gen - 1, "running": True, "total_generations": args.generations}
     )
 
-    # Relative-skill "league": snapshot past nets and play current vs them at the
-    # (shallow) training depth. Isolates net improvement from the fixed baseline.
-    league_dir = ckpt_dir / "league"
-    league_dir.mkdir(parents=True, exist_ok=True)
-    opp_net = AZNet(cfg).to(device)
-
-    def league_ckpts():
-        return sorted(league_dir.glob("gen_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
-
-    def relative_winrates(gen: int) -> dict:
-        ckpts = league_ckpts()
-        if not ckpts:
-            return {}
-        out = {}
-        opp_net.load_state_dict(torch.load(ckpts[0], map_location=device))  # anchor (phase start)
-        out["self_vs_anchor"] = round(
-            evaluate_vs_net(net, opp_net, device, games=args.relative_games, sims=args.sims,
-                            c_puct=args.c_puct, eval_batch_size=args.eval_batch_size,
-                            max_turns=args.max_turns, seed=3000 + gen), 3)
-        if len(ckpts) >= 2:  # rolling: a checkpoint a couple league-steps back
-            recent = ckpts[max(0, len(ckpts) - 3)]
-            opp_net.load_state_dict(torch.load(recent, map_location=device))
-            out["self_vs_recent"] = round(
-                evaluate_vs_net(net, opp_net, device, games=args.relative_games, sims=args.sims,
-                                c_puct=args.c_puct, eval_batch_size=args.eval_batch_size,
-                                max_turns=args.max_turns, seed=5000 + gen), 3)
-        return out
-
     buffer = ReplayBuffer(args.buffer_size)
     metrics_history = []
     if run.metrics_path.exists() and not args.fresh:
@@ -466,64 +406,6 @@ def main():
                     metrics_history.append(json.loads(line))
                 except ValueError:
                     pass
-
-    tune_limits = TuneLimits(
-        min_samples=args.min_samples,
-        max_samples=args.max_samples,
-        min_train_steps=args.min_train_steps,
-        max_train_steps=args.max_train_steps,
-        target_buffer_epochs=args.target_buffer_epochs,
-        max_new_sample_epochs=args.max_new_sample_epochs,
-    )
-
-    def retune(gen: int):
-        if not args.adaptive or not args.adaptive_every or (gen + 1) % args.adaptive_every != 0:
-            return
-        settings = TuneSettings(
-            samples=args.samples,
-            count=args.count,
-            depth=args.depth,
-            tau=args.tau,
-            iters=args.iters,
-            eval_batch_size=args.eval_batch_size,
-            search_threads=args.search_threads,
-            train_steps=args.train_steps,
-            batch_size=args.batch_size,
-            buffer_size=args.buffer_size,
-            filters=args.filters,
-            blocks=args.blocks,
-            eval_games=args.eval_games,
-            max_turns=args.max_turns,
-            sample_games=args.sample_games,
-            sample_every=args.sample_every,
-            record_games=args.record_games,
-            record_every=args.record_every,
-        )
-        tuned, reasons = tune_next(settings, tune_limits, metrics_history)
-        args.samples = tuned.samples
-        args.train_steps = tuned.train_steps
-        args.eval_games = tuned.eval_games
-        args.tau = tuned.tau
-        sp.samples_per_gen = tuned.samples
-        sp.tau = tuned.tau
-        meta = run.read_json("meta.json")
-        meta.update(
-            {
-                "tau": args.tau,
-                "samples_per_gen": args.samples,
-                "train_steps": args.train_steps,
-                "eval_games": args.eval_games,
-                "adaptive_last_gen": gen,
-                "adaptive_last_reasons": reasons,
-            }
-        )
-        run.write_json("meta.json", meta)
-        log_phase(
-            logger,
-            "ADAPTIVE",
-            f"samples={args.samples} train_steps={args.train_steps} "
-            f"eval_games={args.eval_games} tau={args.tau} | " + "; ".join(reasons),
-        )
 
     # ---- Embedded live dashboard (served in-process by this trainer) ----
     state = None
@@ -704,90 +586,13 @@ def main():
             f"| gen {t_gen:5.1f}s train {t_train:4.1f}s"
         )
 
-        t_eval = t_relative = t_record = 0.0
-        games_to_save = list(sampled_games)
-        if args.eval_every and (gen + 1) % args.eval_every == 0:
-            log_phase(logger, "EVALUATING", f"gen={gen} games={args.eval_games} sims={args.sims}")
-            t_phase = time.time()
-            res = evaluate(
-                net, device, games=args.eval_games, sims=args.sims, c_puct=args.c_puct,
-                eval_batch_size=args.eval_batch_size, max_turns=args.max_turns
-            )
-            t_eval = time.time() - t_phase
-            log_phase(
-                logger,
-                "EVALUATING",
-                f"gen={gen} done seconds={t_eval:.1f} win_rate={res['win_rate']:.3f} "
-                f"wins={res['wins']} losses={res['losses']} draws={res['draws']} "
-                f"unfinished={res.get('unfinished', 0)}",
-            )
-            metric.update(
-                win_rate=round(res["win_rate"], 3),
-                wins=res["wins"],
-                losses_count=res["losses"],
-                draws=res["draws"],
-                unfinished=res.get("unfinished", 0),
-            )
-            msg += f" | win_rate {res['win_rate']:.3f} ({res['wins']}/{res['losses']}/{res['draws']})"
-            torch.save(net.state_dict(), ckpt_dir / "latest.pt")
-            if res["win_rate"] > best_win:
-                best_win = res["win_rate"]
-                torch.save(net.state_dict(), ckpt_dir / "best.pt")
-                msg += " *best*"
-
-        # League: snapshot a past-self, then measure relative skill at the shallow
-        # training depth. Seed an anchor immediately so progress is measured from here.
-        if args.relative_every:
-            if not league_ckpts() or (gen % args.league_every == 0):
-                torch.save(net.state_dict(), league_dir / f"gen_{gen:06d}.pt")
-                extra = league_ckpts()[1:]  # keep anchor (oldest) + most recent league_keep
-                for old in extra[: max(0, len(extra) - args.league_keep)]:
-                    old.unlink(missing_ok=True)
-            if gen % args.relative_every == 0:
-                log_phase(logger, "RELATIVE", f"gen={gen} games={args.relative_games} sims={args.sims}")
-                t_phase = time.time()
-                rel = relative_winrates(gen)
-                t_relative = time.time() - t_phase
-                rel_text = " ".join(f"{k}={v:.3f}" for k, v in rel.items()) if rel else "no_ckpts"
-                log_phase(logger, "RELATIVE", f"gen={gen} done seconds={t_relative:.1f} {rel_text}")
-                metric.update(rel)
-                if rel:
-                    msg += " | self " + " ".join(f"{k.split('_')[-1]}={v:.2f}" for k, v in rel.items())
-
-        # Record replays for the dashboard's live game stream. Rust self-play samples
-        # are cheap enough to capture every gen; Python recorder remains for baseline games.
-        if args.record_games > 0 and args.record_every and (gen % args.record_every == 0):
-            log_phase(
-                logger,
-                "RECORDING",
-                f"gen={gen} games={args.record_games} per_opponent opponents=baseline,net",
-            )
-            t_phase = time.time()
-            recorded_games = record_games(
-                net, device, board=sp.board, n_games=args.record_games,
-                sims=args.sims, c_puct=args.c_puct,
-                eval_batch_size=args.eval_batch_size, max_turns=args.max_turns,
-                opponent="baseline", seed=7000 + gen,
-            )
-            recorded_games += record_games(
-                net, device, board=sp.board, n_games=args.record_games,
-                sims=args.sims, c_puct=args.c_puct,
-                eval_batch_size=args.eval_batch_size, max_turns=args.max_turns,
-                opponent="net", seed=9000 + gen,
-            )
-            games_to_save.extend(recorded_games)
-            t_record = time.time() - t_phase
-            log_phase(logger, "RECORDING", f"gen={gen} done seconds={t_record:.1f} games={len(recorded_games)}")
-
-        if games_to_save or selfplay_summary.get("completed_games"):
-            run.save_games(gen, games_to_save, summary=selfplay_summary)
+        # Self-play already records + serialises real games internally (Rust
+        # generate_selfplay -> sampled_games). No separate eval/relative/recording
+        # passes — those just replay extra games and waste wall-clock.
+        if sampled_games or selfplay_summary.get("completed_games"):
+            run.save_games(gen, sampled_games, summary=selfplay_summary)
             run.prune_games(keep=args.keep_games)
 
-        metric.update(
-            eval_seconds=round(t_eval, 1),
-            relative_seconds=round(t_relative, 1),
-            record_seconds=round(t_record, 1),
-        )
         log_phase(logger, "SAVING", f"gen={gen} checkpoint=state metrics=status")
         t_phase = time.time()
         save_state(gen)  # full resumable state, every generation (atomic write)
@@ -799,7 +604,6 @@ def main():
                 "generation": gen,
                 "running": args.generations == 0 or gen < args.generations - 1,
                 "total_generations": args.generations or None,
-                "best_win_rate": None if best_win < 0 else round(best_win, 3),
                 "last": metric,
             }
         )
@@ -811,14 +615,12 @@ def main():
             "METRICS",
             msg.replace(f"gen {gen:3d} | ", f"gen={gen} "),
         )
-        retune(gen)
 
     run.write_status(
         {
             "generation": args.generations - 1,
             "running": False,
             "total_generations": args.generations,
-            "best_win_rate": None if best_win < 0 else round(best_win, 3),
             "last": metric if "metric" in dir() else None,
         }
     )
