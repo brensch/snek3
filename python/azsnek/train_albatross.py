@@ -97,7 +97,8 @@ def evaluate_albatross(proxy, response, device, cfg: SelfPlayConfig, games, seed
     pool: the 1-ply flood-fill baseline and the CPU UCT agent (stronger)."""
     def proxy_action(batch):
         pol, _ = run_search(batch, proxy, device, cfg.depth, cfg.tau_max, cfg.iters,
-                            cfg.eval_batch_size, return_root_values=True, temp=cfg.tau_max)
+                            cfg.eval_batch_size, return_root_values=True, temp=cfg.tau_max,
+                            draw_value=cfg.draw_value)
         return greedy_actions(pol)[:, 0]
 
     def response_action(batch):
@@ -105,7 +106,8 @@ def evaluate_albatross(proxy, response, device, cfg: SelfPlayConfig, games, seed
         # MLE tau (estimate_opponent_tau) instead of a fixed eval_opp_tau.
         pol, _ = run_search_hetero(batch, proxy, device, cfg.depth,
                                    [cfg.response_tau, eval_opp_tau], cfg.iters,
-                                   cfg.eval_batch_size, temp=eval_opp_tau)
+                                   cfg.eval_batch_size, temp=eval_opp_tau,
+                                   draw_value=cfg.draw_value)
         return greedy_actions(pol)[:, 0]
 
     # Opponent pool: name -> action fn for snake 1.
@@ -135,13 +137,15 @@ def record_albatross_games(proxy, response, device, cfg: SelfPlayConfig, n_games
     Returns a list of {opponent, winner, num_turns, frames} dicts."""
     def proxy_pol(batch):  # [count, 2] greedy moves for both snakes from the proxy LE
         pol, _ = run_search(batch, proxy, device, cfg.depth, cfg.tau_max, cfg.iters,
-                            cfg.eval_batch_size, return_root_values=True, temp=cfg.tau_max)
+                            cfg.eval_batch_size, return_root_values=True, temp=cfg.tau_max,
+                            draw_value=cfg.draw_value)
         return greedy_actions(pol)
 
     def response_a0(batch):  # responder (snake 0) best-response move
         pol, _ = run_search_hetero(batch, proxy, device, cfg.depth,
                                    [cfg.response_tau, cfg.tau_min], cfg.iters,
-                                   cfg.eval_batch_size, temp=cfg.tau_min)
+                                   cfg.eval_batch_size, temp=cfg.tau_min,
+                                   draw_value=cfg.draw_value)
         return greedy_actions(pol)[:, 0]
 
     baseline_a1 = lambda b: b.baseline_actions()[:, 1]
@@ -201,6 +205,8 @@ def build_args():
     ap.add_argument("--tau-min", type=float, default=0.5)
     ap.add_argument("--tau-max", type=float, default=10.0)
     ap.add_argument("--response-tau", type=float, default=12.0)
+    ap.add_argument("--draw-value", type=float, default=-1.0,
+                    help="terminal value of a draw in the equilibrium search; negative kills mutual-suicide draws")
     ap.add_argument("--response-after", type=int, default=30,
                     help="start training the response net after this many proxy generations")
     ap.add_argument("--eval-opp-tau", type=float, default=1.0,
@@ -244,7 +250,7 @@ def main():
         eval_batch_size=args.eval_batch_size, samples_per_gen=args.samples,
         max_turns=args.max_turns, exploration_prob=args.exploration_prob,
         depth=args.depth, iters=args.iters, tau_min=args.tau_min, tau_max=args.tau_max,
-        response_tau=args.response_tau,
+        response_tau=args.response_tau, draw_value=args.draw_value,
     )
 
     run = RunWriter(args.runs_dir, run_id=args.run_id, meta={

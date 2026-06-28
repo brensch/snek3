@@ -29,6 +29,7 @@ def run_search(
     eval_batch_size: int = 8192,
     return_root_values: bool = False,
     temp=None,
+    draw_value: float = 0.0,
 ):
     """Run one equilibrium search over every game in `batch`.
 
@@ -39,8 +40,10 @@ def run_search(
     `temp` conditions a temperature-aware (proxy) value net at the leaves; it may
     be a scalar (all agents) or a per-agent array of length `num_snakes`. Leaf
     observations are laid out `[eval_id, agent]` with agent innermost.
+    `draw_value` is the terminal value of a draw (negative discourages the
+    degenerate mutual-suicide draw equilibrium).
     """
-    obs = batch.prepare_search(depth)  # [M, C, H, W] float32
+    obs = batch.prepare_search(depth, draw_value)  # [M, C, H, W] float32
     if obs.shape[0] == 0:
         # Every root already terminal; backup still needs a (length-0) value array.
         values = np.zeros((0,), dtype=np.float32)
@@ -87,6 +90,7 @@ def run_search_hetero(
     iters: int = 200,
     eval_batch_size: int = 8192,
     temp=None,
+    draw_value: float = 0.0,
 ):
     """Heterogeneous-temperature equilibrium search: per-agent `tau_per_agent`
     (length num_snakes) instead of one shared value, for SBRLE-style play where a
@@ -96,7 +100,7 @@ def run_search_hetero(
     root_values [count, N])`.
     """
     tau_list = [float(t) for t in tau_per_agent]
-    obs = batch.prepare_search(depth)  # [M, C, H, W] float32
+    obs = batch.prepare_search(depth, draw_value)  # [M, C, H, W] float32
     if obs.shape[0] == 0:
         values = np.zeros((0,), dtype=np.float32)
         return batch.backup_search_hetero(values, tau_list, iters)

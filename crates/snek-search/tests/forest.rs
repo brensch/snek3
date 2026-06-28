@@ -15,7 +15,7 @@ fn build_collects_leaf_observations() {
     b.add_snake(&[Point::new(2, 2), Point::new(2, 1)]);
     b.add_snake(&[Point::new(8, 8), Point::new(8, 9)]);
 
-    let forest = Forest::build(std::slice::from_ref(&b), 2);
+    let forest = Forest::build(std::slice::from_ref(&b), 2, 0.0);
     assert!(
         forest.eval_count() > 0,
         "depth-2 search has leaves to evaluate"
@@ -38,7 +38,7 @@ fn policy_is_a_distribution_over_legal_moves() {
     b.add_snake(&[Point::new(5, 5), Point::new(5, 4)]);
     b.add_snake(&[Point::new(1, 1), Point::new(1, 0)]);
 
-    let mut forest = Forest::build(std::slice::from_ref(&b), 1);
+    let mut forest = Forest::build(std::slice::from_ref(&b), 1, 0.0);
     let values = neutral_values(&forest);
     let (policy, root_values) = forest.backup(&values, &[6.0, 6.0], 200);
 
@@ -64,7 +64,7 @@ fn search_avoids_walking_into_a_wall() {
     b.add_snake(&[Point::new(0, 5), Point::new(1, 5)]); // head at x=0
     b.add_snake(&[Point::new(8, 8), Point::new(8, 7)]);
 
-    let mut forest = Forest::build(std::slice::from_ref(&b), 1);
+    let mut forest = Forest::build(std::slice::from_ref(&b), 1, 0.0);
     let values = neutral_values(&forest);
     let (policy, _root_values) = forest.backup(&values, &[8.0, 8.0], 200);
     // Move::Left has index 2.
@@ -80,7 +80,7 @@ fn search_prefers_winning_head_to_head() {
     b.add_snake(&[Point::new(5, 5), Point::new(5, 4), Point::new(5, 3)]);
     b.add_snake(&[Point::new(5, 7), Point::new(5, 8)]);
 
-    let mut forest = Forest::build(std::slice::from_ref(&b), 2);
+    let mut forest = Forest::build(std::slice::from_ref(&b), 2, 0.0);
     let values = neutral_values(&forest);
     let (policy, _root_values) = forest.backup(&values, &[8.0, 8.0], 300);
     let p0 = &policy[0..4];

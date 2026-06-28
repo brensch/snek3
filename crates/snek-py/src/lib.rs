@@ -274,9 +274,12 @@ impl GameBatch {
     /// current state of every game and return the leaf observations the network
     /// must evaluate, shape `[num_evals, channels, height, width]`, float32.
     /// `num_evals` is `(non-terminal leaves across all games) * num_snakes`.
-    /// Pair each `backup_search` with exactly one `prepare_search`.
-    fn prepare_search<'py>(&mut self, py: Python<'py>, depth: u32) -> Bound<'py, PyArray4<f32>> {
-        let forest = Forest::build(&self.boards, depth);
+    /// Pair each `backup_search` with exactly one `prepare_search`. `draw_value`
+    /// is the per-agent terminal value for a draw (0 = neutral; negative
+    /// discourages the degenerate mutual-suicide draw equilibrium).
+    #[pyo3(signature = (depth, draw_value=0.0))]
+    fn prepare_search<'py>(&mut self, py: Python<'py>, depth: u32, draw_value: f32) -> Bound<'py, PyArray4<f32>> {
+        let forest = Forest::build(&self.boards, depth, draw_value);
         let m = forest.eval_count();
         let obs_size = forest.obs_size();
         let (c, h, w) = (forest.channels, forest.height, forest.width);
@@ -970,7 +973,8 @@ fn generate_selfplay<'py>(
 #[pyfunction]
 #[pyo3(signature = (onnx_path, board=11, num_snakes=2, count=512, depth=2, iters=120,
     samples_per_gen=30000, seed=0, exploration_prob=0.15, max_turns=200,
-    tau_min=0.5, tau_max=10.0, eval_chunk=2048, uct_opp_frac=0.0, uct_iters=200))]
+    tau_min=0.5, tau_max=10.0, eval_chunk=2048, uct_opp_frac=0.0, uct_iters=200,
+    draw_value=-1.0))]
 #[allow(clippy::too_many_arguments)]
 fn generate_selfplay_le<'py>(
     py: Python<'py>,
@@ -989,6 +993,7 @@ fn generate_selfplay_le<'py>(
     eval_chunk: usize,
     uct_opp_frac: f64,
     uct_iters: usize,
+    draw_value: f32,
 ) -> PyResult<(
     Bound<'py, PyArray4<f32>>,
     Bound<'py, PyArray2<f32>>,
@@ -1025,7 +1030,7 @@ fn generate_selfplay_le<'py>(
         let mut actions: Vec<Move> = vec![Move::Up; n];
 
         while collected < samples_per_gen {
-            let mut forest = Forest::build(&boards, depth);
+            let mut forest = Forest::build(&boards, depth, draw_value);
             let ec = forest.eval_count();
             if ec == 0 {
                 for g in 0..count {

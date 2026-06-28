@@ -71,6 +71,7 @@ ALB_BATCH      ?= 1024
 ALB_RECORD_GAMES ?= 2   # replays per (agent,opponent) matchup, recorded for the dashboard
 ALB_RECORD_EVERY ?= 1   # record replays every N generations
 ALB_MAX_TURNS  ?= 0     # 0 = games play until a snake dies (no artificial cap)
+ALB_DRAW_VALUE ?= -1.0  # equilibrium-search terminal value of a draw (negative kills suicide-draws)
 
 .DEFAULT_GOAL := help
 .PHONY: help venv build test test-rust test-py bench lint fmt train albatross overnight adaptive ui dashboard serve audit clean clean-all
@@ -136,7 +137,7 @@ albatross: build ## Full Albatross: temperature-conditioned proxy + best-respons
 		--samples $(SAMPLES) --count $(ALB_COUNT) \
 		--depth $(DEPTH) --iters $(ITERS) \
 		--tau-min $(TAU_MIN) --tau-max $(TAU_MAX) \
-		--response-tau $(RESPONSE_TAU) --response-after $(RESPONSE_AFTER) \
+		--response-tau $(RESPONSE_TAU) --response-after $(RESPONSE_AFTER) --draw-value $(ALB_DRAW_VALUE) \
 		--eval-opp-tau $(EVAL_OPP_TAU) --uct-iters $(UCT_ITERS) \
 		--exploration-prob $(EXPLORATION_PROB) --max-turns $(ALB_MAX_TURNS) \
 		--eval-batch-size $(ALB_EVAL_BATCH) \

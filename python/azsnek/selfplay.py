@@ -38,6 +38,7 @@ class SelfPlayConfig:
     tau_min: float = 0.5  # proxy: low end of the per-episode temperature distribution
     tau_max: float = 10.0  # proxy: high end (>= ~10 ~ near-optimal play)
     response_tau: float = 12.0  # response: the rational agent's fixed temperature (tau_R)
+    draw_value: float = -1.0  # terminal value of a draw (negative kills mutual-suicide draws)
 
 
 @dataclass
@@ -239,6 +240,7 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
         policy, root_vals = run_search(
             batch, net, device, cfg.depth, tau, cfg.iters,
             cfg.eval_batch_size, return_root_values=True, temp=tau,
+            draw_value=cfg.draw_value,
         )  # policy [count, N, 4] LE policy; root_vals [count, N] LE expected utility
         obs = batch.encode()
         alive = batch.alive().astype(bool)
@@ -315,7 +317,7 @@ def generate_response(
         # (the weak agent sets the game's character).
         policy, root_vals = run_search_hetero(
             batch, proxy, device, cfg.depth, tau_pair, cfg.iters,
-            cfg.eval_batch_size, temp=tau_opp,
+            cfg.eval_batch_size, temp=tau_opp, draw_value=cfg.draw_value,
         )  # policy [count, 2, 4]; root_vals [count, 2]
         obs = batch.encode()
         alive = batch.alive().astype(bool)

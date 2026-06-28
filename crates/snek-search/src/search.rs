@@ -109,12 +109,13 @@ fn expand_node(
     depth: u32,
     nodes: &mut Vec<Node>,
     eval_boards: &mut Vec<Board>,
+    draw_value: f32,
 ) -> usize {
     if board.is_terminal() {
         let id = nodes.len();
         nodes.push(Node {
             kind: NodeKind::Terminal,
-            value: terminal_values(&board),
+            value: terminal_values_with_draw(&board, draw_value),
         });
         return id;
     }
@@ -151,7 +152,7 @@ fn expand_node(
         }
         let mut child_board = board.clone();
         child_board.step(&mv);
-        let child_id = expand_node(child_board, depth - 1, nodes, eval_boards);
+        let child_id = expand_node(child_board, depth - 1, nodes, eval_boards, draw_value);
         children.push(child_id);
     }
 
@@ -232,7 +233,7 @@ fn backup_node(
 
 impl Forest {
     /// Build the search forest for `boards`, expanding each to `depth` plies.
-    pub fn build(boards: &[Board], depth: u32) -> Forest {
+    pub fn build(boards: &[Board], depth: u32, draw_value: f32) -> Forest {
         let n_snakes = boards.first().map(|b| b.snakes.len()).unwrap_or(0);
         // Observation canvas dims are egocentric (head-centred): 2*side-1.
         let (height, width) = boards
@@ -252,7 +253,7 @@ impl Forest {
         for board in boards {
             let mut nodes = Vec::new();
             let mut eval_boards = Vec::new();
-            let root = expand_node(board.clone(), depth, &mut nodes, &mut eval_boards);
+            let root = expand_node(board.clone(), depth, &mut nodes, &mut eval_boards, draw_value);
             let mut tree = Tree { nodes, root };
             let offset = forest.eval_boards.len();
             offset_eval_ids(&mut tree, offset);
