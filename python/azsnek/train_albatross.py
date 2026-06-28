@@ -205,7 +205,7 @@ def build_args():
     ap.add_argument("--tau-min", type=float, default=0.5)
     ap.add_argument("--tau-max", type=float, default=10.0)
     ap.add_argument("--response-tau", type=float, default=12.0)
-    ap.add_argument("--draw-value", type=float, default=-1.0,
+    ap.add_argument("--draw-value", type=float, default=-0.9,
                     help="terminal value of a draw in the equilibrium search; negative kills mutual-suicide draws")
     ap.add_argument("--response-after", type=int, default=30,
                     help="start training the response net after this many proxy generations")

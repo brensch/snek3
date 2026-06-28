@@ -71,7 +71,7 @@ ALB_BATCH      ?= 1024
 ALB_RECORD_GAMES ?= 2   # replays per (agent,opponent) matchup, recorded for the dashboard
 ALB_RECORD_EVERY ?= 1   # record replays every N generations
 ALB_MAX_TURNS  ?= 0     # 0 = games play until a snake dies (no artificial cap)
-ALB_DRAW_VALUE ?= -1.0  # equilibrium-search terminal value of a draw (negative kills suicide-draws)
+ALB_DRAW_VALUE ?= -0.9  # equilibrium-search terminal value of a draw (negative kills suicide-draws)
 
 .DEFAULT_GOAL := help
 .PHONY: help venv build test test-rust test-py bench lint fmt train albatross overnight adaptive ui dashboard serve audit clean clean-all

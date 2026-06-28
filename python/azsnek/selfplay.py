@@ -38,7 +38,7 @@ class SelfPlayConfig:
     tau_min: float = 0.5  # proxy: low end of the per-episode temperature distribution
     tau_max: float = 10.0  # proxy: high end (>= ~10 ~ near-optimal play)
     response_tau: float = 12.0  # response: the rational agent's fixed temperature (tau_R)
-    draw_value: float = -1.0  # terminal value of a draw (negative kills mutual-suicide draws)
+    draw_value: float = -0.9  # terminal value of a draw (negative kills mutual-suicide draws)
 
 
 @dataclass
