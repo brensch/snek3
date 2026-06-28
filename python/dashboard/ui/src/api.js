@@ -23,6 +23,9 @@ export const api = {
   metrics: (run) => getJSON(`/api/runs/${run}/metrics`).then((d) => d.metrics || []).catch(() => []),
   games: (run) => getJSON(`/api/runs/${run}/games`).then((d) => d.files || []).catch(() => []),
   gameFile: (run, file) => getJSON(`/api/runs/${run}/games/${file}`),
+  // Faithful eval (proxy ONNX + serve search vs the pool): win-rates + real games.
+  evalIndex: (run) => getJSON(`/api/runs/${run}/eval`).then((d) => d.files || []).catch(() => []),
+  evalFile: (run, file) => getJSON(`/api/runs/${run}/eval/${file}`),
 
   // Live: returns the EventSource; caller handles onEvent({type, ...}).
   stream: (onEvent) => {

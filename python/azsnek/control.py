@@ -388,6 +388,37 @@ def build_app(state: RunState, runs_dir: Path, static_dir: Path):
             raise HTTPException(status_code=404, detail="game file not found")
         return json.loads(p.read_text())
 
+    @app.get("/api/runs/{run}/eval")
+    def list_eval(run: str):
+        """Faithful (proxy ONNX + serve search) eval artifacts: per-gen win-rates
+        vs the pool plus a lightweight index of the recorded real games."""
+        edir = safe_run(run) / "eval"
+        if not edir.exists():
+            return {"files": []}
+        files = []
+        for f in sorted(edir.glob("gen_*.json"), reverse=True):
+            try:
+                data = json.loads(f.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            files.append({
+                "file": f.name, "gen": data.get("gen"),
+                "vs_base": data.get("vs_base"), "vs_uct": data.get("vs_uct"),
+                "summary": data.get("summary"),
+                "games": [{"opponent": g.get("opponent"), "winner": g.get("winner"),
+                           "num_turns": g.get("num_turns")} for g in data.get("games", [])],
+            })
+        return {"files": files}
+
+    @app.get("/api/runs/{run}/eval/{name}")
+    def get_eval_file(run: str, name: str):
+        if "/" in name or "\\" in name or ".." in name or not name.endswith(".json"):
+            raise HTTPException(status_code=400, detail="bad file")
+        p = safe_run(run) / "eval" / name
+        if not p.is_file():
+            raise HTTPException(status_code=404, detail="eval file not found")
+        return json.loads(p.read_text())
+
     @app.get("/api/runs/{run}/export")
     def export_run(run: str):
         """Download the whole run dir (metrics, state.pt checkpoint, params,

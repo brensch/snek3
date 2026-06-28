@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api.js";
 import MetricsChart from "./MetricsChart.jsx";
 import GenerationView from "./GenerationView.jsx";
@@ -21,6 +21,7 @@ export default function App() {
   const [liveKeys, setLiveKeys] = useState([]);
   const [lockedKeys, setLockedKeys] = useState([]);
   const [gamesIndex, setGamesIndex] = useState([]);
+  const [evalIndex, setEvalIndex] = useState([]);
   const runRef = useRef(null);
   useEffect(() => { runRef.current = run; }, [run]);
 
@@ -84,14 +85,28 @@ export default function App() {
     return () => { alive = false; clearInterval(id); };
   }, [isLive, run]);
 
-  // Games index (both modes): refetch when the generation advances.
+  // Games + eval indexes (both modes): refetch when the generation advances.
   const gen = status?.generation;
   useEffect(() => {
     if (!run) return;
     let alive = true;
     api.games(run).then((g) => { if (alive) setGamesIndex(g); });
+    api.evalIndex(run).then((e) => { if (alive) setEvalIndex(e); });
     return () => { alive = false; };
   }, [run, gen]);
+
+  // The faithful win-rates live in the async eval artifacts, not metrics.jsonl;
+  // merge them onto each metric row by gen so the Results chart can plot them
+  // (sparse — only the gens that were actually eval'd).
+  const metricsWithEval = useMemo(() => {
+    if (!evalIndex.length) return metrics;
+    const byGen = new Map();
+    for (const e of evalIndex) if (e.gen != null) byGen.set(e.gen, e);
+    return metrics.map((m) => {
+      const e = byGen.get(m.gen);
+      return e ? { ...m, vs_base: e.vs_base, vs_uct: e.vs_uct } : m;
+    });
+  }, [metrics, evalIndex]);
 
   const running = status.running;
 
@@ -131,10 +146,10 @@ export default function App() {
 
           <section className="card">
             <h2>Training metrics</h2>
-            <MetricsChart metrics={metrics} />
+            <MetricsChart metrics={metricsWithEval} />
           </section>
 
-          <GenerationView run={run} gamesIndex={gamesIndex} metrics={metrics} />
+          <GenerationView run={run} gamesIndex={gamesIndex} evalIndex={evalIndex} />
         </main>
       ) : (
         <main className="stacked">

@@ -25,175 +25,30 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import argparse
 import copy
 import json
-import random
+import subprocess
 import time
 from dataclasses import asdict
 from pathlib import Path
 
-import numpy as np
 import snek
 import torch
 
 from .net import AZNet, NetConfig, device_auto
 from .runlog import RunWriter
-from .search import greedy_actions, run_search, run_search_hetero
 from .selfplay import (
     ReplayBuffer,
     SelfPlayConfig,
     generate_proxy,
     generate_response,
 )
-from .train import _setup_ort_env, log_phase, policy_target_stats, setup_logger, train_on_samples
-
-TAU_GRID = np.geomspace(0.25, 20.0, 24).astype(np.float32)
-SAFETY_TURNS = 5000  # hang-guard for uncapped (max_turns=0) eval/recording loops
-
-
-@torch.no_grad()
-def estimate_opponent_tau(proxy, device, obs_hist, act_hist) -> float:
-    """MLE of an opponent's temperature under the proxy: the tau maximizing the
-    log-likelihood of its observed actions. `obs_hist` [T, C, H, W], `act_hist`
-    [T] move indices. Returns the best tau from TAU_GRID. (For single-opponent
-    online use, e.g. serving; the batched eval uses a representative tau.)"""
-    if len(act_hist) == 0:
-        return float(np.sqrt(TAU_GRID[0] * TAU_GRID[-1]))
-    obs_t = torch.from_numpy(np.asarray(obs_hist, dtype=np.float32)).to(device)
-    acts = np.asarray(act_hist, dtype=np.int64)
-    best_tau, best_ll = float(TAU_GRID[0]), -np.inf
-    for tau in TAU_GRID:
-        temp = torch.full((obs_t.shape[0],), float(tau), device=device)
-        logits, _ = proxy(obs_t, temp)
-        logp = torch.log_softmax(logits.float(), dim=1).cpu().numpy()
-        ll = float(logp[np.arange(len(acts)), acts].sum())
-        if ll > best_ll:
-            best_ll, best_tau = ll, float(tau)
-    return best_tau
-
-
-@torch.no_grad()
-def _eval_agent(pol_fn, board, num_snakes, games, seed, cap, uct_iters):
-    """Evaluate one agent (snake 0, moves from `pol_fn(batch) -> [count, N, 4]`)
-    against BOTH pool opponents in a single batch: the first `games` use the
-    flood-fill baseline as snake 1, the next `games` use the CPU UCT agent. The
-    agent's (expensive) search runs once over the whole 2*games batch each step.
-    Returns {'baseline': win_rate, 'uct': win_rate}."""
-    batch = snek.GameBatch(board, board, num_snakes, count=2 * games, seed=seed)
-    steps = 0
-    while not np.all(batch.done()) and steps < cap:
-        a0 = greedy_actions(pol_fn(batch))[:, 0]
-        base = batch.baseline_actions()[:, 1]
-        uct = np.asarray(batch.heuristic_actions(iters=uct_iters, seed=seed))[:, 1]
-        a1 = np.concatenate([base[:games], uct[games:]])
-        batch.step(np.stack([a0, a1], axis=1).astype(np.uint8))
-        steps += 1
-    w = batch.winners()
-    done = batch.done().astype(bool)
-
-    def wr(sl):
-        ww, dd = w[sl], done[sl]
-        wins = int(np.sum(ww == 0)); draws = int(np.sum(dd & (ww == -1))); dec = int(np.sum(dd))
-        return (wins + 0.5 * draws) / dec if dec else 0.0
-
-    return {"baseline": wr(slice(0, games)), "uct": wr(slice(games, 2 * games))}
-
-
-@torch.no_grad()
-def evaluate_albatross(proxy, response, device, cfg: SelfPlayConfig, games, seed,
-                       eval_opp_tau, uct_iters):
-    """Win rate of the proxy (near-optimal tau) and the response (best-responding
-    at tau_R to an assumed-weak opponent at `eval_opp_tau`) against the pool
-    (flood-fill baseline + CPU UCT). Each agent plays both opponents in one
-    batched pass so the search is shared (lets `games` be large for low noise)."""
-    cap = cfg.max_turns if cfg.max_turns > 0 else SAFETY_TURNS
-
-    def proxy_pol(batch):
-        pol, _ = run_search(batch, proxy, device, cfg.depth, cfg.tau_max, cfg.iters,
-                            cfg.eval_batch_size, return_root_values=True, temp=cfg.tau_max,
-                            draw_value=cfg.draw_value)
-        return pol
-
-    def response_pol(batch):
-        # Leaf values from proxy; for serving, use per-opponent MLE tau
-        # (estimate_opponent_tau) instead of the fixed eval_opp_tau here.
-        pol, _ = run_search_hetero(batch, proxy, device, cfg.depth,
-                                   [cfg.response_tau, eval_opp_tau], cfg.iters,
-                                   cfg.eval_batch_size, temp=eval_opp_tau,
-                                   draw_value=cfg.draw_value)
-        return pol
-
-    pa = _eval_agent(proxy_pol, cfg.board, cfg.num_snakes, games, seed, cap, uct_iters)
-    out = {"proxy_vs_baseline": pa["baseline"], "proxy_vs_uct": pa["uct"]}
-    if response is not None:
-        ra = _eval_agent(response_pol, cfg.board, cfg.num_snakes, games, seed + 1, cap, uct_iters)
-        out["response_vs_baseline"] = ra["baseline"]
-        out["response_vs_uct"] = ra["uct"]
-    return out
-
-
-@torch.no_grad()
-def record_albatross_games(proxy, response, device, cfg: SelfPlayConfig, n_games, seed, uct_iters):
-    """Record replay games for the dashboard, snake 0 = first named player.
-    Matchups (each a joint move fn -> [count, 2] actions): proxy vs {proxy,
-    baseline, uct} and, when the response exists, response vs {proxy, baseline,
-    uct}. proxy plays the LE search (near-optimal tau); response plays the
-    heterogeneous-tau best-response; baseline/uct are the fixed CPU opponents.
-    Returns a list of {opponent, winner, num_turns, frames} dicts."""
-    def proxy_pol(batch):  # [count, 2] greedy moves for both snakes from the proxy LE
-        pol, _ = run_search(batch, proxy, device, cfg.depth, cfg.tau_max, cfg.iters,
-                            cfg.eval_batch_size, return_root_values=True, temp=cfg.tau_max,
-                            draw_value=cfg.draw_value)
-        return greedy_actions(pol)
-
-    def response_a0(batch):  # responder (snake 0) best-response move
-        pol, _ = run_search_hetero(batch, proxy, device, cfg.depth,
-                                   [cfg.response_tau, cfg.tau_min], cfg.iters,
-                                   cfg.eval_batch_size, temp=cfg.tau_min,
-                                   draw_value=cfg.draw_value)
-        return greedy_actions(pol)[:, 0]
-
-    baseline_a1 = lambda b: b.baseline_actions()[:, 1]
-    uct_a1 = lambda b: np.asarray(b.heuristic_actions(iters=uct_iters, seed=seed))[:, 1]
-    j = lambda a0, a1: np.stack([a0, a1], axis=1).astype(np.uint8)
-
-    matchups = [
-        ("proxy-v-proxy", lambda b: proxy_pol(b).astype(np.uint8)),
-        ("proxy-v-baseline", lambda b: j(proxy_pol(b)[:, 0], baseline_a1(b))),
-        ("proxy-v-uct", lambda b: j(proxy_pol(b)[:, 0], uct_a1(b))),
-    ]
-    if response is not None:
-        matchups += [
-            ("response-v-proxy", lambda b: j(response_a0(b), proxy_pol(b)[:, 1])),
-            ("response-v-baseline", lambda b: j(response_a0(b), baseline_a1(b))),
-            ("response-v-uct", lambda b: j(response_a0(b), uct_a1(b))),
-        ]
-
-    games = []
-    for label, joint_fn in matchups:
-        batch = snek.GameBatch(cfg.board, cfg.board, cfg.num_snakes, count=n_games, seed=seed)
-        frames = [[] for _ in range(n_games)]
-        term = [False] * n_games
-        steps = 0
-        cap = cfg.max_turns if cfg.max_turns > 0 else SAFETY_TURNS
-        while steps < cap:
-            done = batch.done().astype(bool)
-            for g in range(n_games):
-                if not term[g]:
-                    frames[g].append(json.loads(batch.snapshot(g)))
-                    if done[g]:
-                        term[g] = True
-            if all(term):
-                break
-            batch.step(joint_fn(batch))
-            steps += 1
-        winners = batch.winners()
-        for g in range(n_games):
-            games.append({
-                "opponent": label,
-                "winner": int(winners[g]),
-                "num_turns": len(frames[g]),
-                "frames": frames[g],
-            })
-    return games
+from .train import (
+    _setup_ort_env,
+    export_onnx,
+    log_phase,
+    policy_target_stats,
+    setup_logger,
+    train_on_samples,
+)
 
 
 def build_args():
@@ -232,13 +87,22 @@ def build_args():
     ap.add_argument("--batch-size", type=int, default=2048)
     ap.add_argument("--buffer-size", type=int, default=500000)
     ap.add_argument("--eval-every", type=int, default=5)
-    ap.add_argument("--eval-games", type=int, default=16)
+    ap.add_argument("--eval-games", type=int, default=6,
+                    help="games per opponent for the faithful eval (2 opponents, so "
+                         "2x this many CPU games per eval); kept small as each game "
+                         "is a full CPU search and the eval runs every --eval-every gens")
+    ap.add_argument("--eval-workers", type=int, default=0,
+                    help="parallel CPU games for the faithful eval (0 = half the "
+                         "cores; raise to use more CPU, lower to use less)")
     ap.add_argument("--record-games", type=int, default=4,
-                    help="replay games to record per (agent,opponent) matchup; 0 disables")
+                    help="self-play games to snapshot per phase (proxy+response) for replays; 0 disables")
     ap.add_argument("--record-every", type=int, default=1,
                     help="record replays every N generations")
     ap.add_argument("--keep-games", type=int, default=200,
                     help="keep replays for at most this many recent generations")
+    ap.add_argument("--eval-bin", type=str, default=None,
+                    help="path to the Rust snek-eval binary (default: auto-detect "
+                         "crates/snek-server/target/{release,debug}/snek-eval)")
     ap.add_argument("--runs-dir", type=str, default="runs")
     ap.add_argument("--run-id", type=str, default=None)
     ap.add_argument("--fresh", action="store_true")
@@ -248,6 +112,74 @@ def build_args():
     ap.add_argument("--serve-host", type=str, default="0.0.0.0")
     ap.add_argument("--serve-port", type=int, default=8050)
     return ap.parse_args()
+
+
+def _find_eval_bin(a):
+    """Locate the Rust `snek-eval` binary (explicit --eval-bin, else the release
+    then debug build dir). Returns a path string or None if not built."""
+    if a.eval_bin:
+        return a.eval_bin if Path(a.eval_bin).exists() else None
+    base = Path(__file__).resolve().parents[2] / "crates" / "snek-server" / "target"
+    for profile in ("release", "debug"):
+        cand = base / profile / "snek-eval"
+        if cand.exists():
+            return str(cand)
+    return None
+
+
+def _spawn_eval(run, proxy, cfg, spcfg, device, gen, games, uct_iters, eval_bin, prev_proc, logger, workers=0):
+    """Export the proxy to ONNX and launch `snek-eval` as a non-blocking, CPU-only
+    subprocess that plays the *deployed* agent (proxy ONNX + serve_move search) vs
+    the fixed pool and writes runs/<id>/eval/gen_XXXX.json. Skips (returning the
+    previous handle) if a prior eval is still running or the binary is missing.
+    Returns the live subprocess handle (or prev_proc when skipped)."""
+    if eval_bin is None:
+        return prev_proc
+    if prev_proc is not None and prev_proc.poll() is None:
+        log_phase(logger, "EVAL", f"gen={gen} skip: previous eval still running")
+        return prev_proc
+
+    # Export the current proxy weights (eval mode, restored after) atomically.
+    onnx_path = run.eval_dir / "model.onnx"
+    tmp_onnx = run.eval_dir / "model.onnx.tmp"
+    was_training = proxy.training
+    proxy.eval()
+    with torch.no_grad():
+        export_onnx(proxy, cfg.channels, spcfg.board, device, str(tmp_onnx))
+    if was_training:
+        proxy.train()
+    os.replace(tmp_onnx, onnx_path)
+
+    out_path = run.eval_artifact_path(gen)
+    env = {**os.environ}  # inherits ORT_DYLIB_PATH/LD_LIBRARY_PATH from _setup_ort_env
+    env["SNEK_CPU_ONLY"] = "1"  # don't steal the GPU the trainer is using
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    env.update({
+        "SNEK_EVAL_GEN": str(gen),
+        "SNEK_EVAL_GAMES": str(games),
+        "SNEK_EVAL_SEED": str(7000 + gen),
+        "SNEK_UCT_ITERS": str(uct_iters),
+        "SNEK_BOARD": str(spcfg.board),
+        "SNEK_SNAKES": str(spcfg.num_snakes),
+        "SNEK_DEPTH": str(spcfg.depth),
+        "SNEK_ITERS": str(spcfg.iters),
+        "SNEK_RESPONSE_TAU": str(spcfg.response_tau),
+        "SNEK_DRAW_VALUE": str(spcfg.draw_value),
+        "SNEK_EVAL_CHUNK": str(spcfg.eval_batch_size),
+        "SNEK_EVAL_MAXTURNS": str(spcfg.max_turns),
+    })
+    # Cap CPU usage so the eval doesn't pin every core. Each worker uses a
+    # single-intra-op-thread ONNX session, so the worker count bounds the load.
+    # workers<=0 lets the Rust binary pick its default (half the cores).
+    if workers and workers > 0:
+        env["SNEK_EVAL_WORKERS"] = str(workers)
+    logf = (run.eval_dir / "eval.log").open("a")
+    proc = subprocess.Popen([eval_bin, str(onnx_path), str(out_path)],
+                            env=env, stdout=logf, stderr=subprocess.STDOUT)
+    run.prune_eval(keep=200)
+    log_phase(logger, "EVAL", f"gen={gen} launched snek-eval ({games} games/opp, CPU) "
+                              f"-> {out_path.name}")
+    return proc
 
 
 def train_one_run(a, state, device, logger) -> None:
@@ -334,6 +266,11 @@ def train_one_run(a, state, device, logger) -> None:
     cuda = device.type == "cuda"
     gen = start_gen
     infinite = a.generations <= 0
+    eval_bin = _find_eval_bin(a)
+    eval_proc = None  # most recent async snek-eval subprocess (skip-if-busy)
+    if eval_bin is None:
+        log_phase(logger, "EVAL", "snek-eval binary not found; per-gen eval disabled "
+                                  "(build it: make api-build)")
     while (infinite or gen < a.generations) and not (
             state and (state.stopping or state.pending_run or state.shutdown)):
         # pause gate: hold at the gen boundary while paused (server stays live).
@@ -363,6 +300,11 @@ def train_one_run(a, state, device, logger) -> None:
             eval_every, eval_games = a.eval_every, a.eval_games
             record_games, record_every = a.record_games, a.record_every
 
+        # Replays are sampled straight from this gen's self-play (no extra games);
+        # `record` slots per phase, only on recording gens.
+        do_record = record_games > 0 and record_every and gen % record_every == 0
+        rec_n = record_games if do_record else 0
+
         t0 = time.time()
         if cuda:
             torch.cuda.reset_peak_memory_stats()
@@ -372,7 +314,7 @@ def train_one_run(a, state, device, logger) -> None:
             log_phase(logger, "PLAYING", f"gen={_g} proxy {c:,}/{t:,} samples")
             if state:
                 state.set_progress("proxy self-play", c, t, _g)
-        ps = generate_proxy(proxy, device, spcfg, seed=1000 + gen, progress_cb=prog)
+        ps = generate_proxy(proxy, device, spcfg, seed=1000 + gen, progress_cb=prog, record=rec_n)
         proxy_buf.add(ps)
         log_phase(logger, "TRAINING", f"gen={gen} proxy steps={train_steps} buffer={len(proxy_buf):,}")
         if state:
@@ -385,13 +327,14 @@ def train_one_run(a, state, device, logger) -> None:
         # --- response self-play + train (after warmup) ---
         train_response = gen >= a.response_after and a.num_snakes == 2
         rstats = {}
+        rs = None
         if train_response:
             log_phase(logger, "PLAYING", f"gen={gen} response self-play (best-response vs proxy)")
             def rprog(c, t, _g=gen):
                 log_phase(logger, "PLAYING", f"gen={_g} response {c:,}/{t:,} samples")
                 if state:
                     state.set_progress("response self-play", c, t, _g)
-            rs = generate_response(response, proxy, device, spcfg, seed=5000 + gen, progress_cb=rprog)
+            rs = generate_response(response, proxy, device, spcfg, seed=5000 + gen, progress_cb=rprog, record=rec_n)
             response_buf.add(rs)
             log_phase(logger, "TRAINING", f"gen={gen} response steps={train_steps}")
             rstats = train_on_samples(response, response_opt, response_buf.dataset(), device,
@@ -433,27 +376,21 @@ def train_one_run(a, state, device, logger) -> None:
         if cuda:
             metric["gpu_peak_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
 
-        # --- eval ---
-        if eval_every and gen % eval_every == 0:
-            log_phase(logger, "EVALUATING", f"gen={gen} vs pool (baseline, UCT) games={eval_games}")
-            if state:
-                state.set_progress("evaluating", 0, 1, gen)
-            ev = evaluate_albatross(
-                proxy, response if train_response else None, device, spcfg,
-                games=eval_games, seed=7000 + gen, eval_opp_tau=a.eval_opp_tau,
-                uct_iters=a.uct_iters)
-            metric.update({k: round(v, 4) for k, v in ev.items()})
+        # --- self-play replays for the dashboard (sampled from the games above) ---
+        if do_record:
+            replays = (ps.replays or []) + (rs.replays if rs else [])
+            if replays:
+                run.save_games(gen, replays)
+                run.prune_games(keep=a.keep_games)
 
-        # --- record replays for the dashboard ---
-        if record_games > 0 and record_every and gen % record_every == 0:
-            log_phase(logger, "RECORDING", f"gen={gen} games={record_games}/matchup")
-            if state:
-                state.set_progress("recording", 0, 1, gen)
-            recorded = record_albatross_games(
-                proxy, response if train_response else None, device, spcfg,
-                n_games=record_games, seed=9000 + gen, uct_iters=a.uct_iters)
-            run.save_games(gen, recorded)
-            run.prune_games(keep=a.keep_games)
+        # --- async faithful eval (proxy ONNX + serve search vs the pool) ---
+        # Runs out of band on idle CPU while the next gen trains on the GPU; the
+        # Rust binary writes win-rates + real games to runs/<id>/eval/.
+        if eval_every and gen % eval_every == 0:
+            eval_proc = _spawn_eval(run, proxy, cfg, spcfg, device, gen,
+                                    games=eval_games, uct_iters=a.uct_iters,
+                                    eval_bin=eval_bin, prev_proc=eval_proc, logger=logger,
+                                    workers=a.eval_workers)
 
         log_phase(logger, "GEN", " ".join(f"{k}={v}" for k, v in metric.items()))
         run.append_metric(metric)

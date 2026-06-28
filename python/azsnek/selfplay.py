@@ -8,6 +8,7 @@ that game's recorded positions.
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -54,6 +55,7 @@ class Samples:
     fwd_seconds: float = 0.0  # time in net forward (GPU)
     search_seconds: float = 0.0  # time in Rust tree-build + equilibrium backup (CPU)
     inferences: int = 0  # leaf positions evaluated by the net
+    replays: list | None = None  # sampled finished games (frame sequences) for the dashboard
 
 
 class ReplayBuffer:
@@ -213,7 +215,7 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
 
 @torch.no_grad()
 def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int,
-                   progress_cb=None) -> Samples:
+                   progress_cb=None, record: int = 0) -> Samples:
     """Albatross PROXY self-play. A per-generation temperature `tau` is sampled
     from [tau_min, tau_max]; all agents play the logit equilibrium at `tau`
     (fixed-depth equilibrium search), and the net is conditioned on `tau`. Both
@@ -240,6 +242,13 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
     slot_turns = np.zeros(cfg.count, dtype=np.int64)  # per-slot turns since (re)start
     next_report = 0.25
 
+    # Free replay recording: snapshot the first `record` slots until each finishes
+    # its FIRST game, capturing the actual self-play games (no extra rollouts).
+    rec = min(record, cfg.count)
+    rec_frames: list[list[dict]] = [[] for _ in range(rec)]
+    rec_done = [False] * rec
+    replays: list[dict] = []
+
     while collected < cfg.samples_per_gen:
         if progress_cb is not None and collected >= next_report * cfg.samples_per_gen:
             progress_cb(collected, cfg.samples_per_gen)
@@ -262,6 +271,11 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
             out_temp.append(np.full(int(live.sum()), tau, dtype=np.float32))
             collected += int(live.sum())
 
+        # Snapshot the pre-step state for slots still recording their first game.
+        for s in range(rec):
+            if not rec_done[s]:
+                rec_frames[s].append(json.loads(batch.snapshot(s)))
+
         play = mix_uniform(policy, cfg.exploration_prob)
         actions = sample_actions(play, rng)
         batch.step(actions)
@@ -273,6 +287,13 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
             game_len_total += int(slot_turns[done].sum())  # lengths of just-finished games
             draws_total += int(np.sum(done & (w == -1)))
             slot_turns[done] = 0  # reset counters for the fresh games reset_done starts
+            # Finalize any recorded slot that just finished (capture terminal frame).
+            for s in range(rec):
+                if not rec_done[s] and done[s]:
+                    rec_frames[s].append(json.loads(batch.snapshot(s)))
+                    replays.append({"opponent": "proxy", "winner": int(w[s]),
+                                    "num_turns": len(rec_frames[s]), "frames": rec_frames[s]})
+                    rec_done[s] = True
         batch.reset_done()
 
     perf = perf_snapshot()
@@ -288,6 +309,7 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
         fwd_seconds=perf["fwd_s"],
         search_seconds=perf["search_s"],
         inferences=perf["infer"],
+        replays=replays,
     )
 
 
@@ -299,6 +321,7 @@ def generate_response(
     cfg: SelfPlayConfig,
     seed: int,
     progress_cb=None,
+    record: int = 0,
 ) -> Samples:
     """Albatross RESPONSE self-play (2-player). Agent 0 is the rational responder
     at fixed temperature `response_tau` (tau_R); agent 1 is a weak opponent at a
@@ -324,6 +347,13 @@ def generate_response(
     games_total = 0
     next_report = 0.25
 
+    # Free replay recording (best-response responder vs weak opponent — the
+    # closest thing to the deployed agent that self-play produces for free).
+    rec = min(record, cfg.count)
+    rec_frames: list[list[dict]] = [[] for _ in range(rec)]
+    rec_done = [False] * rec
+    replays: list[dict] = []
+
     while collected < cfg.samples_per_gen:
         if progress_cb is not None and collected >= next_report * cfg.samples_per_gen:
             progress_cb(collected, cfg.samples_per_gen)
@@ -346,10 +376,23 @@ def generate_response(
                 out_temp.append(np.full(1, tau_opp, dtype=np.float32))
                 collected += 1
 
+        for s in range(rec):
+            if not rec_done[s]:
+                rec_frames[s].append(json.loads(batch.snapshot(s)))
+
         play = mix_uniform(policy, cfg.exploration_prob)
         actions = sample_actions(play, rng)
         batch.step(actions)
-        games_total += int(np.sum(batch.done()))
+        done = batch.done().astype(bool)
+        games_total += int(done.sum())
+        if done.any():
+            w = batch.winners()
+            for s in range(rec):
+                if not rec_done[s] and done[s]:
+                    rec_frames[s].append(json.loads(batch.snapshot(s)))
+                    replays.append({"opponent": "response", "winner": int(w[s]),
+                                    "num_turns": len(rec_frames[s]), "frames": rec_frames[s]})
+                    rec_done[s] = True
         batch.reset_done()
 
     return Samples(
@@ -359,4 +402,5 @@ def generate_response(
         temp=np.concatenate(out_temp, axis=0),
         turns=turns_total,
         games=games_total,
+        replays=replays,
     )

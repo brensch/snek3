@@ -17,6 +17,9 @@ RUNS_DIR    ?= runs
 PORT        ?= 8050
 SERVE_PORT  ?= 8000
 CKPT        ?=
+# Pure-Rust /move API (Albatross-faithful serving): exported model + checkpoint
+MODEL       ?= model.onnx
+CHECKPOINT  ?= runs/albatross-resp0/state.pt
 
 # Training defaults (all overridable)
 GENERATIONS ?= 100000
@@ -88,7 +91,7 @@ ALB_GENERATIONS ?= 0    # 0 = run forever until stopped via the dashboard/contro
 ALB_SERVE_PORT ?= 8050  # embedded live dashboard + control API port (0.0.0.0)
 
 .DEFAULT_GOAL := help
-.PHONY: help venv build test test-rust test-py bench lint fmt train albatross overnight adaptive ui dashboard serve audit clean clean-all
+.PHONY: help venv build test test-rust test-py bench lint fmt train albatross overnight adaptive ui dashboard serve export-model api-build api api-docker audit clean clean-all
 
 help: ## Show this help
 	@echo "snek3 targets:"
@@ -196,6 +199,20 @@ dashboard: ## Serve the live training dashboard on PORT (default 8050)
 serve: build ## Run the Battlesnake server (set CKPT=path and matching FILTERS/BLOCKS)
 	$(if $(CKPT),SNEK_CKPT=$(CKPT) ,)SNEK_FILTERS=$(FILTERS) SNEK_BLOCKS=$(BLOCKS) \
 		$(UVICORN) server.main:app --host 0.0.0.0 --port $(SERVE_PORT)
+
+export-model: build ## Export the Albatross proxy net CHECKPOINT -> MODEL (.onnx) for the Rust API
+	PYTHONPATH=python $(PY) scripts/export_model.py $(CHECKPOINT) $(MODEL)
+
+api-build: ## Compile the pure-Rust /move API server (release)
+	cargo build --release --manifest-path crates/snek-server/Cargo.toml
+
+api: api-build ## Run the Rust /move API locally (needs `make export-model`; uses the venv onnxruntime). Override SERVE_PORT, SNEK_*
+	ORT_DYLIB_PATH="$(shell ls $(VENV)/lib/python*/site-packages/onnxruntime/capi/libonnxruntime.so* 2>/dev/null | head -1)" \
+	SNEK_MODEL=$(MODEL) SNEK_PORT=$(SERVE_PORT) \
+	./crates/snek-server/target/release/snek-server
+
+api-docker: ## Build the CPU-only Docker image for the Rust API (expects MODEL in repo root)
+	docker build -f deploy/server.Dockerfile -t snek-api .
 
 audit: ## Run the full end-to-end audit script
 	bash scripts/audit.sh

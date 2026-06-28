@@ -12,12 +12,36 @@ pub struct Net {
 
 impl Net {
     /// Load an ONNX model, preferring CUDA (silently falls back to CPU if the
-    /// CUDA execution provider is unavailable).
+    /// CUDA execution provider is unavailable). Set `SNEK_CPU_ONLY=1` to force the
+    /// CPU execution provider — used by the offline evaluator so it runs on
+    /// otherwise-idle CPU (the deployment target) instead of stealing the GPU
+    /// that the trainer is using.
     pub fn load(path: &str) -> ort::Result<Net> {
-        let cuda = ort::execution_providers::CUDAExecutionProvider::default();
-        let session = ort::session::Session::builder()?
-            .with_execution_providers([cuda.build()])?
-            .commit_from_file(path)?;
+        let cpu_only = std::env::var("SNEK_CPU_ONLY")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false);
+        let builder = ort::session::Session::builder()?;
+        let builder = if cpu_only {
+            let cpu = ort::execution_providers::CPUExecutionProvider::default();
+            // The evaluator runs many worker threads, each with its own `Net`. If
+            // every session also spawned an intra-op thread pool sized to the core
+            // count we'd massively oversubscribe the CPU (every core pinned at
+            // 100%). Default each CPU session to a single intra-op thread so the
+            // parallelism comes purely from the worker count; override with
+            // SNEK_ORT_THREADS if a session should fan out internally.
+            let threads = std::env::var("SNEK_ORT_THREADS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n >= 1)
+                .unwrap_or(1);
+            builder
+                .with_intra_threads(threads)?
+                .with_execution_providers([cpu.build()])?
+        } else {
+            let cuda = ort::execution_providers::CUDAExecutionProvider::default();
+            builder.with_execution_providers([cuda.build()])?
+        };
+        let session = builder.commit_from_file(path)?;
         Ok(Net { session })
     }
 

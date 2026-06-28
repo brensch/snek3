@@ -4,7 +4,7 @@ import MiniBoard from "./MiniBoard.jsx";
 
 // Pick a generation (table) and show ALL its recorded games at once as a grid
 // of mini-boards playing together on a shared clock.
-export default function GenerationView({ run, gamesIndex, metrics }) {
+export default function GenerationView({ run, gamesIndex, evalIndex = [] }) {
   const [picked, setPicked] = useState(null); // file the user clicked (null = follow latest)
   const [genData, setGenData] = useState(null);
   const [playing, setPlaying] = useState(true);
@@ -18,33 +18,42 @@ export default function GenerationView({ run, gamesIndex, metrics }) {
 
   const latestFile = gamesIndex[0] ? gamesIndex[0].file : null;
   const activeFile = picked && gamesIndex.some((f) => f.file === picked) ? picked : latestFile;
+  const activeGen = gamesIndex.find((f) => f.file === activeFile)?.gen;
+  // The faithful eval artifact for the same generation (real games vs the pool),
+  // if one exists — eval runs less often than self-play recording.
+  const evalFile = activeGen != null ? evalIndex.find((e) => e.gen === activeGen)?.file : null;
 
   useEffect(() => {
     if (!activeFile) return;
     let alive = true;
+    const cacheKey = `${activeFile}|${evalFile || ""}`;
     const load = async () => {
-      let data = cache.current.get(activeFile);
+      let data = cache.current.get(cacheKey);
       if (!data) {
-        data = await api.gameFile(run, activeFile);
-        cache.current.set(activeFile, data);
+        const self = await api.gameFile(run, activeFile);
+        let evalGames = [];
+        if (evalFile) {
+          try {
+            const ev = await api.evalFile(run, evalFile);
+            evalGames = ev.games || [];
+          } catch (_) { /* eval still writing or absent */ }
+        }
+        // Self-play replays first, then the real eval games (tagged vs-baseline /
+        // vs-uct) — all flow through the existing matchup filter + board grid.
+        data = { ...self, games: [...(self.games || []), ...evalGames] };
+        cache.current.set(cacheKey, data);
       }
       if (alive) setGenData(data);
     };
     load();
     return () => { alive = false; };
-  }, [run, activeFile]);
+  }, [run, activeFile, evalFile]);
 
   useEffect(() => {
     if (!playing) return;
     const id = setInterval(() => setTick((t) => t + 1), 1000 / fps);
     return () => clearInterval(id);
   }, [playing, fps]);
-
-  const winRateByGen = useMemo(() => {
-    const m = new Map();
-    for (const x of metrics) if (x.win_rate != null) m.set(x.gen, x.win_rate);
-    return m;
-  }, [metrics]);
 
   const summarize = (games) => {
     let w = 0, l = 0, d = 0;
@@ -76,8 +85,14 @@ export default function GenerationView({ run, gamesIndex, metrics }) {
       : games.filter((g) => (g.opponent || "baseline") === matchFilter);
   }, [genData, matchFilter]);
 
-  const prettyMatch = (k) =>
-    k === "net" ? "self-play" : k === "baseline" ? "net vs baseline" : k.replace(/-v-/g, " vs ");
+  const prettyMatch = (k) => {
+    const named = {
+      net: "self-play", baseline: "net vs baseline",
+      proxy: "proxy self-play", response: "response self-play",
+      "vs-baseline": "real vs baseline", "vs-uct": "real vs UCT",
+    };
+    return named[k] || k.replace(/-v-/g, " vs ");
+  };
 
   const selfplay = genData?.selfplay;
   const maxBucket = Math.max(1, ...(selfplay?.length_histogram || []).map((b) => b.count || 0));
@@ -122,17 +137,15 @@ export default function GenerationView({ run, gamesIndex, metrics }) {
       <div className="gen-layout">
         <div className="gentable">
           <table>
-            <thead><tr><th>gen</th><th>games</th><th>W/L/D</th><th>win%</th></tr></thead>
+            <thead><tr><th>gen</th><th>games</th><th>W/L/D</th></tr></thead>
             <tbody>
               {gamesIndex.map((f) => {
-                const wr = winRateByGen.get(f.gen);
                 const active = genData && f.file === activeFile;
                 return (
                   <tr key={f.file} className={active ? "active" : ""} onClick={() => setPicked(f.file)}>
                     <td>{f.gen}</td>
                     <td>{f.games.length}</td>
                     <td className="muted">{summarizeSelfplay(f.selfplay, f.games)}</td>
-                    <td style={{ textAlign: "right" }}>{wr != null ? wr.toFixed(2) : "—"}</td>
                   </tr>
                 );
               })}

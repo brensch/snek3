@@ -4,17 +4,22 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 // the chart's y-treatment (`kind`):
 //   unit   -> value on a fixed 0..1 axis (win rates, draw rate)
 //   shared -> value / (max of this chart's series)  (losses share a scale)
-//   div    -> value / series.div, clamped 0..1 (mixed scales; tooltip has real)
+//   series -> value / (this series' own max), so each series peaks at the top
+//             (mixed scales; tooltip shows the real value)
 // Only series present in the run are drawn, so legacy MCTS runs still render.
 const CHARTS = [
   {
     title: "Results — win rate (0–1)",
     kind: "unit",
     series: [
-      { key: "response_vs_baseline", label: "response vs baseline", color: "#34d399" },
-      { key: "response_vs_uct", label: "response vs UCT", color: "#22d3ee" },
-      { key: "proxy_vs_baseline", label: "proxy vs baseline", color: "#38bdf8", dash: true },
-      { key: "proxy_vs_uct", label: "proxy vs UCT", color: "#a3e635", dash: true },
+      // Faithful eval: deployed agent (proxy ONNX + serve search) vs the pool.
+      { key: "vs_base", label: "vs baseline", color: "#34d399" },
+      { key: "vs_uct", label: "vs UCT", color: "#22d3ee" },
+      // Legacy keys (older runs that recorded win-rate in metrics.jsonl).
+      { key: "response_vs_baseline", label: "response vs baseline", color: "#38bdf8", dash: true },
+      { key: "response_vs_uct", label: "response vs UCT", color: "#a3e635", dash: true },
+      { key: "proxy_vs_baseline", label: "proxy vs baseline", color: "#0ea5e9", dash: true },
+      { key: "proxy_vs_uct", label: "proxy vs UCT", color: "#84cc16", dash: true },
       { key: "win_rate", label: "win rate", color: "#34d399" }, // legacy
     ],
   },
@@ -32,25 +37,25 @@ const CHARTS = [
   },
   {
     title: "Game shape / degeneracy",
-    kind: "div",
+    kind: "series",
     series: [
-      { key: "proxy_draw_rate", label: "draw rate ⚠ (0–1)", color: "#f87171", div: 1 },
-      { key: "target_entropy", label: "target entropy ⚠ (÷1.4)", color: "#ec4899", div: 1.4 },
-      { key: "proxy_game_len", label: "avg game length (÷200)", color: "#c084fc", div: 200 },
-      { key: "proxy_mean_turns", label: "turn-activity ratio (÷200)", color: "#7c6f9c", div: 200, dash: true },
+      { key: "proxy_draw_rate", label: "draw rate ⚠", color: "#f87171" },
+      { key: "target_entropy", label: "target entropy ⚠", color: "#ec4899" },
+      { key: "proxy_game_len", label: "avg game length", color: "#c084fc" },
+      { key: "proxy_mean_turns", label: "turn-activity ratio", color: "#7c6f9c", dash: true },
     ],
   },
   {
     title: "Throughput / utilization",
-    kind: "div",
+    kind: "series",
     series: [
-      { key: "proxy_games", label: "games finished (÷100)", color: "#f472b6", div: 100 },
-      { key: "selfplay_gpu_pct", label: "self-play GPU % (÷100)", color: "#34d399", div: 100 },
-      { key: "gpu_busy_pct", label: "GPU busy % (÷100)", color: "#34d399", div: 100 }, // legacy
-      { key: "inference_per_sec", label: "inferences/sec (÷30k)", color: "#60a5fa", div: 30000 },
-      { key: "samples_per_sec", label: "samples/sec (÷500)", color: "#f59e0b", div: 500 },
-      { key: "gpu_peak_gb", label: "GPU peak GB (÷16)", color: "#a78bfa", div: 16 },
-      { key: "gen_seconds", label: "gen seconds (÷300)", color: "#94a3b8", div: 300 },
+      { key: "proxy_games", label: "games finished", color: "#f472b6" },
+      { key: "selfplay_gpu_pct", label: "self-play GPU %", color: "#34d399" },
+      { key: "gpu_busy_pct", label: "GPU busy %", color: "#34d399" }, // legacy
+      { key: "inference_per_sec", label: "inferences/sec", color: "#60a5fa" },
+      { key: "samples_per_sec", label: "samples/sec", color: "#f59e0b" },
+      { key: "gpu_peak_gb", label: "GPU peak GB", color: "#a78bfa" },
+      { key: "gen_seconds", label: "gen seconds", color: "#94a3b8" },
     ],
   },
 ];
@@ -75,15 +80,23 @@ function Chart({ metrics, title, kind, series }) {
   }, []);
 
   const view = useMemo(() => {
-    if (!metrics.length) return { gmin: 0, gmax: 1, sharedMax: 1 };
+    if (!metrics.length) return { gmin: 0, gmax: 1, sharedMax: 1, seriesMax: {} };
     const gens = metrics.map((m) => m.gen);
     const gmin = Math.min(...gens);
     const gmax = Math.max(...gens, gmin + 1);
     let sharedMax = 0.001;
+    const seriesMax = {};
     if (kind === "shared") {
       for (const m of metrics) for (const s of used) if (m[s.key] != null) sharedMax = Math.max(sharedMax, m[s.key]);
     }
-    return { gmin, gmax, sharedMax };
+    if (kind === "series") {
+      for (const s of used) {
+        let mx = 0.001;
+        for (const m of metrics) if (m[s.key] != null) mx = Math.max(mx, m[s.key]);
+        seriesMax[s.key] = mx;
+      }
+    }
+    return { gmin, gmax, sharedMax, seriesMax };
   }, [metrics, used, kind]);
 
   // value -> 0..1 fraction of the chart height for a given series.
@@ -91,9 +104,9 @@ function Chart({ metrics, title, kind, series }) {
     if (v == null) return null;
     if (kind === "unit") return Math.min(1, Math.max(0, v));
     if (kind === "shared") return Math.min(1, Math.max(0, v / view.sharedMax));
-    return Math.min(1, Math.max(0, v / (s.div || 1))); // div
+    return Math.min(1, Math.max(0, v / (view.seriesMax[s.key] || 1))); // series: own max
   };
-  const topLabel = kind === "shared" ? view.sharedMax.toFixed(2) : kind === "unit" ? "1.00" : "rel";
+  const topLabel = kind === "shared" ? view.sharedMax.toFixed(2) : kind === "unit" ? "1.00" : "max";
 
   const H = 190;
   const padL = 38, padR = 10, padT = 12, padB = 20;
