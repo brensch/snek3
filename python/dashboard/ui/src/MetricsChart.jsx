@@ -9,52 +9,39 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 // Only series present in the run are drawn, so legacy MCTS runs still render.
 const CHARTS = [
   {
-    title: "Results — win rate (0–1)",
+    title: "Strength — relative win rate (0–1)",
     kind: "unit",
     series: [
-      // Faithful eval: deployed agent (proxy ONNX + serve search) vs the pool.
-      { key: "vs_base", label: "vs baseline", color: "#34d399" },
-      { key: "vs_uct", label: "vs UCT", color: "#22d3ee" },
-      // Legacy keys (older runs that recorded win-rate in metrics.jsonl).
-      { key: "response_vs_baseline", label: "response vs baseline", color: "#38bdf8", dash: true },
-      { key: "response_vs_uct", label: "response vs UCT", color: "#a3e635", dash: true },
-      { key: "proxy_vs_baseline", label: "proxy vs baseline", color: "#0ea5e9", dash: true },
-      { key: "proxy_vs_uct", label: "proxy vs UCT", color: "#84cc16", dash: true },
-      { key: "win_rate", label: "win rate", color: "#34d399" }, // legacy
+      // AlphaZero progress signal: current net vs frozen past-selves.
+      { key: "self_vs_anchor", label: "vs anchor (phase start)", color: "#34d399" },
+      { key: "self_vs_recent", label: "vs recent self", color: "#22d3ee" },
+      { key: "win_rate", label: "vs baseline (if eval on)", color: "#a3e635", dash: true },
     ],
   },
   {
     title: "Losses (shared scale)",
     kind: "shared",
     series: [
-      { key: "proxy_value_loss", label: "proxy value loss", color: "#60a5fa" },
-      { key: "proxy_policy_loss", label: "proxy policy loss", color: "#f59e0b" },
-      { key: "response_value_loss", label: "response value loss", color: "#818cf8", dash: true },
-      { key: "response_policy_loss", label: "response policy loss", color: "#fbbf24", dash: true },
-      { key: "value_loss", label: "value loss", color: "#60a5fa" }, // legacy
-      { key: "policy_loss", label: "policy loss", color: "#f59e0b" }, // legacy
+      { key: "value_loss", label: "value loss", color: "#60a5fa" },
+      { key: "policy_loss", label: "policy loss", color: "#f59e0b" },
     ],
   },
   {
-    title: "Game shape / degeneracy",
+    title: "Policy targets",
     kind: "series",
     series: [
-      { key: "proxy_draw_rate", label: "draw rate ⚠", color: "#f87171" },
-      { key: "target_entropy", label: "target entropy ⚠", color: "#ec4899" },
-      { key: "proxy_game_len", label: "avg game length", color: "#c084fc" },
-      { key: "proxy_mean_turns", label: "turn-activity ratio", color: "#7c6f9c", dash: true },
+      { key: "target_entropy", label: "target entropy (visit-count π)", color: "#ec4899" },
+      { key: "target_max_prob", label: "target max prob", color: "#c084fc" },
     ],
   },
   {
     title: "Throughput / utilization",
     kind: "series",
     series: [
-      { key: "proxy_games", label: "games finished", color: "#f472b6" },
-      { key: "selfplay_gpu_pct", label: "self-play GPU %", color: "#34d399" },
-      { key: "gpu_busy_pct", label: "GPU busy %", color: "#34d399" }, // legacy
+      { key: "completed_games", label: "games finished", color: "#f472b6" },
+      { key: "turns_per_sec", label: "turns/sec", color: "#f59e0b" },
       { key: "inference_per_sec", label: "inferences/sec", color: "#60a5fa" },
-      { key: "samples_per_sec", label: "samples/sec", color: "#f59e0b" },
-      { key: "gpu_peak_gb", label: "GPU peak GB", color: "#a78bfa" },
+      { key: "gpu_busy_pct", label: "GPU busy %", color: "#34d399" },
       { key: "gen_seconds", label: "gen seconds", color: "#94a3b8" },
     ],
   },
