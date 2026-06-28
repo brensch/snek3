@@ -223,7 +223,9 @@ def build_args():
     ap.add_argument("--filters", type=int, default=64)
     ap.add_argument("--blocks", type=int, default=6)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--train-steps", type=int, default=256)
+    ap.add_argument("--train-steps", type=int, default=128)
+    ap.add_argument("--recency", type=float, default=2.0,
+                    help="bias buffer sampling toward recent gens (1=uniform, >1=more recent)")
     ap.add_argument("--batch-size", type=int, default=2048)
     ap.add_argument("--buffer-size", type=int, default=500000)
     ap.add_argument("--eval-every", type=int, default=5)
@@ -301,7 +303,8 @@ def main():
         proxy_buf.add(ps)
         log_phase(logger, "TRAINING", f"gen={gen} proxy steps={args.train_steps} buffer={len(proxy_buf):,}")
         pstats = train_on_samples(proxy, proxy_opt, proxy_buf.dataset(), device,
-                                  steps=args.train_steps, batch_size=args.batch_size)
+                                  steps=args.train_steps, batch_size=args.batch_size,
+                                  recency=args.recency)
         ptgt = policy_target_stats(ps.pol)
 
         # --- response self-play + train (after warmup) ---
@@ -314,7 +317,8 @@ def main():
             response_buf.add(rs)
             log_phase(logger, "TRAINING", f"gen={gen} response steps={args.train_steps}")
             rstats = train_on_samples(response, response_opt, response_buf.dataset(), device,
-                                      steps=args.train_steps, batch_size=args.batch_size)
+                                      steps=args.train_steps, batch_size=args.batch_size,
+                                      recency=args.recency)
 
         gen_seconds = time.time() - t0
 

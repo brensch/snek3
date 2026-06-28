@@ -66,6 +66,8 @@ EVAL_OPP_TAU   ?= 1.0   # assumed opponent temperature for response eval
 UCT_ITERS      ?= 200   # UCB sims for the CPU UCT pool opponent
 ALB_EVAL_EVERY ?= 5     # full win-rate eval every N gens (the slow part; recording stays per-gen)
 ALB_EVAL_GAMES ?= 64    # games per matchup in eval (batched; higher = less noise)
+ALB_TRAIN_STEPS ?= 128  # SGD steps/gen (lower = less reuse/overfit of stale buffer, faster gens)
+ALB_RECENCY    ?= 2.0   # bias buffer sampling toward recent gens (1=uniform, >1=more recent)
 LR             ?= 1e-3
 # Egocentric obs are 21x21 (3.6x the cells of 11x11) so conv activations are big;
 # keep Albatross GPU batches modest to stay within dedicated VRAM (watch
@@ -146,7 +148,7 @@ albatross: build ## Full Albatross: temperature-conditioned proxy + best-respons
 		--exploration-prob $(EXPLORATION_PROB) --max-turns $(ALB_MAX_TURNS) \
 		--eval-batch-size $(ALB_EVAL_BATCH) \
 		--filters $(FILTERS) --blocks $(BLOCKS) --lr $(LR) \
-		--train-steps $(TRAIN_STEPS) --batch-size $(ALB_BATCH) --buffer-size $(BUFFER_SIZE) \
+		--train-steps $(ALB_TRAIN_STEPS) --recency $(ALB_RECENCY) --batch-size $(ALB_BATCH) --buffer-size $(BUFFER_SIZE) \
 		--eval-every $(ALB_EVAL_EVERY) --eval-games $(ALB_EVAL_GAMES) \
 		--record-games $(ALB_RECORD_GAMES) --record-every $(ALB_RECORD_EVERY) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)

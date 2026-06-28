@@ -97,9 +97,11 @@ def train_on_samples(
     steps: int = 256,
     batch_size: int = 1024,
     value_weight: float = 1.0,
+    recency: float = 1.0,
 ) -> dict:
-    """Run `steps` SGD updates on minibatches drawn uniformly (with replacement)
-    from `samples` — a replay buffer's worth of recent positions."""
+    """Run `steps` SGD updates on minibatches drawn from `samples` (a replay
+    buffer's worth of recent positions). `recency` > 1 biases sampling toward the
+    most recent positions (buffer is oldest->newest); 1.0 = uniform."""
     # Keep the replay window in CPU RAM. The old path copied the full replay
     # buffer to GPU every generation, so GPU memory grew with buffer size and
     # PyTorch's caching allocator retained the high-water mark. Only the current
@@ -114,8 +116,15 @@ def train_on_samples(
     net.train()
     aug_rng = np.random.default_rng()
     pl = vl = 0.0
+    bs = min(batch_size, n)
     for _ in range(steps):
-        idx = np.random.randint(0, n, size=min(batch_size, n))
+        if recency and recency != 1.0:
+            # r**recency skews toward 0 -> index near n-1 (most recent); tail still
+            # reaches old samples. recency=1 is uniform.
+            r = np.random.random(bs) ** recency
+            idx = (n - 1 - (r * (n - 1))).astype(np.int64)
+        else:
+            idx = np.random.randint(0, n, size=bs)
         # D4 symmetry augmentation: rotate/reflect the egocentric obs and remap
         # the policy target consistently (value targets and the scalar temperature
         # are symmetry-invariant).
