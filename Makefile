@@ -64,7 +64,7 @@ RESPONSE_TAU   ?= 12.0  # response: the rational agent's fixed temperature tau_R
 RESPONSE_AFTER ?= 0     # train the response net from gen 0 (vs warming the proxy first)
 EVAL_OPP_TAU   ?= 1.0   # assumed opponent temperature for response eval
 UCT_ITERS      ?= 200   # UCB sims for the CPU UCT pool opponent
-ALB_EVAL_EVERY ?= 1     # evaluate every N generations
+ALB_EVAL_EVERY ?= 5     # full win-rate eval every N gens (the slow part; recording stays per-gen)
 ALB_EVAL_GAMES ?= 64    # games per matchup in eval (batched; higher = less noise)
 LR             ?= 1e-3
 # Egocentric obs are 21x21 (3.6x the cells of 11x11) so conv activations are big;
