@@ -49,6 +49,7 @@ class Samples:
     temp: np.ndarray | None = None  # [K] float32 per-sample temperature (Albatross)
     turns: int = 0  # total board-turns stepped (for throughput)
     games: int = 0  # total games finished
+    game_len_total: int = 0  # sum of lengths (turns) of finished games; /games = mean length
     draws: int = 0  # of `games`, how many ended without a winner (draw/timeout)
     fwd_seconds: float = 0.0  # time in net forward (GPU)
     search_seconds: float = 0.0  # time in Rust tree-build + equilibrium backup (CPU)
@@ -234,7 +235,9 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
     collected = 0
     turns_total = 0
     games_total = 0
+    game_len_total = 0
     draws_total = 0
+    slot_turns = np.zeros(cfg.count, dtype=np.int64)  # per-slot turns since (re)start
     next_report = 0.25
 
     while collected < cfg.samples_per_gen:
@@ -262,11 +265,14 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
         play = mix_uniform(policy, cfg.exploration_prob)
         actions = sample_actions(play, rng)
         batch.step(actions)
+        slot_turns += 1  # every slot advanced one board-turn
         done = batch.done().astype(bool)
         if done.any():
             w = batch.winners()
             games_total += int(done.sum())
+            game_len_total += int(slot_turns[done].sum())  # lengths of just-finished games
             draws_total += int(np.sum(done & (w == -1)))
+            slot_turns[done] = 0  # reset counters for the fresh games reset_done starts
         batch.reset_done()
 
     perf = perf_snapshot()
@@ -277,6 +283,7 @@ def generate_proxy(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: 
         temp=np.concatenate(out_temp, axis=0),
         turns=turns_total,
         games=games_total,
+        game_len_total=game_len_total,
         draws=draws_total,
         fwd_seconds=perf["fwd_s"],
         search_seconds=perf["search_s"],

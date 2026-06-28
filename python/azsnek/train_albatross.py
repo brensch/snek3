@@ -323,6 +323,10 @@ def main():
         gen_seconds = time.time() - t0
 
         proxy_mean_turns = ps.turns / max(ps.games, 1)
+        # Real average length of games that actually FINISHED this gen (sum of
+        # finished-game lengths / number finished). Unlike proxy_mean_turns
+        # (total ongoing turn-activity / finished count) this is a true mean.
+        proxy_game_len = ps.game_len_total / max(ps.games, 1)
         metric = {
             "gen": gen, "samples": int(ps.obs.shape[0]),
             "proxy_policy_loss": round(pstats["policy_loss"], 4),
@@ -330,6 +334,7 @@ def main():
             "target_entropy": round(ptgt["target_entropy"], 4),
             "gen_seconds": round(gen_seconds, 1),
             "proxy_games": ps.games,
+            "proxy_game_len": round(proxy_game_len, 1),
             # Issue indicators: draw rate and game-length spike on BOTH collapse
             # modes (short mutual-death OR long timeout); len_frac = share of the
             # turn cap (1.0 = games never resolve).

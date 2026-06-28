@@ -36,13 +36,15 @@ const CHARTS = [
     series: [
       { key: "proxy_draw_rate", label: "draw rate ⚠ (0–1)", color: "#f87171", div: 1 },
       { key: "target_entropy", label: "target entropy ⚠ (÷1.4)", color: "#ec4899", div: 1.4 },
-      { key: "proxy_mean_turns", label: "mean turns (÷200)", color: "#c084fc", div: 200 },
+      { key: "proxy_game_len", label: "avg game length (÷200)", color: "#c084fc", div: 200 },
+      { key: "proxy_mean_turns", label: "turn-activity ratio (÷200)", color: "#7c6f9c", div: 200, dash: true },
     ],
   },
   {
     title: "Throughput / utilization",
     kind: "div",
     series: [
+      { key: "proxy_games", label: "games finished (÷100)", color: "#f472b6", div: 100 },
       { key: "selfplay_gpu_pct", label: "self-play GPU % (÷100)", color: "#34d399", div: 100 },
       { key: "gpu_busy_pct", label: "GPU busy % (÷100)", color: "#34d399", div: 100 }, // legacy
       { key: "inference_per_sec", label: "inferences/sec (÷30k)", color: "#60a5fa", div: 30000 },

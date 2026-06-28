@@ -55,7 +55,13 @@ ARGS        ?=
 
 # Albatross trainer (proxy + response + UCT pool) defaults. These mirror the
 # live fast-iteration "resp0" meta; override on the CLI as needed.
-ALB_COUNT      ?= 256   # parallel games per move (equilibrium search is heavy)
+# steps_per_gen ~= ALB_SAMPLES / (ALB_COUNT * NUM_SNAKES). A gen plays this many
+# board-turns, so games only reach the endgame if it exceeds typical game length.
+# At 256x8000 that was ~16 -> games capped at ~16 turns (avg finished len ~11).
+# 64x8000 -> ~62+ steps so games run to a natural finish (smaller batches, ~same
+# compute budget). Want even longer/fuller endgames: lower ALB_COUNT or raise
+# ALB_SAMPLES further.
+ALB_COUNT      ?= 64    # parallel games per move (lower = longer games per gen)
 ALB_SAMPLES    ?= 8000  # samples collected per generation
 NUM_SNAKES     ?= 2
 TAU_MIN        ?= 0.5   # proxy: low end of the per-episode temperature range
