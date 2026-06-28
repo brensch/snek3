@@ -48,7 +48,8 @@ class RunWriter:
     def reset(self) -> None:
         """Clear a run's progress (metrics, status, state, replays) for a fresh
         restart under the same run id. Keeps meta.json."""
-        for p in (self.metrics_path, self.state_path, self.dir / "status.json"):
+        for p in (self.metrics_path, self.state_path, self.dir / "status.json",
+                  self.dir / "params.json"):
             p.unlink(missing_ok=True)
         for g in self.games_dir.glob("gen_*.json"):
             g.unlink(missing_ok=True)

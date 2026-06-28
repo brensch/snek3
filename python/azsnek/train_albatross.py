@@ -247,8 +247,9 @@ def build_args():
                     help="host the live API + dashboard in-process (--no-serve to disable)")
     ap.add_argument("--serve-host", type=str, default="0.0.0.0")
     ap.add_argument("--serve-port", type=int, default=8050)
-    ap.add_argument("--serve-token", type=str, default=None,
-                    help="bearer token for write endpoints; if unset a random one is generated")
+    ap.add_argument("--serve-token", type=str, default=os.environ.get("SNEK_SERVE_TOKEN"),
+                    help="bearer token for write endpoints (or set SNEK_SERVE_TOKEN); "
+                         "if unset a random one is generated and printed at startup")
     return ap.parse_args()
 
 
@@ -274,6 +275,23 @@ def train_one_run(a, state, device, logger) -> None:
         "buffer_size": a.buffer_size, "generations": a.generations,
     })
     log_phase(logger, "SETUP", f"run_id={run.run_id}")
+
+    # Restore live params tuned via the dashboard in a previous session of this
+    # run (persisted to params.json each gen). meta.json holds the original
+    # config; params.json holds the latest tuned values and wins on resume.
+    if state is not None and not a.fresh:
+        pj = run.dir / "params.json"
+        if pj.exists():
+            from . import control
+            try:
+                saved = json.loads(pj.read_text())
+            except (OSError, json.JSONDecodeError):
+                saved = {}
+            applied = {k: v for k, v in saved.items() if k in control.LIVE_PARAMS}
+            for k, v in applied.items():
+                setattr(a, k, v)
+            if applied:
+                log_phase(logger, "RESUME", f"restored tuned params: {applied}")
 
     cfg = NetConfig(channels=snek.CHANNELS, filters=a.filters, blocks=a.blocks,
                     temperature_input=True)
@@ -328,6 +346,7 @@ def train_one_run(a, state, device, logger) -> None:
         # apply any live param updates for this generation.
         if state:
             p = state.params_snapshot()
+            run.write_json("params.json", p)  # persist tuned params -> restored on resume
             spcfg = SelfPlayConfig(
                 board=a.board, num_snakes=a.num_snakes, count=p["count"],
                 eval_batch_size=a.eval_batch_size, samples_per_gen=p["samples"],
