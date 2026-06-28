@@ -230,7 +230,7 @@ impl Forest {
     /// Build the search forest for `boards`, expanding each to `depth` plies.
     pub fn build(boards: &[Board], depth: u32, draw_value: f32) -> Forest {
         let n_snakes = boards.first().map(|b| b.snakes.len()).unwrap_or(0);
-        // Observation canvas dims are egocentric (head-centred): 2*side-1.
+        // Observation canvas dims are absolute board coords (obs_side = side).
         let (height, width) = boards
             .first()
             .map(|b| (obs_side(b.height as usize), obs_side(b.width as usize)))
