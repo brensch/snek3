@@ -18,13 +18,6 @@ path = "src/lib.rs"
 name = "snek-server"
 path = "src/main.rs"
 
-# Offline Albatross-faithful evaluator: plays the served agent (proxy ONNX +
-# serve_move search) vs the fixed pool (baseline, UCT) and writes win-rates +
-# replay frames for the dashboard. Reuses the serving logic from the lib.
-[[bin]]
-name = "snek-eval"
-path = "src/bin/eval.rs"
-
 [dependencies]
 snek-core = { path = "../snek-core", features = ["json"] }
 snek-search = { path = "../snek-search" }

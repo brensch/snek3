@@ -1,52 +1,24 @@
-//! Shared Albatross-faithful serving logic, used by both the `/move` HTTP server
-//! (`main.rs`) and the offline evaluator (`bin/eval.rs`).
+//! Pure-Rust AlphaZero serving: decoupled-PUCT MCTS over a single ONNX
+//! policy+value net — the *same* search used in self-play (`crates/snek-search`
+//! `MctsForest`), so what we serve matches what we trained.
 //!
-//! The heart is [`serve_move`]: the exact test-time procedure from
-//! `train_albatross.py` — online MLE of each opponent's temperature under the
-//! proxy net, then a heterogeneous-temperature logit-equilibrium best-response
-//! search with our snake pinned rational and each opponent pinned at its MLE
-//! tau. The HTTP server and the evaluator call this same function, so the
-//! evaluator measures *exactly* what gets deployed.
-//!
-//! [`serve_move`] takes `net`/`grid`/`cfg` explicitly (rather than reaching into
-//! a shared struct) so the evaluator can give each worker thread its own [`Net`]
-//! and run games in parallel without serialising on a single inference mutex.
+//! [`serve_move`] is stateless per move (board + our index only): no opponent
+//! modelling, no temperature — the policy/value net plus the tree search handle
+//! everything. The HTTP `/move` handler (`main.rs`) routes through it.
 
-use std::collections::HashMap;
-
-use snek_core::{encode_into, obs_side, Board, Move, Point, NUM_CHANNELS};
+use snek_core::{obs_h, obs_w, Board, Move, NUM_CHANNELS};
 use snek_infer::Net;
-use snek_search::Forest;
-
-/// Log-spaced temperature grid for the opponent-tau MLE — geomspace(0.25, 20, 24),
-/// matching `TAU_GRID` in `train_albatross.py`.
-pub const TAU_GRID_LEN: usize = 24;
-pub fn tau_grid() -> [f32; TAU_GRID_LEN] {
-    let (lo, hi) = (0.25f64, 20.0f64);
-    let mut g = [0.0f32; TAU_GRID_LEN];
-    for (i, slot) in g.iter_mut().enumerate() {
-        let t = i as f64 / (TAU_GRID_LEN as f64 - 1.0);
-        *slot = (lo * (hi / lo).powf(t)) as f32;
-    }
-    g
-}
+use snek_search::MctsForest;
 
 pub struct Config {
-    pub depth: u32,
-    pub iters: usize,
-    pub response_tau: f32,
+    /// MCTS simulations per move (the inference-time search budget).
+    pub sims: usize,
+    /// PUCT exploration constant (match self-play for train/serve parity).
+    pub c_puct: f32,
+    /// Terminal value of a draw at search leaves (match training).
     pub draw_value: f32,
+    /// Max leaf observations per ONNX forward pass.
     pub eval_chunk: usize,
-}
-
-/// Per-game memory used for online opponent modelling. Keyed by opponent snake id
-/// so it survives other snakes dying (which shifts board indices).
-#[derive(Default)]
-pub struct GameState {
-    last_board: Option<Board>,
-    last_ids: Vec<String>,
-    /// Cumulative log-likelihood of each opponent's observed moves, per grid tau.
-    opp_ll: HashMap<String, [f64; TAU_GRID_LEN]>,
 }
 
 pub const MOVES: [&str; 4] = ["up", "down", "left", "right"];
@@ -58,28 +30,12 @@ pub fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
-/// Map a one-cell head displacement to a move index, or None if not a unit step.
-pub fn move_from_delta(from: Point, to: Point) -> Option<usize> {
-    match (to.x - from.x, to.y - from.y) {
-        (0, 1) => Some(Move::Up.index()),
-        (0, -1) => Some(Move::Down.index()),
-        (-1, 0) => Some(Move::Left.index()),
-        (1, 0) => Some(Move::Right.index()),
-        _ => None,
-    }
-}
-
 /// First non-suicidal move for snake `me` (off-board / reverse-onto-neck dropped),
-/// falling back to Up. Used when the search can't run (already terminal) or the
-/// equilibrium policy is empty.
+/// falling back to Up. Used when the search can't run (terminal) or returns empty.
 pub fn safe_move(board: &Board, me: usize) -> usize {
     let s = &board.snakes[me];
     let head = s.head();
-    let neck = if s.len() >= 2 {
-        Some(s.body.get(1))
-    } else {
-        None
-    };
+    let neck = if s.len() >= 2 { Some(s.body.get(1)) } else { None };
     for m in Move::ALL {
         let nh = m.apply(head);
         if Some(nh) != neck && board.in_bounds(nh) {
@@ -89,167 +45,57 @@ pub fn safe_move(board: &Board, me: usize) -> usize {
     Move::Up.index()
 }
 
-/// One Albatross-faithful move for snake `me` on `board`, given the snake ids in
-/// board order and this game's accumulated opponent model `gs`. Mutates `gs` with
-/// the latest opponent-move likelihoods and remembers the board for next turn.
-///
-/// This is the deployed serving procedure; both the HTTP `/move` handler and the
-/// offline evaluator route through it so they cannot diverge.
-pub fn serve_move(
-    net: &mut Net,
-    grid: &[f32; TAU_GRID_LEN],
-    cfg: &Config,
-    board: &Board,
-    ids: &[String],
-    me: usize,
-    gs: &mut GameState,
-) -> usize {
-    let n = board.snakes.len();
-    if ids.len() != n {
-        // Couldn't align ids; still return a safe move.
+/// One AlphaZero move for snake `me` on `board`: run `cfg.sims` decoupled-PUCT
+/// simulations (leaves evaluated by `net`), then play the most-visited root
+/// action. Identical search to self-play, so serving cannot diverge from training.
+pub fn serve_move(net: &mut Net, cfg: &Config, board: &Board, me: usize) -> usize {
+    if board.is_terminal() || !board.snakes[me].alive() {
         return safe_move(board, me);
     }
+    let (c, h, w) = (NUM_CHANNELS, obs_h(board), obs_w(board));
+    let n_snakes = board.snakes.len();
+    let mut forest =
+        MctsForest::new_with_draw_value(std::slice::from_ref(board), cfg.c_puct, cfg.draw_value);
+    let obs_size = forest.obs_size();
 
-    let c = NUM_CHANNELS;
-    let h = obs_side(board.width as usize);
-    let w = obs_side(board.height as usize);
-    let obs_size = c * h * w;
-    let default_tau = (grid[0] * grid[TAU_GRID_LEN - 1]).sqrt();
-
-    // ---- 1. Opponent modelling: score each opponent's latest move (MLE update) ----
-    if let Some(prev) = gs.last_board.take() {
-        for (j, id) in ids.iter().enumerate() {
-            if j == me {
-                continue;
-            }
-            // Find this opponent in the previous board by id.
-            let Some(pj) = gs.last_ids.iter().position(|x| x == id) else {
-                continue;
-            };
-            if pj >= prev.snakes.len() || !prev.snakes[pj].alive() || !board.snakes[j].alive() {
-                continue;
-            }
-            let Some(midx) = move_from_delta(prev.snakes[pj].head(), board.snakes[j].head()) else {
-                continue;
-            };
-            // Encode the state the opponent acted from, evaluate the proxy policy at
-            // every grid temperature, and add log p(observed move) to that tau's LL.
-            let mut obs = vec![0.0f32; TAU_GRID_LEN * obs_size];
-            for t in 0..TAU_GRID_LEN {
-                encode_into(&prev, pj, &mut obs[t * obs_size..(t + 1) * obs_size]);
-            }
-            let temps: Vec<f32> = grid.to_vec();
-            let pol = match net.forward_temp(&obs, Some(&temps), TAU_GRID_LEN, c, h, w) {
-                Ok((p, _)) => p,
-                Err(_) => continue,
-            };
-            let ll = gs.opp_ll.entry(id.clone()).or_insert([0.0; TAU_GRID_LEN]);
-            for t in 0..TAU_GRID_LEN {
-                let p = pol[t * 4 + midx].max(1e-9);
-                ll[t] += (p as f64).ln();
-            }
+    for _ in 0..cfg.sims {
+        let pending = forest.select();
+        if pending.is_empty() {
+            break; // tree fully resolved (all terminal)
         }
-    }
+        // Each pending leaf needs one egocentric encoding per snake (per-snake
+        // policy/value), laid out [pending, agent]. Total rows = pending * n.
+        let rows = pending.len() * n_snakes;
+        let mut obs = vec![0.0f32; rows * obs_size];
+        forest.write_pending_obs(&pending, &mut obs);
 
-    // ---- 2. Per-agent temperatures: us rational, each opponent at its MLE tau ----
-    let mut tau_vec = vec![cfg.response_tau; n];
-    let mut opp_taus: Vec<f32> = Vec::new();
-    for (i, id) in ids.iter().enumerate() {
-        if i == me {
-            continue;
-        }
-        let tau = gs
-            .opp_ll
-            .get(id)
-            .map(|ll| {
-                let best = ll
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                    .map(|(k, _)| k)
-                    .unwrap_or(0);
-                grid[best]
-            })
-            .unwrap_or(default_tau);
-        tau_vec[i] = tau;
-        opp_taus.push(tau);
-    }
-    // Leaf value net is conditioned on the opponents' rationality regime (mean
-    // opponent tau), matching the response search in train_albatross.py.
-    let leaf_temp = if opp_taus.is_empty() {
-        cfg.response_tau
-    } else {
-        opp_taus.iter().sum::<f32>() / opp_taus.len() as f32
-    };
-
-    // ---- 3. Hetero-temperature equilibrium best-response search ----
-    let mut forest = Forest::build(std::slice::from_ref(board), cfg.depth, cfg.draw_value);
-    let ec = forest.eval_count();
-    let mv = if ec == 0 {
-        safe_move(board, me)
-    } else {
-        let mut leaf_obs = vec![0.0f32; ec * obs_size];
-        forest.write_observations(&mut leaf_obs);
-        let mut values = vec![0.0f32; ec];
-        let mut s = 0usize;
-        let mut ok = true;
-        while s < ec {
-            let e = (s + cfg.eval_chunk).min(ec);
-            let temps = vec![leaf_temp; e - s];
-            match net.forward_temp(&leaf_obs[s * obs_size..e * obs_size], Some(&temps), e - s, c, h, w)
-            {
-                Ok((_p, val)) => values[s..e].copy_from_slice(&val),
-                Err(_) => {
-                    ok = false;
-                    break;
+        let mut pol = vec![0.0f32; rows * 4];
+        let mut val = vec![0.0f32; rows];
+        let mut s = 0;
+        while s < rows {
+            let e = (s + cfg.eval_chunk).min(rows);
+            match net.forward(&obs[s * obs_size..e * obs_size], e - s, c, h, w) {
+                Ok((p, v)) => {
+                    pol[s * 4..e * 4].copy_from_slice(&p);
+                    val[s..e].copy_from_slice(&v);
                 }
+                Err(_) => return safe_move(board, me),
             }
             s = e;
         }
-        if !ok {
-            safe_move(board, me)
-        } else {
-            let (root_pol, _root_val) = forest.backup(&values, &tau_vec, cfg.iters);
-            let slots = &root_pol[me * 4..me * 4 + 4];
-            if slots.iter().sum::<f32>() <= 1e-8 {
-                safe_move(board, me)
-            } else {
-                slots
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                    .map(|(k, _)| k)
-                    .unwrap_or(0)
-            }
-        }
-    };
+        forest.expand_backup(&pending, &pol, &val);
+    }
 
-    // ---- 4. Remember this turn for next turn's MLE ----
-    gs.last_board = Some(board.clone());
-    gs.last_ids = ids.to_vec();
-
-    mv
-}
-
-/// Replay-frame JSON for one board state. Mirrors `board_snapshot_value` in
-/// `snek-py` so eval replays render in the same dashboard board view.
-pub fn board_snapshot_value(board: &Board) -> serde_json::Value {
-    let food: Vec<[i8; 2]> = board.food.iter().map(|p| [p.x, p.y]).collect();
-    let hazards: Vec<[i8; 2]> = board.hazards.iter().map(|p| [p.x, p.y]).collect();
-    let snakes: Vec<serde_json::Value> = board
-        .snakes
+    // root_targets: visit-count policy [count*N*4]; count == 1 here.
+    let (policies, _values) = forest.root_targets();
+    let slots = &policies[me * 4..me * 4 + 4];
+    if slots.iter().sum::<f32>() <= 1e-8 {
+        return safe_move(board, me);
+    }
+    slots
         .iter()
-        .map(|s| {
-            let body: Vec<[i8; 2]> = s.body.iter().map(|p| [p.x, p.y]).collect();
-            serde_json::json!({"alive": s.alive(), "health": s.health, "body": body})
-        })
-        .collect();
-    serde_json::json!({
-        "turn": board.turn,
-        "width": board.width,
-        "height": board.height,
-        "food": food,
-        "hazards": hazards,
-        "snakes": snakes,
-    })
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .map(|(k, _)| k)
+        .unwrap_or(0)
 }
