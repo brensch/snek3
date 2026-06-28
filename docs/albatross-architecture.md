@@ -32,40 +32,40 @@ A few ideas in plain words:
 
 ```mermaid
 sequenceDiagram
-    participant T as Python (conductor)
-    participant R as Rust (game + look-ahead, CPU)
-    participant G as Neural net (GPU)
+    participant T as Python conductor
+    participant R as Rust game and look-ahead
+    participant G as Neural net on GPU
 
-    Note over T: Start a generation:<br/>play games until we have 8000 example positions
+    Note over T: Start a generation - play games until we have 8000 example positions
     loop every move, until 8000 positions collected
-        T->>R: From the current boards, list the positions<br/>that could happen a couple of moves ahead
-        R-->>T: ~40,000 possible future positions
-        T->>G: Score how good each of these positions is<br/>(one big batch)
+        T->>R: From the current boards, list positions a couple of moves ahead
+        R-->>T: about 40000 possible future positions
+        T->>G: Score how good each position is, in one big batch
         G-->>T: a goodness score for every position
-        T->>R: Using those scores, work backwards:<br/>what's the best move now, and how good is this spot?
-        R-->>T: best-move choice + position value, for every game
-        T->>T: Save (board, best move, value); pick a move;<br/>advance every game one step
+        T->>R: Using those scores, what is the best move now and how good is this spot
+        R-->>T: best move and position value, for every game
+        T->>T: Save board, best move, value - pick a move - advance every game
     end
     T->>G: Train the brain on the 8000 saved positions
-    Note over T: (do the above twice: once for the "skill-level" brain,<br/>once for the "counter" brain)
+    Note over T: Done twice - once for the skill-level brain, once for the counter brain
     T->>R: Play test games vs the two fixed bots
     R-->>T: who won each game
-    T->>T: Save the win-rates and a few games to watch,<br/>then start the next generation
+    T->>T: Save win-rates and a few games to watch, then next generation
 ```
 
 ## Big-picture flow
 
 ```mermaid
 flowchart TB
-    A["Play ~8000 positions of self-play<br/>(brain vs itself, looking ahead each move)"]
-    B["Train the brain on those positions:<br/>learn the good moves + how good positions were"]
-    C["Test vs two fixed bots<br/>(a simple one and a stronger search bot)<br/>and save a few games to watch"]
+    A["Play about 8000 positions of self-play<br/>brain vs itself, looking ahead each move"]
+    B["Train the brain on those positions<br/>learn the good moves and how good positions were"]
+    C["Test vs two fixed bots<br/>a simple one and a stronger search bot<br/>and save a few games to watch"]
     A --> B --> C --> A
 
-    subgraph inside["What 'looking ahead' does for ONE move"]
-        D["Rust: list every position a couple moves ahead"]
-        E["GPU brain: score all of them at once"]
-        F["Rust: work backwards to the best move + this spot's value"]
+    subgraph inside["Looking ahead, for ONE move"]
+        D["Rust lists every position a couple moves ahead"]
+        E["GPU brain scores all of them at once"]
+        F["Rust works backwards to the best move and the value of this spot"]
         D --> E --> F
     end
     A -. each move uses .-> inside
