@@ -19,9 +19,15 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 WORKDIR /app
+# Python deps layer FIRST (torch is ~5GB) so it stays cached across source
+# changes — only re-runs if this list changes. Mirrors `make venv`.
+RUN python -m venv .venv \
+ && .venv/bin/pip install -U pip maturin numpy fastapi uvicorn \
+ && .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# Source + compile the Rust extension (re-runs on code change; ~2-3 min).
 COPY . /app
-# .venv with torch + deps, then compile the Rust extension into it.
-RUN make venv && make build && chmod +x deploy/entrypoint.sh
+RUN .venv/bin/maturin develop --release && chmod +x deploy/entrypoint.sh
 
 EXPOSE 8050
 CMD ["/app/deploy/entrypoint.sh"]

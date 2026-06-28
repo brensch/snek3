@@ -14,7 +14,8 @@ args=(--serve-host 0.0.0.0 --serve-port "${SNEK_PORT:-8050}"
       --response-after 0 --draw-value -0.9 --exploration-prob 0.15 --max-turns 0
       --eval-batch-size 2048 --filters 64 --blocks 6 --lr 1e-3
       --train-steps 128 --recency 2.0 --batch-size 1024 --buffer-size 500000
-      --eval-every 5 --eval-games 64 --record-games 2 --record-every 1)
+      --eval-every 5 --eval-games "${SNEK_EVAL_GAMES:-16}"
+      --record-games "${SNEK_RECORD_GAMES:-4}" --record-every 1)
 [ -n "${SNEK_RUN_ID:-}" ] && args+=(--run-id "$SNEK_RUN_ID")
 
 exec .venv/bin/python -m azsnek.train_albatross "${args[@]}"

@@ -390,6 +390,23 @@ def build_app(state: RunState, runs_dir: Path, static_dir: Path, token: str | No
             raise HTTPException(status_code=404, detail="game file not found")
         return json.loads(p.read_text())
 
+    @app.get("/api/runs/{run}/export")
+    def export_run(run: str, request: Request):
+        """Download the whole run dir (metrics, state.pt checkpoint, params,
+        games) as a .tar.gz — so checkpoints can be pulled off an ephemeral pod
+        before it's terminated. Token-protected (it includes model weights)."""
+        require_token(request)
+        import io
+        import tarfile
+        p = safe_run(run)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            tf.add(p, arcname=run)
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]), media_type="application/gzip",
+            headers={"Content-Disposition": f'attachment; filename="{run}.tar.gz"'})
+
     # ---------- dashboard SPA ----------
     if (static_dir / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")

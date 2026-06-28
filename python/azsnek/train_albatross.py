@@ -232,8 +232,8 @@ def build_args():
     ap.add_argument("--batch-size", type=int, default=2048)
     ap.add_argument("--buffer-size", type=int, default=500000)
     ap.add_argument("--eval-every", type=int, default=5)
-    ap.add_argument("--eval-games", type=int, default=64)
-    ap.add_argument("--record-games", type=int, default=2,
+    ap.add_argument("--eval-games", type=int, default=16)
+    ap.add_argument("--record-games", type=int, default=4,
                     help="replay games to record per (agent,opponent) matchup; 0 disables")
     ap.add_argument("--record-every", type=int, default=1,
                     help="record replays every N generations")

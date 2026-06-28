@@ -71,7 +71,7 @@ RESPONSE_AFTER ?= 0     # train the response net from gen 0 (vs warming the prox
 EVAL_OPP_TAU   ?= 1.0   # assumed opponent temperature for response eval
 UCT_ITERS      ?= 200   # UCB sims for the CPU UCT pool opponent
 ALB_EVAL_EVERY ?= 5     # full win-rate eval every N gens (the slow part; recording stays per-gen)
-ALB_EVAL_GAMES ?= 64    # games per matchup in eval (batched; higher = less noise)
+ALB_EVAL_GAMES ?= 16    # games per matchup in eval (batched; higher = less noise, slower)
 ALB_TRAIN_STEPS ?= 128  # SGD steps/gen (lower = less reuse/overfit of stale buffer, faster gens)
 ALB_RECENCY    ?= 2.0   # bias buffer sampling toward recent gens (1=uniform, >1=more recent)
 LR             ?= 1e-3
@@ -80,7 +80,7 @@ LR             ?= 1e-3
 # gpu_peak_gb in the metrics and raise if you have headroom).
 ALB_EVAL_BATCH ?= 2048
 ALB_BATCH      ?= 1024
-ALB_RECORD_GAMES ?= 2   # replays per (agent,opponent) matchup, recorded for the dashboard
+ALB_RECORD_GAMES ?= 4   # replays per (agent,opponent) matchup, recorded for the dashboard
 ALB_RECORD_EVERY ?= 1   # record replays every N generations
 ALB_MAX_TURNS  ?= 0     # 0 = games play until a snake dies (no artificial cap)
 ALB_DRAW_VALUE ?= -0.9  # equilibrium-search terminal value of a draw (negative kills suicide-draws)
