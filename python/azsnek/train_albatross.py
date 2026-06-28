@@ -196,7 +196,8 @@ def record_albatross_games(proxy, response, device, cfg: SelfPlayConfig, n_games
 
 def build_args():
     ap = argparse.ArgumentParser(description="Albatross proxy/response training")
-    ap.add_argument("--generations", type=int, default=100000)
+    ap.add_argument("--generations", type=int, default=0,
+                    help="0 = run forever until stopped via the control API")
     ap.add_argument("--board", type=int, default=11)
     ap.add_argument("--num-snakes", type=int, default=2)
     ap.add_argument("--samples", type=int, default=30000)
@@ -239,6 +240,13 @@ def build_args():
     ap.add_argument("--runs-dir", type=str, default="runs")
     ap.add_argument("--run-id", type=str, default=None)
     ap.add_argument("--fresh", action="store_true")
+    # Embedded live control + dashboard server.
+    ap.add_argument("--serve", action=argparse.BooleanOptionalAction, default=True,
+                    help="host the live API + dashboard in-process (--no-serve to disable)")
+    ap.add_argument("--serve-host", type=str, default="0.0.0.0")
+    ap.add_argument("--serve-port", type=int, default=8050)
+    ap.add_argument("--serve-token", type=str, default=None,
+                    help="bearer token for write endpoints; if unset a random one is generated")
     return ap.parse_args()
 
 
@@ -288,23 +296,83 @@ def main():
 
     proxy_buf = ReplayBuffer(args.buffer_size)
     response_buf = ReplayBuffer(args.buffer_size)
+
+    # --- live control + telemetry server ---
+    state = None
+    if args.serve:
+        import secrets
+        from . import control
+        from pathlib import Path as _Path
+
+        token = args.serve_token or secrets.token_urlsafe(16)
+        init_params = {k: getattr(args, k) for k in control.LIVE_PARAMS}
+        # restore prior metrics so the dashboard shows history immediately on resume
+        history = []
+        if run.metrics_path.exists():
+            for ln in run.metrics_path.read_text().splitlines():
+                ln = ln.strip()
+                if ln:
+                    try:
+                        history.append(json.loads(ln))
+                    except json.JSONDecodeError:
+                        pass
+        state = control.RunState(run.run_id, run.read_json("meta.json"), init_params, history)
+        static_dir = _Path(__file__).resolve().parent.parent / "dashboard" / "static"
+        control.serve_in_thread(state, args.serve_host, args.serve_port,
+                                _Path(args.runs_dir), static_dir, token)
+        log_phase(logger, "SERVE", f"http://{args.serve_host}:{args.serve_port}  run={run.run_id}")
+        log_phase(logger, "SERVE", f"write token: {token}")
+
     run.write_status({"generation": start_gen - 1, "running": True,
-                      "total_generations": args.generations})
+                      "total_generations": args.generations or None})
 
     cuda = device.type == "cuda"
-    for gen in range(start_gen, args.generations):
+    gen = start_gen
+    infinite = args.generations <= 0
+    while (infinite or gen < args.generations) and not (state and state.stopping):
+        # pause gate: hold at the gen boundary while paused (server stays live).
+        while state and state.paused and not state.stopping:
+            time.sleep(0.3)
+        if state and state.stopping:
+            break
+        # apply any live param updates for this generation.
+        if state:
+            p = state.params_snapshot()
+            spcfg = SelfPlayConfig(
+                board=args.board, num_snakes=args.num_snakes, count=p["count"],
+                eval_batch_size=args.eval_batch_size, samples_per_gen=p["samples"],
+                max_turns=args.max_turns, exploration_prob=p["exploration_prob"],
+                depth=args.depth, iters=p["iters"], tau_min=p["tau_min"], tau_max=p["tau_max"],
+                response_tau=p["response_tau"], draw_value=p["draw_value"],
+            )
+            for opt in (proxy_opt, response_opt):
+                for grp in opt.param_groups:
+                    grp["lr"] = p["lr"]
+            train_steps, batch_size, recency = p["train_steps"], p["batch_size"], p["recency"]
+            eval_every, eval_games = p["eval_every"], p["eval_games"]
+            record_games, record_every = p["record_games"], p["record_every"]
+        else:
+            train_steps, batch_size, recency = args.train_steps, args.batch_size, args.recency
+            eval_every, eval_games = args.eval_every, args.eval_games
+            record_games, record_every = args.record_games, args.record_every
+
         t0 = time.time()
         if cuda:
             torch.cuda.reset_peak_memory_stats()
         # --- proxy self-play + train ---
-        log_phase(logger, "PLAYING", f"gen={gen} proxy self-play (LE, target {args.samples:,} samples)")
-        prog = lambda c, t: log_phase(logger, "PLAYING", f"gen={gen} proxy {c:,}/{t:,} samples")
+        log_phase(logger, "PLAYING", f"gen={gen} proxy self-play (LE, target {spcfg.samples_per_gen:,} samples)")
+        def prog(c, t, _g=gen):
+            log_phase(logger, "PLAYING", f"gen={_g} proxy {c:,}/{t:,} samples")
+            if state:
+                state.set_progress("proxy self-play", c, t, _g)
         ps = generate_proxy(proxy, device, spcfg, seed=1000 + gen, progress_cb=prog)
         proxy_buf.add(ps)
-        log_phase(logger, "TRAINING", f"gen={gen} proxy steps={args.train_steps} buffer={len(proxy_buf):,}")
+        log_phase(logger, "TRAINING", f"gen={gen} proxy steps={train_steps} buffer={len(proxy_buf):,}")
+        if state:
+            state.set_progress("training proxy", 0, 1, gen)
         pstats = train_on_samples(proxy, proxy_opt, proxy_buf.dataset(), device,
-                                  steps=args.train_steps, batch_size=args.batch_size,
-                                  recency=args.recency)
+                                  steps=train_steps, batch_size=batch_size,
+                                  recency=recency)
         ptgt = policy_target_stats(ps.pol)
 
         # --- response self-play + train (after warmup) ---
@@ -312,13 +380,16 @@ def main():
         rstats = {}
         if train_response:
             log_phase(logger, "PLAYING", f"gen={gen} response self-play (best-response vs proxy)")
-            rprog = lambda c, t: log_phase(logger, "PLAYING", f"gen={gen} response {c:,}/{t:,} samples")
+            def rprog(c, t, _g=gen):
+                log_phase(logger, "PLAYING", f"gen={_g} response {c:,}/{t:,} samples")
+                if state:
+                    state.set_progress("response self-play", c, t, _g)
             rs = generate_response(response, proxy, device, spcfg, seed=5000 + gen, progress_cb=rprog)
             response_buf.add(rs)
-            log_phase(logger, "TRAINING", f"gen={gen} response steps={args.train_steps}")
+            log_phase(logger, "TRAINING", f"gen={gen} response steps={train_steps}")
             rstats = train_on_samples(response, response_opt, response_buf.dataset(), device,
-                                      steps=args.train_steps, batch_size=args.batch_size,
-                                      recency=args.recency)
+                                      steps=train_steps, batch_size=batch_size,
+                                      recency=recency)
 
         gen_seconds = time.time() - t0
 
@@ -356,36 +427,47 @@ def main():
             metric["gpu_peak_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
 
         # --- eval ---
-        if args.eval_every and gen % args.eval_every == 0:
-            log_phase(logger, "EVALUATING", f"gen={gen} vs pool (baseline, UCT) games={args.eval_games}")
+        if eval_every and gen % eval_every == 0:
+            log_phase(logger, "EVALUATING", f"gen={gen} vs pool (baseline, UCT) games={eval_games}")
+            if state:
+                state.set_progress("evaluating", 0, 1, gen)
             ev = evaluate_albatross(
                 proxy, response if train_response else None, device, spcfg,
-                games=args.eval_games, seed=7000 + gen, eval_opp_tau=args.eval_opp_tau,
+                games=eval_games, seed=7000 + gen, eval_opp_tau=args.eval_opp_tau,
                 uct_iters=args.uct_iters)
             metric.update({k: round(v, 4) for k, v in ev.items()})
 
         # --- record replays for the dashboard ---
-        if args.record_games > 0 and args.record_every and gen % args.record_every == 0:
-            log_phase(logger, "RECORDING", f"gen={gen} games={args.record_games}/matchup")
+        if record_games > 0 and record_every and gen % record_every == 0:
+            log_phase(logger, "RECORDING", f"gen={gen} games={record_games}/matchup")
+            if state:
+                state.set_progress("recording", 0, 1, gen)
             recorded = record_albatross_games(
                 proxy, response if train_response else None, device, spcfg,
-                n_games=args.record_games, seed=9000 + gen, uct_iters=args.uct_iters)
+                n_games=record_games, seed=9000 + gen, uct_iters=args.uct_iters)
             run.save_games(gen, recorded)
             run.prune_games(keep=args.keep_games)
 
         log_phase(logger, "GEN", " ".join(f"{k}={v}" for k, v in metric.items()))
         run.append_metric(metric)
         run.write_status({"generation": gen, "running": True,
-                          "total_generations": args.generations, "last": metric})
+                          "total_generations": args.generations or None, "last": metric})
+        if state:
+            state.add_metric(metric)
+            state.set_status(generation=gen, running=True, paused=state.paused,
+                             phase="paused" if state.paused else "idle", last=metric)
         run.save_state(lambda p: torch.save({
             "gen": gen, "net_cfg": asdict(cfg),
             "proxy": proxy.state_dict(), "proxy_opt": proxy_opt.state_dict(),
             "response": response.state_dict() if train_response else None,
             "response_opt": response_opt.state_dict() if train_response else None,
         }, p))
+        gen += 1
 
-    run.write_status({"generation": args.generations - 1, "running": False,
-                      "total_generations": args.generations})
+    run.write_status({"generation": gen - 1, "running": False,
+                      "total_generations": args.generations or None})
+    if state:
+        state.set_status(running=False, phase="stopped", generation=gen - 1)
 
 
 if __name__ == "__main__":

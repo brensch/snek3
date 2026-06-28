@@ -84,6 +84,9 @@ ALB_RECORD_GAMES ?= 2   # replays per (agent,opponent) matchup, recorded for the
 ALB_RECORD_EVERY ?= 1   # record replays every N generations
 ALB_MAX_TURNS  ?= 0     # 0 = games play until a snake dies (no artificial cap)
 ALB_DRAW_VALUE ?= -0.9  # equilibrium-search terminal value of a draw (negative kills suicide-draws)
+ALB_GENERATIONS ?= 0    # 0 = run forever until stopped via the dashboard/control API
+ALB_SERVE_PORT ?= 8050  # embedded live dashboard + control API port (0.0.0.0)
+ALB_SERVE_TOKEN ?=      # bearer token for param/control writes; blank = auto-generate (printed at startup)
 
 .DEFAULT_GOAL := help
 .PHONY: help venv build test test-rust test-py bench lint fmt train albatross overnight adaptive ui dashboard serve audit clean clean-all
@@ -93,7 +96,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: GENERATIONS TOTAL_GENERATIONS ADAPTIVE_EVERY SAMPLES COUNT SIMS EXPLORATION_PROB DRAW_VALUE BOOTSTRAP_VALUE SKIP_SHORT_DRAW_TURNS DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS ADAPTIVE_TRAIN_STEPS BATCH_SIZE BUFFER_SIZE FILTERS BLOCKS EVAL_EVERY EVAL_GAMES RELATIVE_EVERY MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY RECORD_GAMES RECORD_EVERY RUN_ID ARGS ALB_COUNT ALB_SAMPLES ALB_EVAL_EVERY ALB_EVAL_GAMES ALB_EVAL_BATCH ALB_BATCH ALB_DRAW_VALUE ALB_MAX_TURNS ALB_RECORD_GAMES ALB_RECORD_EVERY NUM_SNAKES TAU_MIN TAU_MAX RESPONSE_TAU RESPONSE_AFTER EVAL_OPP_TAU UCT_ITERS LR PORT SERVE_PORT CKPT TORCH_INDEX"
+	@echo "Vars: GENERATIONS TOTAL_GENERATIONS ADAPTIVE_EVERY SAMPLES COUNT SIMS EXPLORATION_PROB DRAW_VALUE BOOTSTRAP_VALUE SKIP_SHORT_DRAW_TURNS DEPTH TAU ITERS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS ADAPTIVE_TRAIN_STEPS BATCH_SIZE BUFFER_SIZE FILTERS BLOCKS EVAL_EVERY EVAL_GAMES RELATIVE_EVERY MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY RECORD_GAMES RECORD_EVERY RUN_ID ARGS ALB_COUNT ALB_SAMPLES ALB_EVAL_EVERY ALB_EVAL_GAMES ALB_EVAL_BATCH ALB_BATCH ALB_DRAW_VALUE ALB_MAX_TURNS ALB_RECORD_GAMES ALB_RECORD_EVERY ALB_GENERATIONS ALB_SERVE_PORT ALB_SERVE_TOKEN NUM_SNAKES TAU_MIN TAU_MAX RESPONSE_TAU RESPONSE_AFTER EVAL_OPP_TAU UCT_ITERS LR PORT SERVE_PORT CKPT TORCH_INDEX"
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
@@ -145,7 +148,8 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 
 albatross: build ## Full Albatross: temperature-conditioned proxy + best-response net + UCT opponent pool. Override TAU_MIN/TAU_MAX, RESPONSE_AFTER, RUN_ID, FRESH=1...
 	$(PY) -m azsnek.train_albatross \
-		--generations $(GENERATIONS) --num-snakes $(NUM_SNAKES) \
+		--generations $(ALB_GENERATIONS) --num-snakes $(NUM_SNAKES) \
+		--serve-port $(ALB_SERVE_PORT) $(if $(ALB_SERVE_TOKEN),--serve-token $(ALB_SERVE_TOKEN),) \
 		--samples $(ALB_SAMPLES) --count $(ALB_COUNT) \
 		--depth $(DEPTH) --iters $(ITERS) \
 		--tau-min $(TAU_MIN) --tau-max $(TAU_MAX) \

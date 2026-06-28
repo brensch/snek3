@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
 import MetricsChart from "./MetricsChart.jsx";
 import GenerationView from "./GenerationView.jsx";
+import ControlPanel from "./ControlPanel.jsx";
 
 const runFromUrl = () => {
   const m = window.location.pathname.match(/^\/run\/(.+)$/);
@@ -10,44 +11,84 @@ const runFromUrl = () => {
 
 export default function App() {
   const [runs, setRuns] = useState([]);
+  const [liveRun, setLiveRun] = useState(null);
   const [run, setRun] = useState(runFromUrl());
   const [status, setStatus] = useState({});
   const [meta, setMeta] = useState({});
   const [metrics, setMetrics] = useState([]);
+  const [params, setParams] = useState({});
+  const [liveKeys, setLiveKeys] = useState([]);
+  const [lockedKeys, setLockedKeys] = useState([]);
   const [gamesIndex, setGamesIndex] = useState([]);
   const runRef = useRef(null);
   useEffect(() => { runRef.current = run; }, [run]);
 
-  // Keep the URL in sync with the selected run (/run/<name>) so reloads/bookmarks
-  // return to it.
+  const isLive = run && run === liveRun;
+
+  // Keep the URL in sync with the selected run.
   useEffect(() => {
     const want = run ? `/run/${encodeURIComponent(run)}` : "/";
     if (window.location.pathname !== want) window.history.replaceState(null, "", want);
   }, [run]);
 
+  // Discover runs + which one is live; default to the live run.
   useEffect(() => {
     let alive = true;
-    const refresh = async () => {
-      try {
-        const rs = await api.runs();
-        if (!alive) return;
-        setRuns(rs);
-        let r = runRef.current;
-        if (!r || !rs.includes(r)) r = rs[0] || null;
-        runRef.current = r;
-        setRun(r);
-        if (!r) return;
-        const [st, mt, me, gi] = await Promise.all([
-          api.status(r), api.metrics(r), api.meta(r), api.games(r),
-        ]);
-        if (!alive) return;
-        setStatus(st); setMetrics(mt); setMeta(me); setGamesIndex(gi);
-      } catch (_) { /* transient; next tick retries */ }
+    const tick = async () => {
+      const { runs: rs, live } = await api.runs();
+      if (!alive) return;
+      setRuns(rs || []);
+      setLiveRun(live || null);
+      if (!runRef.current || !(rs || []).includes(runRef.current)) {
+        setRun(live || (rs || [])[0] || null);
+      }
     };
-    refresh();
-    const id = setInterval(refresh, 2500);
+    tick();
+    const id = setInterval(tick, 5000);
     return () => { alive = false; clearInterval(id); };
   }, []);
+
+  // LIVE run: subscribe to the SSE stream.
+  useEffect(() => {
+    if (!isLive) return;
+    const es = api.stream((ev) => {
+      if (ev.type === "snapshot") {
+        setMeta(ev.meta || {}); setStatus(ev.status || {});
+        setParams(ev.params || {}); setMetrics(ev.metrics || []);
+        setLiveKeys(ev.live_params || []); setLockedKeys(ev.locked_params || []);
+      } else if (ev.type === "metric") {
+        setMetrics((m) => [...m, ev.metric]);
+      } else if (ev.type === "status") {
+        setStatus(ev.status || {});
+      } else if (ev.type === "params") {
+        setParams(ev.params || {});
+      }
+    });
+    return () => es.close();
+  }, [isLive, run]);
+
+  // ARCHIVED run: poll REST.
+  useEffect(() => {
+    if (isLive || !run) return;
+    let alive = true;
+    const tick = async () => {
+      const [st, mt, me] = await Promise.all([api.status(run), api.metrics(run), api.meta(run)]);
+      if (!alive) return;
+      setStatus(st); setMetrics(mt); setMeta(me);
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => { alive = false; clearInterval(id); };
+  }, [isLive, run]);
+
+  // Games index (both modes): refetch when the generation advances.
+  const gen = status?.generation;
+  useEffect(() => {
+    if (!run) return;
+    let alive = true;
+    api.games(run).then((g) => { if (alive) setGamesIndex(g); });
+    return () => { alive = false; };
+  }, [run, gen]);
 
   const running = status.running;
 
@@ -56,20 +97,27 @@ export default function App() {
       <header>
         <h1>snek3<span className="dot">·</span>training</h1>
         <select value={run || ""} onChange={(e) => setRun(e.target.value)}>
-          {runs.length ? runs.map((r) => <option key={r}>{r}</option>) : <option>(no runs)</option>}
+          {runs.length ? runs.map((r) => (
+            <option key={r} value={r}>{r === liveRun ? `● ${r}` : r}</option>
+          )) : <option>(no runs)</option>}
         </select>
         <span className={"pill " + (running ? "live" : "done")}>
-          {status.generation == null
-            ? "no data"
-            : `${running ? "● live" : "■ done"} · gen ${status.generation + 1}/${status.total_generations ?? "?"}`}
+          {status.generation == null ? "no data"
+            : `${running ? (status.paused ? "❚❚ paused" : "● live") : "■ done"} · gen ${status.generation}`}
         </span>
         <div className="grow" />
         <span className="pill">
-          {meta.board ? `${meta.board}×${meta.board} · ${meta.filters}f/${meta.blocks}b · depth ${meta.depth} · ${meta.device || ""}` : "—"}
+          {meta.board ? `${meta.board}×${meta.board} · ${meta.filters}f/${meta.blocks}b · depth ${meta.depth}` : "—"}
         </span>
       </header>
 
       <main className="stacked">
+        <section className="card">
+          <h2>Control</h2>
+          <ControlPanel status={status} params={params} liveKeys={liveKeys}
+            lockedKeys={lockedKeys} live={isLive} />
+        </section>
+
         <section className="card">
           <h2>Training metrics</h2>
           <MetricsChart metrics={metrics} />
