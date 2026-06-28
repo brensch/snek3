@@ -35,4 +35,5 @@ export const api = {
   },
   setParams: (patch, token) => postJSON("/api/params", patch, token),
   control: (action, token) => postJSON("/api/control", { action }, token),
+  createRun: (name, params, token) => postJSON("/api/runs", { name, params }, token),
 };

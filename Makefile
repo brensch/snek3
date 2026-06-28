@@ -146,7 +146,7 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 		--record-games $(RECORD_GAMES) --record-every $(RECORD_EVERY) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
-albatross: build ## Full Albatross: temperature-conditioned proxy + best-response net + UCT opponent pool. Override TAU_MIN/TAU_MAX, RESPONSE_AFTER, RUN_ID, FRESH=1...
+server: build ## Trainer-as-server: dashboard + live control API. No RUN_ID = idle (start runs from the dashboard); with RUN_ID/params = auto-start that run. Override ALB_SERVE_PORT, TAU_*, RUN_ID, FRESH=1...
 	$(PY) -m azsnek.train_albatross \
 		--generations $(ALB_GENERATIONS) --num-snakes $(NUM_SNAKES) \
 		--serve-port $(ALB_SERVE_PORT) $(if $(ALB_SERVE_TOKEN),--serve-token $(ALB_SERVE_TOKEN),) \
@@ -162,6 +162,8 @@ albatross: build ## Full Albatross: temperature-conditioned proxy + best-respons
 		--eval-every $(ALB_EVAL_EVERY) --eval-games $(ALB_EVAL_GAMES) \
 		--record-games $(ALB_RECORD_GAMES) --record-every $(ALB_RECORD_EVERY) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
+
+albatross: server ## alias for `make server` (back-compat)
 
 overnight: build ## Start a background overnight training run. Override TAU, GENERATIONS, SAMPLES, RUN_ID...
 	TAU=$(TAU) GENERATIONS=$(GENERATIONS) SAMPLES=$(SAMPLES) COUNT=$(COUNT) \

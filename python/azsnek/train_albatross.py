@@ -23,6 +23,7 @@ import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import argparse
+import copy
 import json
 import random
 import time
@@ -250,39 +251,38 @@ def build_args():
     return ap.parse_args()
 
 
-def main():
-    args = build_args()
-    logger = setup_logger()
-    device = device_auto()
-    log_phase(logger, "SETUP", f"device={device}")
-
+def train_one_run(a, state, device, logger) -> None:
+    """Train a single run end to end. `a` is an args-like namespace fully
+    describing the run; `state` is the live RunState (or None when --no-serve).
+    Returns when the run finishes, is stopped, or a different run is requested
+    (the caller inspects `state` to decide what to do next)."""
     spcfg = SelfPlayConfig(
-        board=args.board, num_snakes=args.num_snakes, count=args.count,
-        eval_batch_size=args.eval_batch_size, samples_per_gen=args.samples,
-        max_turns=args.max_turns, exploration_prob=args.exploration_prob,
-        depth=args.depth, iters=args.iters, tau_min=args.tau_min, tau_max=args.tau_max,
-        response_tau=args.response_tau, draw_value=args.draw_value,
+        board=a.board, num_snakes=a.num_snakes, count=a.count,
+        eval_batch_size=a.eval_batch_size, samples_per_gen=a.samples,
+        max_turns=a.max_turns, exploration_prob=a.exploration_prob,
+        depth=a.depth, iters=a.iters, tau_min=a.tau_min, tau_max=a.tau_max,
+        response_tau=a.response_tau, draw_value=a.draw_value,
     )
 
-    run = RunWriter(args.runs_dir, run_id=args.run_id, meta={
-        "mode": "albatross", "board": args.board, "num_snakes": args.num_snakes,
-        "filters": args.filters, "blocks": args.blocks, "depth": args.depth,
-        "iters": args.iters, "tau_min": args.tau_min, "tau_max": args.tau_max,
-        "response_tau": args.response_tau, "response_after": args.response_after,
-        "samples_per_gen": args.samples, "count": args.count, "max_turns": args.max_turns,
-        "buffer_size": args.buffer_size, "generations": args.generations,
+    run = RunWriter(a.runs_dir, run_id=a.run_id, meta={
+        "mode": "albatross", "board": a.board, "num_snakes": a.num_snakes,
+        "filters": a.filters, "blocks": a.blocks, "depth": a.depth,
+        "iters": a.iters, "tau_min": a.tau_min, "tau_max": a.tau_max,
+        "response_tau": a.response_tau, "response_after": a.response_after,
+        "samples_per_gen": a.samples, "count": a.count, "max_turns": a.max_turns,
+        "buffer_size": a.buffer_size, "generations": a.generations,
     })
     log_phase(logger, "SETUP", f"run_id={run.run_id}")
 
-    cfg = NetConfig(channels=snek.CHANNELS, filters=args.filters, blocks=args.blocks,
+    cfg = NetConfig(channels=snek.CHANNELS, filters=a.filters, blocks=a.blocks,
                     temperature_input=True)
     proxy = AZNet(cfg).to(device)
-    proxy_opt = torch.optim.Adam(proxy.parameters(), lr=args.lr, weight_decay=1e-4)
+    proxy_opt = torch.optim.Adam(proxy.parameters(), lr=a.lr, weight_decay=1e-4)
     response = AZNet(cfg).to(device)
-    response_opt = torch.optim.Adam(response.parameters(), lr=args.lr, weight_decay=1e-4)
+    response_opt = torch.optim.Adam(response.parameters(), lr=a.lr, weight_decay=1e-4)
 
     start_gen = 0
-    if run.has_state() and not args.fresh:
+    if run.has_state() and not a.fresh:
         st = torch.load(run.state_path, map_location=device, weights_only=False)
         proxy.load_state_dict(st["proxy"])
         proxy_opt.load_state_dict(st["proxy_opt"])
@@ -291,22 +291,15 @@ def main():
             response_opt.load_state_dict(st["response_opt"])
         start_gen = st["gen"] + 1
         log_phase(logger, "RESUME", f"resumed at gen {start_gen}")
-    elif args.fresh and run.has_state():
+    elif a.fresh and run.has_state():
         run.reset()
 
-    proxy_buf = ReplayBuffer(args.buffer_size)
-    response_buf = ReplayBuffer(args.buffer_size)
+    proxy_buf = ReplayBuffer(a.buffer_size)
+    response_buf = ReplayBuffer(a.buffer_size)
 
-    # --- live control + telemetry server ---
-    state = None
-    if args.serve:
-        import secrets
+    if state is not None:
         from . import control
-        from pathlib import Path as _Path
-
-        token = args.serve_token or secrets.token_urlsafe(16)
-        init_params = {k: getattr(args, k) for k in control.LIVE_PARAMS}
-        # restore prior metrics so the dashboard shows history immediately on resume
+        init_params = {k: getattr(a, k) for k in control.LIVE_PARAMS}
         history = []
         if run.metrics_path.exists():
             for ln in run.metrics_path.read_text().splitlines():
@@ -316,33 +309,29 @@ def main():
                         history.append(json.loads(ln))
                     except json.JSONDecodeError:
                         pass
-        state = control.RunState(run.run_id, run.read_json("meta.json"), init_params, history)
-        static_dir = _Path(__file__).resolve().parent.parent / "dashboard" / "static"
-        control.serve_in_thread(state, args.serve_host, args.serve_port,
-                                _Path(args.runs_dir), static_dir, token)
-        log_phase(logger, "SERVE", f"http://{args.serve_host}:{args.serve_port}  run={run.run_id}")
-        log_phase(logger, "SERVE", f"write token: {token}")
+        state.begin_run(run.run_id, run.read_json("meta.json"), init_params, history)
 
     run.write_status({"generation": start_gen - 1, "running": True,
-                      "total_generations": args.generations or None})
+                      "total_generations": a.generations or None})
 
     cuda = device.type == "cuda"
     gen = start_gen
-    infinite = args.generations <= 0
-    while (infinite or gen < args.generations) and not (state and state.stopping):
+    infinite = a.generations <= 0
+    while (infinite or gen < a.generations) and not (
+            state and (state.stopping or state.pending_run or state.shutdown)):
         # pause gate: hold at the gen boundary while paused (server stays live).
-        while state and state.paused and not state.stopping:
+        while state and state.paused and not (state.stopping or state.pending_run or state.shutdown):
             time.sleep(0.3)
-        if state and state.stopping:
+        if state and (state.stopping or state.pending_run or state.shutdown):
             break
         # apply any live param updates for this generation.
         if state:
             p = state.params_snapshot()
             spcfg = SelfPlayConfig(
-                board=args.board, num_snakes=args.num_snakes, count=p["count"],
-                eval_batch_size=args.eval_batch_size, samples_per_gen=p["samples"],
-                max_turns=args.max_turns, exploration_prob=p["exploration_prob"],
-                depth=args.depth, iters=p["iters"], tau_min=p["tau_min"], tau_max=p["tau_max"],
+                board=a.board, num_snakes=a.num_snakes, count=p["count"],
+                eval_batch_size=a.eval_batch_size, samples_per_gen=p["samples"],
+                max_turns=a.max_turns, exploration_prob=p["exploration_prob"],
+                depth=a.depth, iters=p["iters"], tau_min=p["tau_min"], tau_max=p["tau_max"],
                 response_tau=p["response_tau"], draw_value=p["draw_value"],
             )
             for opt in (proxy_opt, response_opt):
@@ -352,9 +341,9 @@ def main():
             eval_every, eval_games = p["eval_every"], p["eval_games"]
             record_games, record_every = p["record_games"], p["record_every"]
         else:
-            train_steps, batch_size, recency = args.train_steps, args.batch_size, args.recency
-            eval_every, eval_games = args.eval_every, args.eval_games
-            record_games, record_every = args.record_games, args.record_every
+            train_steps, batch_size, recency = a.train_steps, a.batch_size, a.recency
+            eval_every, eval_games = a.eval_every, a.eval_games
+            record_games, record_every = a.record_games, a.record_every
 
         t0 = time.time()
         if cuda:
@@ -376,7 +365,7 @@ def main():
         ptgt = policy_target_stats(ps.pol)
 
         # --- response self-play + train (after warmup) ---
-        train_response = gen >= args.response_after and args.num_snakes == 2
+        train_response = gen >= a.response_after and a.num_snakes == 2
         rstats = {}
         if train_response:
             log_phase(logger, "PLAYING", f"gen={gen} response self-play (best-response vs proxy)")
@@ -413,8 +402,8 @@ def main():
             "proxy_draw_rate": round(ps.draws / max(ps.games, 1), 3),
         }
         # len_frac is only meaningful with a turn cap; with no cap, report raw turns.
-        if args.max_turns > 0:
-            metric["proxy_len_frac"] = round(min(1.0, proxy_mean_turns / args.max_turns), 3)
+        if a.max_turns > 0:
+            metric["proxy_len_frac"] = round(min(1.0, proxy_mean_turns / a.max_turns), 3)
         # Throughput / utilization (from proxy self-play timing).
         fwd, srch = ps.fwd_seconds, ps.search_seconds
         metric["inference_per_sec"] = round(ps.inferences / fwd) if fwd > 0 else 0
@@ -433,8 +422,8 @@ def main():
                 state.set_progress("evaluating", 0, 1, gen)
             ev = evaluate_albatross(
                 proxy, response if train_response else None, device, spcfg,
-                games=eval_games, seed=7000 + gen, eval_opp_tau=args.eval_opp_tau,
-                uct_iters=args.uct_iters)
+                games=eval_games, seed=7000 + gen, eval_opp_tau=a.eval_opp_tau,
+                uct_iters=a.uct_iters)
             metric.update({k: round(v, 4) for k, v in ev.items()})
 
         # --- record replays for the dashboard ---
@@ -444,14 +433,14 @@ def main():
                 state.set_progress("recording", 0, 1, gen)
             recorded = record_albatross_games(
                 proxy, response if train_response else None, device, spcfg,
-                n_games=record_games, seed=9000 + gen, uct_iters=args.uct_iters)
+                n_games=record_games, seed=9000 + gen, uct_iters=a.uct_iters)
             run.save_games(gen, recorded)
-            run.prune_games(keep=args.keep_games)
+            run.prune_games(keep=a.keep_games)
 
         log_phase(logger, "GEN", " ".join(f"{k}={v}" for k, v in metric.items()))
         run.append_metric(metric)
         run.write_status({"generation": gen, "running": True,
-                          "total_generations": args.generations or None, "last": metric})
+                          "total_generations": a.generations or None, "last": metric})
         if state:
             state.add_metric(metric)
             state.set_status(generation=gen, running=True, paused=state.paused,
@@ -465,9 +454,77 @@ def main():
         gen += 1
 
     run.write_status({"generation": gen - 1, "running": False,
-                      "total_generations": args.generations or None})
-    if state:
-        state.set_status(running=False, phase="stopped", generation=gen - 1)
+                      "total_generations": a.generations or None})
+    log_phase(logger, "DONE", f"run {run.run_id} ended at gen {gen - 1}")
+
+
+def _run_cfg(args, name: str, overrides: dict):
+    """Build an args-like config for a dashboard-created run: base CLI args with
+    the requested overrides, a fresh start, and run-forever unless overridden."""
+    a = copy.copy(args)
+    for k, v in (overrides or {}).items():
+        setattr(a, k, v)
+    a.run_id = name
+    a.fresh = True
+    a.generations = int((overrides or {}).get("generations", 0))
+    return a
+
+
+def main():
+    args = build_args()
+    logger = setup_logger()
+    device = device_auto()
+    log_phase(logger, "SETUP", f"device={device}")
+    cuda = device.type == "cuda"
+
+    # --no-serve: headless single run (old behaviour).
+    if not args.serve:
+        train_one_run(args, None, device, logger)
+        return
+
+    import secrets
+    from pathlib import Path as _Path
+    from . import control
+
+    token = args.serve_token or secrets.token_urlsafe(16)
+    state = control.RunState()
+    state.set_base_spec({k: getattr(args, k) for k in control.NEW_RUN_PARAMS})
+    static_dir = _Path(__file__).resolve().parent.parent / "dashboard" / "static"
+    control.serve_in_thread(state, args.serve_host, args.serve_port,
+                            _Path(args.runs_dir), static_dir, token)
+    log_phase(logger, "SERVE", f"http://{args.serve_host}:{args.serve_port}")
+    log_phase(logger, "SERVE", f"write token: {token}")
+
+    # Auto-start a run iff a run id was passed on the CLI; otherwise idle.
+    pending = {"name": args.run_id, "overrides": {}, "cli": True} if args.run_id else None
+
+    while not state.shutdown:
+        if pending is None:
+            state.go_idle()
+            log_phase(logger, "IDLE", "server up — start a run from the dashboard")
+            while not state.pending_run and not state.shutdown:
+                time.sleep(0.3)
+            if state.shutdown:
+                break
+            pending = state.take_new_run()
+            if pending is None:
+                continue
+
+        if pending.get("cli"):
+            a = args  # resume/start exactly as launched
+        else:
+            a = _run_cfg(args, pending["name"], pending["overrides"])
+            log_phase(logger, "NEWRUN", f"{a.run_id} overrides={pending['overrides']}")
+        train_one_run(a, state, device, logger)
+
+        # Did the run end because a different one was requested? If so, loop into
+        # it; otherwise (stop / natural end) drop back to idle.
+        pending = state.take_new_run()
+        if cuda:
+            torch.cuda.empty_cache()
+
+    state.go_idle()
+    log_phase(logger, "DONE", "shutdown")
 
 
 if __name__ == "__main__":

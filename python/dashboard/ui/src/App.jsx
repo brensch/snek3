@@ -3,6 +3,7 @@ import { api } from "./api.js";
 import MetricsChart from "./MetricsChart.jsx";
 import GenerationView from "./GenerationView.jsx";
 import ControlPanel from "./ControlPanel.jsx";
+import Home from "./Home.jsx";
 
 const runFromUrl = () => {
   const m = window.location.pathname.match(/^\/run\/(.+)$/);
@@ -39,8 +40,10 @@ export default function App() {
       if (!alive) return;
       setRuns(rs || []);
       setLiveRun(live || null);
-      if (!runRef.current || !(rs || []).includes(runRef.current)) {
-        setRun(live || (rs || [])[0] || null);
+      // Don't auto-pick a run: the landing page (run === null) lets the user
+      // start or choose one. Only clear a selection that has vanished.
+      if (runRef.current && !(rs || []).includes(runRef.current)) {
+        setRun(null);
       }
     };
     tick();
@@ -95,40 +98,49 @@ export default function App() {
   return (
     <>
       <header>
-        <h1>snek3<span className="dot">·</span>training</h1>
-        <select value={run || ""} onChange={(e) => setRun(e.target.value)}>
-          {runs.length ? runs.map((r) => (
+        <h1 className="brand" onClick={() => setRun(null)} title="Home">
+          snek3<span className="dot">·</span>training
+        </h1>
+        <select value={run || ""} onChange={(e) => setRun(e.target.value || null)}>
+          <option value="">＋ home / new run</option>
+          {runs.map((r) => (
             <option key={r} value={r}>{r === liveRun ? `● ${r}` : r}</option>
-          )) : <option>(no runs)</option>}
+          ))}
         </select>
-        <span className={"pill " + (running ? "live" : "done")}>
-          {status.generation == null ? "no data"
-            : `${running ? (status.paused ? "❚❚ paused" : "● live") : "■ done"} · gen ${status.generation}`}
-        </span>
+        {run && (
+          <span className={"pill " + (running ? "live" : "done")}>
+            {status.generation == null ? "no data"
+              : `${running ? (status.paused ? "❚❚ paused" : "● live") : "■ done"} · gen ${status.generation}`}
+          </span>
+        )}
         <div className="grow" />
-        <span className="pill">
-          {meta.board ? `${meta.board}×${meta.board} · ${meta.filters}f/${meta.blocks}b · depth ${meta.depth}` : "—"}
-        </span>
+        {run && (
+          <span className="pill">
+            {meta.board ? `${meta.board}×${meta.board} · ${meta.filters}f/${meta.blocks}b · depth ${meta.depth}` : "—"}
+          </span>
+        )}
       </header>
 
-      <main className="stacked">
-        <section className="card">
-          <h2>Control</h2>
-          <ControlPanel status={status} params={params} liveKeys={liveKeys}
-            lockedKeys={lockedKeys} live={isLive} />
-        </section>
+      {run ? (
+        <main className="stacked">
+          <section className="card">
+            <h2>Control</h2>
+            <ControlPanel status={status} params={params} liveKeys={liveKeys}
+              lockedKeys={lockedKeys} live={isLive} />
+          </section>
 
-        <section className="card">
-          <h2>Training metrics</h2>
-          <MetricsChart metrics={metrics} />
-        </section>
+          <section className="card">
+            <h2>Training metrics</h2>
+            <MetricsChart metrics={metrics} />
+          </section>
 
-        {run ? (
           <GenerationView run={run} gamesIndex={gamesIndex} metrics={metrics} />
-        ) : (
-          <section className="card"><h2>Games</h2><p className="muted">no run selected</p></section>
-        )}
-      </main>
+        </main>
+      ) : (
+        <main className="stacked">
+          <Home runs={runs} liveRun={liveRun} onSelect={setRun} />
+        </main>
+      )}
     </>
   );
 }

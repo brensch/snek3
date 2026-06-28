@@ -44,24 +44,66 @@ LIVE_PARAMS: dict[str, type] = {
 # Baked into the net / board at startup; cannot change without a fresh run.
 LOCKED_PARAMS = ("filters", "blocks", "board", "num_snakes", "depth")
 
+# Everything a dashboard-created run may override (live + locked + a few extras),
+# with the coercion applied to incoming JSON values.
+NEW_RUN_PARAMS: dict[str, type] = {
+    **LIVE_PARAMS,
+    "filters": int, "blocks": int, "board": int, "num_snakes": int, "depth": int,
+    "response_after": int, "generations": int, "eval_opp_tau": float,
+    "uct_iters": int, "max_turns": int, "eval_batch_size": int,
+    "buffer_size": int, "keep_games": int,
+}
+
 
 class RunState:
     """Thread-safe live state shared between the training thread (writer) and the
     server thread (readers / SSE fan-out)."""
 
-    def __init__(self, run_id: str, meta: dict, params: dict, history: list[dict]):
+    def __init__(self):
         self._lock = threading.Lock()
-        self.run_id = run_id
-        self.meta = dict(meta)
-        self.params = {k: params[k] for k in LIVE_PARAMS if k in params}
-        self.metrics: list[dict] = list(history)
-        self.status: dict = {"running": True, "paused": False, "generation": None,
-                             "phase": "starting", "progress": None}
+        self.run_id: str | None = None       # None == idle (server up, no run)
+        self.meta: dict = {}
+        self.params: dict = {}
+        self.metrics: list[dict] = []
+        self.status: dict = {"running": False, "paused": False, "generation": None,
+                             "phase": "idle", "progress": None}
+        self.base_spec: dict = {}            # default config for dashboard-created runs
         self._paused = False
-        self._stop = False
+        self._stop_run = False               # stop current run -> back to idle
+        self._new_run: dict | None = None    # {"name":..., "overrides":{...}}
+        self._shutdown = False               # exit the process entirely
         # set by the server thread once its event loop is up
         self.loop: asyncio.AbstractEventLoop | None = None
         self.subscribers: set[asyncio.Queue] = set()  # touched only on loop thread
+
+    # ---- run lifecycle (called by the training thread) ----
+    def set_base_spec(self, spec: dict) -> None:
+        with self._lock:
+            self.base_spec = dict(spec)
+
+    def begin_run(self, run_id: str, meta: dict, params: dict, history: list[dict]) -> None:
+        with self._lock:
+            self.run_id = run_id
+            self.meta = dict(meta)
+            self.params = {k: params[k] for k in LIVE_PARAMS if k in params}
+            self.metrics = list(history)
+            self.status = {"running": True, "paused": False, "generation": None,
+                           "phase": "starting", "progress": None}
+            self._paused = False
+            self._stop_run = False
+        self.publish({"type": "snapshot", **self.snapshot()})
+
+    def go_idle(self) -> None:
+        with self._lock:
+            self.run_id = None
+            self.meta = {}
+            self.params = {}
+            self.metrics = []
+            self.status = {"running": False, "paused": False, "generation": None,
+                           "phase": "idle", "progress": None}
+            self._paused = False
+            self._stop_run = False
+        self.publish({"type": "snapshot", **self.snapshot()})
 
     # ---- control flags (read by the training loop) ----
     @property
@@ -70,11 +112,33 @@ class RunState:
 
     @property
     def stopping(self) -> bool:
-        return self._stop
+        return self._stop_run
+
+    @property
+    def pending_run(self) -> bool:
+        return self._new_run is not None
+
+    @property
+    def shutdown(self) -> bool:
+        return self._shutdown
 
     def request_stop(self) -> None:
-        self._stop = True
+        self._stop_run = True
         self.set_status(phase="stopping")
+
+    def request_new_run(self, name: str, overrides: dict) -> None:
+        self._new_run = {"name": name, "overrides": dict(overrides or {})}
+        if self.run_id:  # interrupt the active run to switch to the new one
+            self.set_status(phase="switching")
+
+    def take_new_run(self) -> dict | None:
+        nr = self._new_run
+        self._new_run = None
+        return nr
+
+    def request_shutdown(self) -> None:
+        self._shutdown = True
+        self._stop_run = True
 
     def set_paused(self, paused: bool) -> None:
         self._paused = paused
@@ -125,6 +189,7 @@ class RunState:
             return {
                 "run": self.run_id, "meta": self.meta, "status": dict(self.status),
                 "params": dict(self.params), "metrics": list(self.metrics),
+                "base_spec": dict(self.base_spec),
                 "live_params": list(LIVE_PARAMS), "locked_params": list(LOCKED_PARAMS),
             }
 
@@ -217,11 +282,33 @@ def build_app(state: RunState, runs_dir: Path, static_dir: Path, token: str | No
             state.set_paused(False)
         elif action == "stop":
             state.request_stop()
-        elif action == "checkpoint":
-            state.publish({"type": "control", "action": "checkpoint"})
+        elif action == "shutdown":
+            state.request_shutdown()
         else:
             raise HTTPException(status_code=400, detail="unknown action")
         return {"ok": True, "action": action}
+
+    @app.post("/api/runs")
+    async def create_run(request: Request):
+        """Start (or switch to) a fresh named run. Stops the active run first
+        (its checkpoint is saved) and begins the new one at the next boundary."""
+        require_token(request)
+        body = await request.json()
+        name = str((body or {}).get("name", "")).strip()
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            raise HTTPException(status_code=400, detail="bad run name")
+        if (runs_dir / name).exists():
+            raise HTTPException(status_code=409, detail="a run with that name already exists")
+        overrides = {}
+        for k, v in ((body or {}).get("params") or {}).items():
+            if k not in NEW_RUN_PARAMS:
+                raise HTTPException(status_code=400, detail=f"unknown param: {k}")
+            try:
+                overrides[k] = NEW_RUN_PARAMS[k](v)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"bad value for {k}")
+        state.request_new_run(name, overrides)
+        return {"ok": True, "name": name, "overrides": overrides}
 
     # ---------- runs / history (file-backed; for browsing any run) ----------
     @app.get("/api/runs")
@@ -230,8 +317,9 @@ def build_app(state: RunState, runs_dir: Path, static_dir: Path, token: str | No
         names = set()
         if runs_dir.exists():
             names = {p.name for p in runs_dir.iterdir() if p.is_dir()}
-        names.add(live)
-        ordered = [live] + sorted((n for n in names if n != live), reverse=True)
+        if live:
+            names.add(live)
+        ordered = ([live] if live else []) + sorted((n for n in names if n != live), reverse=True)
         return {"runs": ordered, "live": live}
 
     def _read_jsonl(p: Path) -> list[dict]:
