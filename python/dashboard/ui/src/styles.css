@@ -209,6 +209,29 @@ canvas { display: block; background: #0b0e13; border-radius: 8px; max-width: 100
   font-style: normal;
 }
 .chart-tooltip strong { font-weight: 650; }
+/* Three grouped charts, side by side (wrap on narrow screens). */
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
+.chart-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.015);
+}
+.chart-title { font-size: 12px; font-weight: 650; color: var(--fg); margin-bottom: 6px; }
+/* Tooltip rows: swatch · label · value; the series nearest the cursor is lit. */
+.chart-tooltip .tt-row {
+  display: flex; align-items: center; gap: 6px;
+  justify-content: flex-start; padding: 1px 3px; border-radius: 4px;
+}
+.chart-tooltip .tt-row em { flex: 1; }
+.chart-tooltip .tt-row.near { background: rgba(230, 237, 243, 0.12); }
+.chart-tooltip .tt-row.near em { color: var(--fg); }
+.chart-tooltip .tt-row.near strong { color: #fff; }
 .controls { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
 #scrub { flex: 1; min-width: 140px; accent-color: var(--accent); }
 input[type="range"] { accent-color: var(--accent); }
