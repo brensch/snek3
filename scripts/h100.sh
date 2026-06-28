@@ -42,6 +42,20 @@ ok = torch.cuda.is_available()
 print(" torch", torch.__version__, "cuda", ok, torch.cuda.get_device_name(0) if ok else "")
 PY
 
+# Non-interactive launch (for a Vast/RunPod on-start command): set SNEK_SERVE=1
+# and SNEK_SERVE_TOKEN=... in the instance env. Optionally SNEK_RUN_ID=name to
+# auto-start a run, SNEK_PORT to change the port. Runs in the foreground with a
+# crash-restart loop so the box keeps serving.
+if [ "${SNEK_SERVE:-0}" = "1" ]; then
+  echo "=== launching server (SNEK_SERVE=1) on :${SNEK_PORT:-8050} ==="
+  # shellcheck disable=SC2086
+  exec bash -c 'while true; do \
+    make server ALB_SERVE_PORT='"${SNEK_PORT:-8050}"' \
+      '"$( [ -n "${SNEK_RUN_ID:-}" ] && echo RUN_ID=${SNEK_RUN_ID} )"' ; \
+    echo "server exited ($?); restarting in 5s"; sleep 5; \
+  done'
+fi
+
 cat <<'EOF'
 
 === ready ===
