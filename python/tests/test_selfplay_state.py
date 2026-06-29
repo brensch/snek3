@@ -13,5 +13,11 @@ def test_selfplay_state_save_load_public_api(tmp_path):
 
     restored_id = snek.load_selfplay_state(str(state_path))
     assert isinstance(restored_id, int)
+    info = snek.selfplay_state_info(restored_id)
+    assert info["count"] == 6
+    assert info["slots"] == 12
+    assert info["nonempty_slots"] == 0
+    assert info["pending_steps"] == 0
+    assert info["pending_alive_samples"] == 0
     assert snek.save_selfplay_state(restored_id, str(roundtrip_path)) is True
     assert roundtrip_path.stat().st_size > 0

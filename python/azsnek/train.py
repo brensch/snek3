@@ -195,10 +195,30 @@ def log_phase(logger: logging.Logger, phase: str, message: str) -> None:
     logger.info("%s | %s", label, message)
 
 
-def start_selfplay_progress_monitor(logger, state, gen: int, target_samples: int, started_at: float):
+def _selfplay_inflight_progress(info: dict | None) -> dict:
+    if not info:
+        return {}
+    return {
+        "inflight_slots": int(info.get("nonempty_slots", 0)),
+        "inflight_steps": int(info.get("pending_steps", 0)),
+        "inflight_samples": int(info.get("pending_alive_samples", 0)),
+        "inflight_turn_mean": float(info.get("active_turn_mean", 0.0)),
+        "inflight_turn_max": int(info.get("active_turn_max", 0)),
+    }
+
+
+def start_selfplay_progress_monitor(
+    logger,
+    state,
+    gen: int,
+    target_samples: int,
+    started_at: float,
+    inflight_info: dict | None = None,
+):
     """Poll Rust self-play progress while generate_selfplay runs without the GIL."""
     stop = threading.Event()
     interval = max(1, (int(target_samples) + 9) // 10)
+    inflight_progress = _selfplay_inflight_progress(inflight_info)
 
     def run() -> None:
         next_mark = interval
@@ -211,7 +231,7 @@ def start_selfplay_progress_monitor(logger, state, gen: int, target_samples: int
             done = int(progress.get("done", 0))
             total = int(progress.get("total", target_samples) or target_samples)
             if state is not None and done != last_done:
-                state.set_progress("self-play", min(done, total), total, gen)
+                state.set_progress("self-play", min(done, total), total, gen, **inflight_progress)
                 last_done = done
             while done >= next_mark and next_mark <= total:
                 elapsed = max(time.time() - started_at, 1e-9)
@@ -651,12 +671,25 @@ def train_one_run(args, state, device, logger):
 
     onnx_path = run.dir / "model.onnx"
     selfplay_state_path = run.dir / "selfplay_state.bin"
+    selfplay_state_info = None
     if args.fresh:
         selfplay_state_path.unlink(missing_ok=True)
     if selfplay_state_path.exists() and not args.fresh:
         try:
             selfplay_state_id = snek.load_selfplay_state(str(selfplay_state_path))
-            log_phase(logger, "RESUME", f"restored in-flight self-play state from {selfplay_state_path}")
+            selfplay_state_info = dict(snek.selfplay_state_info(selfplay_state_id) or {})
+            state_bytes = selfplay_state_path.stat().st_size
+            log_phase(
+                logger,
+                "RESUME",
+                f"restored in-flight self-play state from {selfplay_state_path} "
+                f"nonempty_slots={selfplay_state_info.get('nonempty_slots', 0):,} "
+                f"pending_steps={selfplay_state_info.get('pending_steps', 0):,} "
+                f"pending_alive_samples={selfplay_state_info.get('pending_alive_samples', 0):,} "
+                f"turn_mean={float(selfplay_state_info.get('active_turn_mean', 0.0)):.1f} "
+                f"turn_max={selfplay_state_info.get('active_turn_max', 0):,} "
+                f"bytes={state_bytes:,}",
+            )
         except Exception as e:  # noqa: BLE001
             log_phase(logger, "WARN", f"could not restore in-flight self-play state: {e}")
             selfplay_state_id = snek.create_selfplay_state(
@@ -704,7 +737,17 @@ def train_one_run(args, state, device, logger):
             sp.max_turns = args.max_turns
             sp.exploration_prob = args.exploration_prob
             sp.draw_value = args.draw_value
+            active_selfplay_state_info = (
+                selfplay_state_info
+                if selfplay_state_info
+                and int(selfplay_state_info.get("board", sp.board)) == sp.board
+                and int(selfplay_state_info.get("num_snakes", sp.num_snakes)) == sp.num_snakes
+                and int(selfplay_state_info.get("count", args.count)) == args.count
+                else None
+            )
             state.set_status(generation=gen, phase="self-play", running=True)
+        else:
+            active_selfplay_state_info = selfplay_state_info
         # ---- GENERATE: Rust MCTS + ONNX/CUDA inference (no Python round-trips) ----
         log_phase(
             logger,
@@ -721,9 +764,15 @@ def train_one_run(args, state, device, logger):
         )
         try:
             if state is not None:
-                state.set_progress("self-play", 0, args.samples, gen)
+                state.set_progress(
+                    "self-play",
+                    0,
+                    args.samples,
+                    gen,
+                    **_selfplay_inflight_progress(active_selfplay_state_info),
+                )
             stop_progress_monitor = start_selfplay_progress_monitor(
-                logger, state, gen, args.samples, t0
+                logger, state, gen, args.samples, t0, active_selfplay_state_info
             )
             generated = snek.generate_selfplay(
                 str(onnx_path), board=sp.board, num_snakes=sp.num_snakes,
@@ -734,6 +783,7 @@ def train_one_run(args, state, device, logger):
                 record_games=rust_sample_games, bootstrap_value=args.bootstrap_value,
                 state_id=selfplay_state_id, state_path=str(selfplay_state_path),
             )
+            selfplay_state_info = None
         except Exception as e:
             msg = str(e).lower()
             cancelled = state is not None and (

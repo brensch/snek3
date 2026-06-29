@@ -623,6 +623,54 @@ fn selfplay_progress(py: Python<'_>) -> PyResult<PyObject> {
     Ok(d.into())
 }
 
+fn selfplay_state_info_dict(py: Python<'_>, state: &SelfPlayState) -> PyResult<PyObject> {
+    let mut nonempty_slots = 0usize;
+    let mut pending_steps = 0usize;
+    let mut pending_alive_samples = 0usize;
+    let mut pending_frames = 0usize;
+    let mut active_turn_sum = 0usize;
+    let mut active_turn_max = 0u32;
+    for ((board_buf, slot_buf), turn_buf) in state
+        .boards
+        .iter()
+        .zip(state.slots.iter())
+        .zip(state.turns.iter())
+    {
+        for ((_board, slot), &turn) in board_buf.iter().zip(slot_buf.iter()).zip(turn_buf.iter()) {
+            if slot.steps == 0 {
+                continue;
+            }
+            nonempty_slots += 1;
+            pending_steps += slot.steps;
+            pending_alive_samples += slot.alive.iter().filter(|&&alive| alive).count();
+            pending_frames += slot.frames.len();
+            active_turn_sum += turn as usize;
+            active_turn_max = active_turn_max.max(turn);
+        }
+    }
+    let d = PyDict::new_bound(py);
+    d.set_item("board", state.board)?;
+    d.set_item("num_snakes", state.num_snakes)?;
+    d.set_item("count", state.count)?;
+    d.set_item("buffers", state.boards.len())?;
+    d.set_item("slots", state.boards.iter().map(Vec::len).sum::<usize>())?;
+    d.set_item("nonempty_slots", nonempty_slots)?;
+    d.set_item("pending_steps", pending_steps)?;
+    d.set_item("pending_alive_samples", pending_alive_samples)?;
+    d.set_item("pending_frames", pending_frames)?;
+    d.set_item("active_turn_sum", active_turn_sum)?;
+    d.set_item("active_turn_max", active_turn_max)?;
+    d.set_item(
+        "active_turn_mean",
+        if nonempty_slots > 0 {
+            active_turn_sum as f64 / nonempty_slots as f64
+        } else {
+            0.0
+        },
+    )?;
+    Ok(d.into())
+}
+
 fn check_cancelled() -> Result<(), String> {
     if CANCEL_SELFPLAY.load(Ordering::SeqCst) {
         return Err("cancelled".to_string());
@@ -685,6 +733,17 @@ fn load_selfplay_state(path: &str) -> PyResult<u64> {
         .map_err(|_| PyValueError::new_err("self-play state lock poisoned"))?
         .insert(id, state);
     Ok(id)
+}
+
+#[pyfunction]
+fn selfplay_state_info(py: Python<'_>, state_id: u64) -> PyResult<PyObject> {
+    let states = selfplay_states()
+        .lock()
+        .map_err(|_| PyValueError::new_err("self-play state lock poisoned"))?;
+    let Some(state) = states.get(&state_id) else {
+        return Ok(py.None());
+    };
+    selfplay_state_info_dict(py, state)
 }
 
 /// Sample one move from a 4-slot policy, mixing `explore` of a uniform over the
@@ -2073,6 +2132,7 @@ fn snek(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(drop_selfplay_state, m)?)?;
     m.add_function(wrap_pyfunction!(save_selfplay_state, m)?)?;
     m.add_function(wrap_pyfunction!(load_selfplay_state, m)?)?;
+    m.add_function(wrap_pyfunction!(selfplay_state_info, m)?)?;
     m.add_function(wrap_pyfunction!(generate_selfplay, m)?)?;
     m.add_function(wrap_pyfunction!(generate_selfplay_le, m)?)?;
     Ok(())

@@ -67,6 +67,12 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
   const last = status?.last || {};
   const chip = (label, key, fmt = (v) => v) =>
     last[key] != null ? <span className="chip" key={key}><em>{label}</em><b>{fmt(last[key])}</b></span> : null;
+  const fmtNum = (v, digits = 0) => Number(v || 0).toLocaleString(undefined, {
+    maximumFractionDigits: digits,
+  });
+  const hasInflight = prog && (
+    prog.inflight_slots > 0 || prog.inflight_steps > 0 || prog.inflight_samples > 0
+  );
 
   return (
     <div className="control">
@@ -86,6 +92,15 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
           <span className="phase-now">{status?.phase || "—"}</span>
           {determinate && <span className="phase-count">{prog.done.toLocaleString()} / {prog.total.toLocaleString()}</span>}
         </div>
+        {hasInflight && (
+          <div className="hero-phase">
+            <span className="phase-now">resumed in-flight</span>
+            <span className="phase-count">
+              {fmtNum(prog.inflight_slots)} slots · {fmtNum(prog.inflight_steps)} steps · {fmtNum(prog.inflight_samples)} pending samples
+              {prog.inflight_turn_max != null && ` · turns avg ${fmtNum(prog.inflight_turn_mean, 1)} max ${fmtNum(prog.inflight_turn_max)}`}
+            </span>
+          </div>
+        )}
         <div className={"hero-bar " + (busyPhase ? "busy" : "")}>
           <i style={determinate ? { width: `${pct}%` } : undefined} />
           {determinate && <span className="bar-pct">{pct}%</span>}

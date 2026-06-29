@@ -201,9 +201,10 @@ class RunState:
             snap = dict(self.status)
         self.publish({"type": "status", "status": snap})
 
-    def set_progress(self, phase: str, done: int, total: int, gen: int) -> None:
-        self.set_status(phase=phase, generation=gen,
-                        progress={"done": done, "total": total})
+    def set_progress(self, phase: str, done: int, total: int, gen: int, **extra) -> None:
+        progress = {"done": done, "total": total}
+        progress.update(extra)
+        self.set_status(phase=phase, generation=gen, progress=progress)
 
     def snapshot(self) -> dict:
         with self._lock:
