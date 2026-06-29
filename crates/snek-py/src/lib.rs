@@ -26,6 +26,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 static CANCEL_SELFPLAY: AtomicBool = AtomicBool::new(false);
+static SELFPLAY_PROGRESS_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SELFPLAY_PROGRESS_DONE: AtomicUsize = AtomicUsize::new(0);
+static SELFPLAY_PROGRESS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static SELFPLAY_PROGRESS_COMPLETED_GAMES: AtomicUsize = AtomicUsize::new(0);
+static SELFPLAY_PROGRESS_INFERENCES: AtomicUsize = AtomicUsize::new(0);
 static NEXT_SELFPLAY_STATE_ID: AtomicU64 = AtomicU64::new(1);
 static SELFPLAY_STATES: OnceLock<Mutex<HashMap<u64, SelfPlayState>>> = OnceLock::new();
 
@@ -600,6 +605,26 @@ fn clear_cancel() {
     CANCEL_SELFPLAY.store(false, Ordering::SeqCst);
 }
 
+#[pyfunction]
+fn selfplay_progress(py: Python<'_>) -> PyResult<PyObject> {
+    let d = PyDict::new_bound(py);
+    d.set_item(
+        "active",
+        SELFPLAY_PROGRESS_ACTIVE.load(Ordering::Relaxed),
+    )?;
+    d.set_item("done", SELFPLAY_PROGRESS_DONE.load(Ordering::Relaxed))?;
+    d.set_item("total", SELFPLAY_PROGRESS_TOTAL.load(Ordering::Relaxed))?;
+    d.set_item(
+        "completed_games",
+        SELFPLAY_PROGRESS_COMPLETED_GAMES.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "inferences",
+        SELFPLAY_PROGRESS_INFERENCES.load(Ordering::Relaxed),
+    )?;
+    Ok(d.into())
+}
+
 fn check_cancelled() -> Result<(), String> {
     if CANCEL_SELFPLAY.load(Ordering::SeqCst) {
         return Err("cancelled".to_string());
@@ -954,6 +979,11 @@ fn generate_selfplay<'py>(
     Bound<'py, PyDict>,
 )> {
     clear_cancel();
+    SELFPLAY_PROGRESS_ACTIVE.store(true, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_DONE.store(0, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_TOTAL.store(samples_per_gen, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_COMPLETED_GAMES.store(0, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_INFERENCES.store(0, Ordering::Relaxed);
     let c = NUM_CHANNELS;
     let h = obs_side(board as usize);
     let w = obs_side(board as usize);
@@ -983,6 +1013,7 @@ fn generate_selfplay<'py>(
             };
             evals += m;
             inference_progress_gpu.store(evals, Ordering::Relaxed);
+            SELFPLAY_PROGRESS_INFERENCES.store(evals, Ordering::Relaxed);
             let f = Instant::now();
             let mut pol = vec![0.0f32; m * 4];
             let mut val = vec![0.0f32; m];
@@ -1062,7 +1093,7 @@ fn generate_selfplay<'py>(
     );
     let run = move || -> Result<SpOut, String> {
         let progress_started = Instant::now();
-        let progress_interval = 2000usize;
+        let progress_interval = ((samples_per_gen + 9) / 10).max(1);
         let mut next_progress = progress_interval;
         while collected < samples_per_gen {
             check_cancelled()?;
@@ -1243,6 +1274,9 @@ fn generate_selfplay<'py>(
                     }
                     let game_sample_count = game_z.len();
                     collected += game_sample_count;
+                    SELFPLAY_PROGRESS_DONE.store(collected.min(samples_per_gen), Ordering::Relaxed);
+                    SELFPLAY_PROGRESS_COMPLETED_GAMES
+                        .store(completed_samples.len() + 1, Ordering::Relaxed);
                     while collected >= next_progress {
                         let elapsed = progress_started.elapsed().as_secs_f64().max(1e-9);
                         let inf = inference_progress_c.load(Ordering::Relaxed);
@@ -1326,6 +1360,7 @@ fn generate_selfplay<'py>(
     let _ = tx_req.send(None); // stop the GPU thread
     drop(tx_req);
     let join = gpu.join();
+    SELFPLAY_PROGRESS_ACTIVE.store(false, Ordering::Relaxed);
     let (
         out_obs,
         out_pol,
@@ -1690,6 +1725,7 @@ fn snek(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_search_threads, m)?)?;
     m.add_function(wrap_pyfunction!(request_cancel, m)?)?;
     m.add_function(wrap_pyfunction!(clear_cancel, m)?)?;
+    m.add_function(wrap_pyfunction!(selfplay_progress, m)?)?;
     m.add_function(wrap_pyfunction!(create_selfplay_state, m)?)?;
     m.add_function(wrap_pyfunction!(drop_selfplay_state, m)?)?;
     m.add_function(wrap_pyfunction!(generate_selfplay, m)?)?;

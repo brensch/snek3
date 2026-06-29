@@ -15,6 +15,7 @@ import random
 import shutil
 import signal
 import sys
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -192,6 +193,49 @@ def log_phase(logger: logging.Logger, phase: str, message: str) -> None:
     if _color_enabled():
         label = f"{PHASE_COLORS.get(phase, '')}{label}{RESET}"
     logger.info("%s | %s", label, message)
+
+
+def start_selfplay_progress_monitor(logger, state, gen: int, target_samples: int, started_at: float):
+    """Poll Rust self-play progress while generate_selfplay runs without the GIL."""
+    stop = threading.Event()
+    interval = max(1, (int(target_samples) + 9) // 10)
+
+    def run() -> None:
+        next_mark = interval
+        last_done = -1
+        while not stop.wait(0.5):
+            try:
+                progress = snek.selfplay_progress()
+            except Exception:
+                continue
+            done = int(progress.get("done", 0))
+            total = int(progress.get("total", target_samples) or target_samples)
+            if state is not None and done != last_done:
+                state.set_progress("self-play", min(done, total), total, gen)
+                last_done = done
+            while done >= next_mark and next_mark <= total:
+                elapsed = max(time.time() - started_at, 1e-9)
+                inferences = int(progress.get("inferences", 0))
+                completed_games = int(progress.get("completed_games", 0))
+                log_phase(
+                    logger,
+                    "PLAYING",
+                    f"gen={gen} samples={min(done, total):,}/{total:,} "
+                    f"completed_games={completed_games} "
+                    f"samples_per_sec={done / elapsed:.0f} "
+                    f"inference_per_sec={inferences / elapsed:.0f} "
+                    f"elapsed={elapsed:.1f}s",
+                )
+                next_mark += interval
+
+    thread = threading.Thread(target=run, name="selfplay-progress", daemon=True)
+    thread.start()
+
+    def finish() -> None:
+        stop.set()
+        thread.join(timeout=1.0)
+
+    return finish
 
 
 def train_on_samples(
@@ -660,6 +704,11 @@ def train_one_run(args, state, device, logger):
             else 0
         )
         try:
+            if state is not None:
+                state.set_progress("self-play", 0, args.samples, gen)
+            stop_progress_monitor = start_selfplay_progress_monitor(
+                logger, state, gen, args.samples, t0
+            )
             generated = snek.generate_selfplay(
                 str(onnx_path), board=sp.board, num_snakes=sp.num_snakes,
                 count=args.count, sims=args.sims, c_puct=args.c_puct,
@@ -689,6 +738,10 @@ def train_one_run(args, state, device, logger):
             if state is not None:
                 state.set_status(running=False, paused=False, phase="stopped", progress=None)
             break
+        finally:
+            if "stop_progress_monitor" in locals():
+                stop_progress_monitor()
+                del stop_progress_monitor
         if len(generated) == 4:
             obs, pol, z, gen_stats = generated
             gen_stats = dict(gen_stats)
@@ -747,6 +800,8 @@ def train_one_run(args, state, device, logger):
         )
 
         # ---- TRAIN: PyTorch SGD on a window of recent games ----
+        if state is not None:
+            state.set_status(generation=gen, phase="training", progress=None)
         log_phase(
             logger,
             "TRAINING",
