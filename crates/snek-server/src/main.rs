@@ -13,20 +13,26 @@
 //!   SNEK_C_PUCT       PUCT exploration constant (default 1.5)
 //!   SNEK_DRAW_VALUE   terminal value of a draw at leaves (default -0.25)
 //!   SNEK_EVAL_CHUNK   max obs rows per ONNX forward (default 4096)
+//!   SNEK_MOVE_LOG     JSONL move log path; empty disables (default logs/api_moves.jsonl)
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use snek_core::json::parse_move_request;
 use snek_infer::Net;
-use snek_server::{env_or, serve_move_until, Config, MOVES};
+use snek_server::{env_or, serve_move_until_diagnostics, Config, SearchDecision, MOVES};
 use tiny_http::{Header, Method, Response, Server};
 
 struct App {
     net: Mutex<Net>,
+    model: String,
     cfg: Config,
     default_timeout_ms: u64,
     deadline_margin_ms: u64,
+    move_log: Option<Mutex<File>>,
 }
 
 fn main() {
@@ -35,6 +41,7 @@ fn main() {
     let threads: usize = env_or("SNEK_THREADS", 2usize).max(1);
     let default_timeout_ms = env_or("SNEK_TIMEOUT_MS", 500u64);
     let deadline_margin_ms = env_or("SNEK_DEADLINE_MARGIN_MS", 150u64);
+    let move_log = open_move_log();
     let cfg = Config {
         max_sims: max_sims_from_env(),
         c_puct: env_or("SNEK_C_PUCT", 1.5f32),
@@ -55,9 +62,11 @@ fn main() {
 
     let app = Arc::new(App {
         net: Mutex::new(net),
+        model,
         cfg,
         default_timeout_ms,
         deadline_margin_ms,
+        move_log,
     });
 
     let server = Arc::new(Server::http(("0.0.0.0", port)).expect("bind"));
@@ -103,7 +112,10 @@ fn info_json() -> String {
 }
 
 fn handle_move(app: &App, body: &str) -> String {
-    let mv = compute_move(app, body).unwrap_or(0);
+    let mv = compute_move(app, body).unwrap_or_else(|| {
+        log_parse_error(app, body);
+        0
+    });
     format!("{{\"move\":\"{}\"}}", MOVES[mv])
 }
 
@@ -113,8 +125,24 @@ fn compute_move(app: &App, body: &str) -> Option<usize> {
     let search_budget_ms = timeout_ms.saturating_sub(app.deadline_margin_ms).max(1);
     let deadline = started + Duration::from_millis(search_budget_ms);
     let (board, me) = parse_move_request(body).ok()?;
+    let lock_started = Instant::now();
     let mut net = app.net.lock().unwrap();
-    Some(serve_move_until(&mut net, &app.cfg, &board, me, deadline))
+    let lock_wait_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
+    let search_started = Instant::now();
+    let decision = serve_move_until_diagnostics(&mut net, &app.cfg, &board, me, deadline);
+    let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+    log_move(
+        app,
+        body,
+        &decision,
+        timeout_ms,
+        search_budget_ms,
+        lock_wait_ms,
+        search_ms,
+        total_ms,
+    );
+    Some(decision.move_index)
 }
 
 fn request_timeout_ms(body: &str) -> Option<u64> {
@@ -131,4 +159,137 @@ fn max_sims_from_env() -> usize {
         .and_then(|v| v.parse().ok())
         .or_else(|| std::env::var("SNEK_SIMS").ok().and_then(|v| v.parse().ok()))
         .unwrap_or(100_000usize)
+}
+
+fn open_move_log() -> Option<Mutex<File>> {
+    let path = std::env::var("SNEK_MOVE_LOG").unwrap_or_else(|_| "logs/api_moves.jsonl".into());
+    if path.trim().is_empty() {
+        return None;
+    }
+    if let Some(parent) = Path::new(&path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(file) => Some(Mutex::new(file)),
+        Err(e) => {
+            eprintln!("snek-server: could not open move log {path}: {e}");
+            None
+        }
+    }
+}
+
+fn log_parse_error(app: &App, body: &str) {
+    let Some(log) = &app.move_log else {
+        return;
+    };
+    let request_json = serde_json::from_str::<serde_json::Value>(body).unwrap_or_else(|_| {
+        serde_json::json!({
+            "unparsed_body": body,
+        })
+    });
+    let entry = serde_json::json!({
+        "kind": "snek-api-move",
+        "ok": false,
+        "error": "parse_move_request_failed",
+        "request": request_json,
+    });
+    if let Ok(mut file) = log.lock() {
+        let _ = writeln!(file, "{}", entry);
+        let _ = file.flush();
+    }
+}
+
+fn log_move(
+    app: &App,
+    body: &str,
+    decision: &SearchDecision,
+    timeout_ms: u64,
+    search_budget_ms: u64,
+    lock_wait_ms: f64,
+    search_ms: f64,
+    total_ms: f64,
+) {
+    let Some(log) = &app.move_log else {
+        return;
+    };
+    let request_json = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) => v,
+        Err(_) => serde_json::json!({"unparsed_body": body}),
+    };
+    let game = request_json
+        .get("game")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let board = request_json
+        .get("board")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let you = request_json
+        .get("you")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let diag = &decision.diagnostics;
+    let root_actions = diag
+        .root_actions
+        .iter()
+        .map(|row| {
+            serde_json::Value::Array(
+                row.iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "move": MOVES[a.move_index],
+                            "move_index": a.move_index,
+                            "prior": a.prior,
+                            "visits": a.visits,
+                            "q": a.q,
+                        })
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let entry = serde_json::json!({
+        "kind": "snek-api-move",
+        "ok": true,
+        "game_id": game.get("id").and_then(|v| v.as_str()),
+        "turn": request_json.get("turn").and_then(|v| v.as_u64()),
+        "you_id": you.get("id").and_then(|v| v.as_str()),
+        "you_name": you.get("name").and_then(|v| v.as_str()),
+        "chosen_move": MOVES[decision.move_index],
+        "chosen_move_index": decision.move_index,
+        "model": app.model,
+        "config": {
+            "max_sims": app.cfg.max_sims,
+            "c_puct": app.cfg.c_puct,
+            "draw_value": app.cfg.draw_value,
+            "eval_chunk": app.cfg.eval_chunk,
+            "timeout_ms": timeout_ms,
+            "deadline_margin_ms": app.deadline_margin_ms,
+            "search_budget_ms": search_budget_ms,
+        },
+        "timing": {
+            "lock_wait_ms": lock_wait_ms,
+            "search_ms": search_ms,
+            "total_ms": total_ms,
+        },
+        "search": {
+            "sims_completed": diag.sims_completed,
+            "eval_rows": diag.eval_rows,
+            "forward_calls": diag.forward_calls,
+            "stopped_reason": diag.stopped_reason,
+            "fallback_reason": diag.fallback_reason,
+            "root_policy": diag.root_policy,
+            "root_values": diag.root_values,
+            "root_actions": root_actions,
+        },
+        "board": board,
+        "you": you,
+        "request": request_json,
+    });
+    if let Ok(mut file) = log.lock() {
+        let _ = writeln!(file, "{}", entry);
+        let _ = file.flush();
+    }
 }

@@ -322,6 +322,27 @@ impl MctsTree {
         }
         (policy, value)
     }
+
+    fn root_debug(&self) -> Vec<Vec<(usize, f32, f32, f32)>> {
+        let root = &self.nodes[0];
+        let mut out = Vec::with_capacity(self.n_snakes);
+        for i in 0..self.n_snakes {
+            let mut row = Vec::new();
+            if root.expanded {
+                for (a, m) in root.cands[i].iter().enumerate() {
+                    let visits = root.nvisit[i][a];
+                    let q = if visits > 0.0 {
+                        root.wsum[i][a] / visits
+                    } else {
+                        0.0
+                    };
+                    row.push((m.index(), root.prior[i][a], visits, q));
+                }
+            }
+            out.push(row);
+        }
+        out
+    }
 }
 
 /// A batch of independent MCTS trees, one per game, driven in lockstep.
@@ -417,6 +438,15 @@ impl MctsForest {
                 val.copy_from_slice(&v[..n]);
             });
         (policies, values)
+    }
+
+    /// Root action diagnostics for the first tree in this forest.
+    /// Each snake row contains `(move_index, prior, visits, q)`.
+    pub fn root_debug_first(&self) -> Vec<Vec<(usize, f32, f32, f32)>> {
+        self.trees
+            .first()
+            .map(|tree| tree.root_debug())
+            .unwrap_or_default()
     }
 }
 

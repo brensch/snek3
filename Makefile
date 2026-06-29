@@ -26,6 +26,7 @@ API_TIMEOUT_MS ?= 500
 API_DEADLINE_MARGIN_MS ?= 150
 API_THREADS ?= 2
 API_EVAL_CHUNK ?= 4096
+API_MOVE_LOG ?= logs/api_moves.jsonl
 
 # Training defaults (all overridable)
 GENERATIONS ?= 100000
@@ -184,7 +185,7 @@ api: api-build ## Run the Rust /move API locally. Run `make export-model` first.
 	ORT_DYLIB_PATH="$(shell ls $(VENV)/lib/python*/site-packages/onnxruntime/capi/libonnxruntime.so* 2>/dev/null | head -1)" \
 	SNEK_MODEL=$(MODEL) SNEK_PORT=$(SERVE_PORT) SNEK_MAX_SIMS=$(API_MAX_SIMS) \
 	SNEK_TIMEOUT_MS=$(API_TIMEOUT_MS) SNEK_DEADLINE_MARGIN_MS=$(API_DEADLINE_MARGIN_MS) \
-	SNEK_THREADS=$(API_THREADS) SNEK_EVAL_CHUNK=$(API_EVAL_CHUNK) \
+	SNEK_THREADS=$(API_THREADS) SNEK_EVAL_CHUNK=$(API_EVAL_CHUNK) SNEK_MOVE_LOG=$(API_MOVE_LOG) \
 	./crates/snek-server/target/release/snek-server
 
 api-run: export-model api ## Export the selected run checkpoint, then start the Rust /move API.
