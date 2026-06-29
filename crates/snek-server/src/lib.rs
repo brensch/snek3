@@ -180,12 +180,10 @@ pub fn serve_move_until_diagnostics(
         decision.diagnostics.root_actions = root_actions;
         return decision;
     }
-    let move_index = slots
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-        .map(|(k, _)| k)
-        .unwrap_or(0);
+    let move_index = choose_root_action(
+        slots,
+        root_actions.get(me).map(Vec::as_slice).unwrap_or(&[]),
+    );
     SearchDecision {
         move_index,
         diagnostics: SearchDiagnostics {
@@ -209,6 +207,82 @@ pub fn serve_move_until(
     deadline: Instant,
 ) -> usize {
     serve_move_until_diagnostics(net, cfg, board, me, deadline).move_index
+}
+
+fn choose_root_action(policy_slots: &[f32], actions: &[RootActionDebug]) -> usize {
+    let has_positive_prior = actions.iter().any(|a| a.prior > 1e-8);
+    let mut best: Option<&RootActionDebug> = None;
+    for action in actions {
+        if action.visits <= 0.0 {
+            continue;
+        }
+        if has_positive_prior && action.prior <= 1e-8 {
+            continue;
+        }
+        let replace = match best {
+            None => true,
+            Some(current) => action
+                .visits
+                .total_cmp(&current.visits)
+                .then_with(|| action.q.total_cmp(&current.q))
+                .then_with(|| action.prior.total_cmp(&current.prior))
+                .is_gt(),
+        };
+        if replace {
+            best = Some(action);
+        }
+    }
+    if let Some(action) = best {
+        return action.move_index;
+    }
+
+    let mut best_idx = 0usize;
+    let mut best_prob = f32::NEG_INFINITY;
+    for (idx, &prob) in policy_slots.iter().enumerate() {
+        if prob > best_prob {
+            best_idx = idx;
+            best_prob = prob;
+        }
+    }
+    best_idx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn choose_root_action_ignores_masked_death_in_visit_tie() {
+        let actions = vec![
+            RootActionDebug {
+                move_index: 0,
+                prior: 0.62,
+                visits: 1.0,
+                q: -0.67,
+            },
+            RootActionDebug {
+                move_index: 1,
+                prior: 0.38,
+                visits: 1.0,
+                q: -0.60,
+            },
+            RootActionDebug {
+                move_index: 3,
+                prior: 0.0,
+                visits: 1.0,
+                q: -1.0,
+            },
+        ];
+        assert_eq!(
+            choose_root_action(&[1.0 / 3.0, 1.0 / 3.0, 0.0, 1.0 / 3.0], &actions),
+            1
+        );
+    }
+
+    #[test]
+    fn choose_root_action_falls_back_to_policy_without_debug_actions() {
+        assert_eq!(choose_root_action(&[0.1, 0.2, 0.7, 0.0], &[]), 2);
+    }
 }
 
 /// Fixed-budget wrapper for tests/tools that do not have a request deadline.
