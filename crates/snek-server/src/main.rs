@@ -13,11 +13,11 @@
 //!   SNEK_C_PUCT       PUCT exploration constant (default 1.5)
 //!   SNEK_DRAW_VALUE   terminal value of a draw at leaves (default -0.25)
 //!   SNEK_EVAL_CHUNK   max obs rows per ONNX forward (default 4096)
-//!   SNEK_MOVE_LOG     JSONL move log path; empty disables (default logs/api_moves.jsonl)
+//!   SNEK_MOVE_LOG_DIR per-game JSONL move log dir; empty disables (default logs/api_moves)
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,8 @@ struct App {
     cfg: Config,
     default_timeout_ms: u64,
     deadline_margin_ms: u64,
-    move_log: Option<Mutex<File>>,
+    move_log_dir: Option<PathBuf>,
+    move_log_lock: Mutex<()>,
 }
 
 fn main() {
@@ -41,7 +42,7 @@ fn main() {
     let threads: usize = env_or("SNEK_THREADS", 2usize).max(1);
     let default_timeout_ms = env_or("SNEK_TIMEOUT_MS", 500u64);
     let deadline_margin_ms = env_or("SNEK_DEADLINE_MARGIN_MS", 150u64);
-    let move_log = open_move_log();
+    let move_log_dir = move_log_dir();
     let cfg = Config {
         max_sims: max_sims_from_env(),
         c_puct: env_or("SNEK_C_PUCT", 1.5f32),
@@ -66,7 +67,8 @@ fn main() {
         cfg,
         default_timeout_ms,
         deadline_margin_ms,
-        move_log,
+        move_log_dir,
+        move_log_lock: Mutex::new(()),
     });
 
     let server = Arc::new(Server::http(("0.0.0.0", port)).expect("bind"));
@@ -161,29 +163,25 @@ fn max_sims_from_env() -> usize {
         .unwrap_or(100_000usize)
 }
 
-fn open_move_log() -> Option<Mutex<File>> {
-    let path = std::env::var("SNEK_MOVE_LOG").unwrap_or_else(|_| "logs/api_moves.jsonl".into());
-    if path.trim().is_empty() {
+fn move_log_dir() -> Option<PathBuf> {
+    let dir = std::env::var("SNEK_MOVE_LOG_DIR").unwrap_or_else(|_| "logs/api_moves".into());
+    if dir.trim().is_empty() {
         return None;
     }
-    if let Some(parent) = Path::new(&path).parent() {
-        if !parent.as_os_str().is_empty() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-    }
-    match OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(file) => Some(Mutex::new(file)),
+    let dir = PathBuf::from(dir);
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
         Err(e) => {
-            eprintln!("snek-server: could not open move log {path}: {e}");
+            eprintln!(
+                "snek-server: could not create move log dir {}: {e}",
+                dir.display()
+            );
             None
         }
     }
 }
 
 fn log_parse_error(app: &App, body: &str) {
-    let Some(log) = &app.move_log else {
-        return;
-    };
     let request_json = serde_json::from_str::<serde_json::Value>(body).unwrap_or_else(|_| {
         serde_json::json!({
             "unparsed_body": body,
@@ -195,10 +193,7 @@ fn log_parse_error(app: &App, body: &str) {
         "error": "parse_move_request_failed",
         "request": request_json,
     });
-    if let Ok(mut file) = log.lock() {
-        let _ = writeln!(file, "{}", entry);
-        let _ = file.flush();
-    }
+    append_move_log(app, "parse_errors", &entry);
 }
 
 fn log_move(
@@ -211,9 +206,6 @@ fn log_move(
     search_ms: f64,
     total_ms: f64,
 ) {
-    let Some(log) = &app.move_log else {
-        return;
-    };
     let request_json = match serde_json::from_str::<serde_json::Value>(body) {
         Ok(v) => v,
         Err(_) => serde_json::json!({"unparsed_body": body}),
@@ -222,6 +214,10 @@ fn log_move(
         .get("game")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
+    let game_id = game
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown_game");
     let board = request_json
         .get("board")
         .cloned()
@@ -253,7 +249,7 @@ fn log_move(
     let entry = serde_json::json!({
         "kind": "snek-api-move",
         "ok": true,
-        "game_id": game.get("id").and_then(|v| v.as_str()),
+        "game_id": game_id,
         "turn": request_json.get("turn").and_then(|v| v.as_u64()),
         "you_id": you.get("id").and_then(|v| v.as_str()),
         "you_name": you.get("name").and_then(|v| v.as_str()),
@@ -288,8 +284,42 @@ fn log_move(
         "you": you,
         "request": request_json,
     });
-    if let Ok(mut file) = log.lock() {
-        let _ = writeln!(file, "{}", entry);
-        let _ = file.flush();
+    append_move_log(app, game_id, &entry);
+}
+
+fn append_move_log(app: &App, game_id: &str, entry: &serde_json::Value) {
+    let Some(dir) = &app.move_log_dir else {
+        return;
+    };
+    let filename = format!("{}.jsonl", safe_log_stem(game_id));
+    let path = dir.join(filename);
+    let _guard = app.move_log_lock.lock().ok();
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut file) => {
+            let _ = writeln!(file, "{}", entry);
+            let _ = file.flush();
+        }
+        Err(e) => {
+            eprintln!(
+                "snek-server: could not append move log {}: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn safe_log_stem(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().max(1));
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown_game".into()
+    } else {
+        out
     }
 }
