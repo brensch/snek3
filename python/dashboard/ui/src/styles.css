@@ -54,20 +54,21 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
 .gentable tbody tr.active td:first-child { color: var(--accent); font-weight: 600; }
 .game-summary {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1.1fr);
+  grid-template-columns: max-content minmax(280px, 1fr);
   gap: 16px;
   margin-bottom: 14px;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--line);
+  align-items: end;
 }
 @media (max-width: 900px) { .game-summary { grid-template-columns: 1fr; } }
 .summary-stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  display: flex;
+  flex-wrap: nowrap;
   gap: 10px 18px;
   align-content: start;
 }
-.summary-stats span { min-width: 0; }
+.summary-stats span { min-width: 82px; }
 .summary-stats b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
 .summary-stats em { display: block; color: var(--muted); font-size: 11px; font-style: normal; }
 .length-hist {
@@ -78,6 +79,7 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
   min-height: 72px;
   overflow: hidden;
   padding-bottom: 2px;
+  justify-self: stretch;
 }
 .hist-bin {
   display: grid;
