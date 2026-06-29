@@ -5,7 +5,7 @@ import ParamRows from "./ParamRows.jsx";
 // Landing page: start a new named run, or pick an existing one to view.
 const NEW_FIELDS = [
   "board", "num_snakes", "trunk_channels", "trunk_blocks",
-  "count", "samples", "sims", "train_steps", "batch_size",
+  "count", "samples", "sims", "train_steps", "batch_size", "recency",
   "exploration_prob", "draw_value", "max_turns", "buffer_size",
   "sample_games", "sample_every", "keep_games", "skip_short_draw_turns",
   "eval_batch_size", "generations",

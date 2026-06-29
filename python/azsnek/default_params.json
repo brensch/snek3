@@ -9,6 +9,7 @@
   "lr": 0.001,
   "train_steps": 128,
   "batch_size": 2048,
+  "recency": 2.0,
   "buffer_size": 500000,
   "max_turns": 200,
   "sims": 24,

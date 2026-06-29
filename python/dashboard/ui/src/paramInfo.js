@@ -46,6 +46,12 @@ export const PARAM_INFO = {
     details:
       "Larger batches give smoother gradients and better GPU utilization during training, but use more memory. This mostly affects the training phase, not self-play.",
   },
+  recency: {
+    name: "replay recency bias",
+    summary: "How strongly training minibatches favor newer replay-buffer samples.",
+    details:
+      "A value of 1 samples the retained replay window uniformly. Values above 1 bias toward recent games while still leaving a tail of older positions; 2 is a moderate recent-game bias.",
+  },
   exploration_prob: {
     name: "played-move exploration",
     summary: "Uniform legal-move noise mixed into the action actually played.",

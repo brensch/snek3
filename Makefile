@@ -65,6 +65,7 @@ SEARCH_THREADS ?= $(shell nproc 2>/dev/null || python3 -c 'import os; print(os.c
 TRAIN_STEPS ?= 256
 ADAPTIVE_TRAIN_STEPS ?= 256
 BATCH_SIZE  ?= 2048
+RECENCY     ?= 2.0
 BUFFER_SIZE ?= 500000
 FILTERS     ?= 64
 BLOCKS      ?= 6
@@ -163,7 +164,7 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 		$(if $(BOOTSTRAP_VALUE),--bootstrap-value,) \
 		--eval-batch-size $(EVAL_BATCH_SIZE) \
 		--search-threads $(SEARCH_THREADS) \
-		--train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) \
+		--train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) --recency $(RECENCY) \
 		--buffer-size $(BUFFER_SIZE) \
 		--max-turns $(MAX_TURNS) \
 		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) --keep-games $(KEEP_GAMES) \

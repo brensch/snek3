@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 # AlphaZero live-tunable knobs (applied at the next generation boundary).
 LIVE_PARAMS: dict[str, type] = {
     "count": int, "samples": int, "sims": int, "c_puct": float,
-    "lr": float, "train_steps": int, "batch_size": int,
+    "lr": float, "train_steps": int, "batch_size": int, "recency": float,
     "exploration_prob": float, "draw_value": float,
     "max_turns": int, "sample_games": int, "sample_every": int,
     "keep_games": int, "skip_short_draw_turns": int,

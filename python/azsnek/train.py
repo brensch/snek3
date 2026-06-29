@@ -77,7 +77,7 @@ def _read_json_if_exists(path: Path) -> dict:
 def _coerce_param_value(key: str, value):
     if isinstance(value, bool):
         return value
-    if key in {"lr", "c_puct", "exploration_prob", "draw_value"}:
+    if key in {"lr", "c_puct", "exploration_prob", "draw_value", "recency"}:
         return float(value)
     if key == "arch":
         return str(value)
@@ -458,6 +458,7 @@ def main():
     ap.add_argument("--lr", type=float, default=defaults["lr"])
     ap.add_argument("--train-steps", type=int, default=defaults["train_steps"], help="SGD steps per generation")
     ap.add_argument("--batch-size", type=int, default=defaults["batch_size"], help="SGD minibatch size")
+    ap.add_argument("--recency", type=float, default=defaults["recency"], help="replay sampling bias; 1.0 is uniform, >1 favors newer samples")
     ap.add_argument("--buffer-size", type=int, default=defaults["buffer_size"], help="replay buffer capacity (samples)")
     ap.add_argument("--max-turns", type=int, default=defaults["max_turns"], help="0 plays until terminal; positive values cap games as draws")
     # AlphaZero MCTS search.
@@ -589,6 +590,7 @@ def train_one_run(args, state, device, logger):
             "sample_every": args.sample_every,
             "train_steps": args.train_steps,
             "batch_size": args.batch_size,
+            "recency": args.recency,
             "buffer_size": args.buffer_size,
             "lr": args.lr,
             "device": str(device),
@@ -734,6 +736,7 @@ def train_one_run(args, state, device, logger):
             args.c_puct = p.get("c_puct", args.c_puct)
             args.train_steps = p.get("train_steps", args.train_steps)
             args.batch_size = p.get("batch_size", args.batch_size)
+            args.recency = p.get("recency", args.recency)
             args.exploration_prob = p.get("exploration_prob", args.exploration_prob)
             args.draw_value = p.get("draw_value", args.draw_value)
             args.max_turns = p.get("max_turns", args.max_turns)
@@ -896,7 +899,7 @@ def train_one_run(args, state, device, logger):
         t1 = time.time()
         losses = train_on_samples(
             net, opt, buffer.dataset(), device,
-            steps=args.train_steps, batch_size=args.batch_size,
+            steps=args.train_steps, batch_size=args.batch_size, recency=args.recency,
         )
         t_train = time.time() - t1
         log_phase(
@@ -933,8 +936,7 @@ def train_one_run(args, state, device, logger):
             "completed_games": int(selfplay_summary.get("completed_games", 0)),
             # Effective parameters that produced this gen. lr is read from the
             # optimizer because the live-reload block updates param_groups in
-            # place (not args.lr). value_weight/recency mirror the
-            # train_on_samples call defaults above.
+            # place (not args.lr).
             "params": {
                 "sims": int(args.sims),
                 "count": int(args.count),
@@ -953,7 +955,7 @@ def train_one_run(args, state, device, logger):
                 "sample_every": int(args.sample_every),
                 "keep_games": int(args.keep_games),
                 "value_weight": 1.0,
-                "recency": 1.0,
+                "recency": float(args.recency),
             },
         }
         if gen_stats:
