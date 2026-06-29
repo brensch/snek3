@@ -27,7 +27,6 @@ logs/
 *.pth.tar
 *.onnx
 !checkpoints/latest.pt
-!checkpoints/latest.onnx
 
 # Editor / OS
 .DS_Store
