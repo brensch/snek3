@@ -1,0 +1,73 @@
+name: api-image
+
+# Builds the CPU-only Battlesnake /move API image. The ONNX model is exported
+# from the tracked serving checkpoint during CI, then copied into the runtime
+# image built from deploy/server.Dockerfile.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/server.Dockerfile'
+      - 'scripts/export_model.py'
+      - 'checkpoints/latest.pt'
+      - 'python/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'pyproject.toml'
+      - '.dockerignore'
+      - '.github/workflows/api-image.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      MODEL_CHECKPOINT: checkpoints/latest.pt
+      MODEL_ONNX: model.onnx
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Export ONNX model
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -U pip maturin numpy
+          .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+          .venv/bin/maturin develop --release
+          PYTHONPATH=python .venv/bin/python scripts/export_model.py "$MODEL_CHECKPOINT" "$MODEL_ONNX"
+          ls -lh "$MODEL_ONNX"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push CPU API
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/server.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/snek3-api:latest
+            ghcr.io/${{ github.repository_owner }}/snek3-api:cpu
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api

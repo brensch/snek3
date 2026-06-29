@@ -7,4 +7,5 @@ crates/**/target
 python/dashboard/ui/node_modules
 *.pt
 *.onnx
+!model.onnx
 scratchpad
