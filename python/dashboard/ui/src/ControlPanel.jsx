@@ -71,7 +71,8 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
     maximumFractionDigits: digits,
   });
   const hasInflight = prog && (
-    prog.inflight_slots > 0 || prog.inflight_steps > 0 || prog.inflight_samples > 0
+    prog.inflight_slots > 0 || prog.inflight_steps > 0 || prog.inflight_samples > 0 ||
+    prog.resumed_completed_samples > 0
   );
 
   return (
@@ -96,6 +97,7 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
           <div className="hero-phase">
             <span className="phase-now">resumed in-flight</span>
             <span className="phase-count">
+              {prog.resumed_completed_samples > 0 && `${fmtNum(prog.resumed_completed_samples)} completed samples · `}
               {fmtNum(prog.inflight_slots)} slots · {fmtNum(prog.inflight_steps)} steps · {fmtNum(prog.inflight_samples)} pending samples
               {prog.inflight_turn_max != null && ` · turns avg ${fmtNum(prog.inflight_turn_mean, 1)} max ${fmtNum(prog.inflight_turn_max)}`}
             </span>

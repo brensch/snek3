@@ -202,6 +202,8 @@ def _selfplay_inflight_progress(info: dict | None) -> dict:
         "inflight_slots": int(info.get("nonempty_slots", 0)),
         "inflight_steps": int(info.get("pending_steps", 0)),
         "inflight_samples": int(info.get("pending_alive_samples", 0)),
+        "resumed_completed_games": int(info.get("completed_games", 0)),
+        "resumed_completed_samples": int(info.get("completed_samples", 0)),
         "inflight_turn_mean": float(info.get("active_turn_mean", 0.0)),
         "inflight_turn_max": int(info.get("active_turn_max", 0)),
     }
@@ -683,6 +685,8 @@ def train_one_run(args, state, device, logger):
                 logger,
                 "RESUME",
                 f"restored in-flight self-play state from {selfplay_state_path} "
+                f"completed_games={selfplay_state_info.get('completed_games', 0):,} "
+                f"completed_samples={selfplay_state_info.get('completed_samples', 0):,} "
                 f"nonempty_slots={selfplay_state_info.get('nonempty_slots', 0):,} "
                 f"pending_steps={selfplay_state_info.get('pending_steps', 0):,} "
                 f"pending_alive_samples={selfplay_state_info.get('pending_alive_samples', 0):,} "
@@ -764,9 +768,14 @@ def train_one_run(args, state, device, logger):
         )
         try:
             if state is not None:
+                restored_done = (
+                    int(active_selfplay_state_info.get("completed_samples", 0))
+                    if active_selfplay_state_info
+                    else 0
+                )
                 state.set_progress(
                     "self-play",
-                    0,
+                    min(restored_done, args.samples),
                     args.samples,
                     gen,
                     **_selfplay_inflight_progress(active_selfplay_state_info),
