@@ -13,6 +13,22 @@ from .net import AZNet
 from .search import greedy_actions, mcts_search
 
 
+def _snapshot_with_search(batch: snek.GameBatch, game_index: int, policy, value) -> dict:
+    frame = json.loads(batch.snapshot(game_index))
+    for i, snake in enumerate(frame.get("snakes", [])):
+        snake["policy"] = [float(x) for x in policy[game_index, i]]
+        snake["value"] = float(value[game_index, i])
+    return frame
+
+
+def _annotate_action(frame: dict, snake_index: int, move: int, play_policy) -> None:
+    snakes = frame.get("snakes") or []
+    if snake_index >= len(snakes):
+        return
+    snakes[snake_index]["chosen_move"] = int(move)
+    snakes[snake_index]["play_policy"] = [float(x) for x in play_policy]
+
+
 @torch.no_grad()
 def record_games(
     net: AZNet,
@@ -48,20 +64,27 @@ def record_games(
     steps = 0
     while max_turns <= 0 or steps < max_turns:
         done = batch.done().astype(bool)
+        terminal_now = []
         for g in range(n_games):
-            if not recorded_terminal[g]:
+            if not recorded_terminal[g] and done[g]:
                 frames[g].append(json.loads(batch.snapshot(g)))
-                if done[g]:
-                    recorded_terminal[g] = True  # this was the final frame
+                recorded_terminal[g] = True
+                terminal_now.append(g)
         if all(recorded_terminal):
             break
-        policy, _ = mcts_search(batch, net, device, sims=sims, c_puct=c_puct,
-                                eval_batch_size=eval_batch_size)
+        policy, value = mcts_search(batch, net, device, sims=sims, c_puct=c_puct,
+                                    eval_batch_size=eval_batch_size)
         agent = greedy_actions(policy)[:, 0]
         if opponent == "net":
             opp = greedy_actions(policy)[:, 1]
         else:
             opp = batch.baseline_actions()[:, 1]
+        for g in range(n_games):
+            if not recorded_terminal[g] and g not in terminal_now:
+                frame = _snapshot_with_search(batch, g, policy, value)
+                _annotate_action(frame, 0, agent[g], policy[g, 0])
+                _annotate_action(frame, 1, opp[g], policy[g, 1])
+                frames[g].append(frame)
         actions = np.stack([agent, opp], axis=1).astype(np.uint8)
         batch.step(actions)
         steps += 1

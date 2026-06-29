@@ -125,13 +125,15 @@ export default function App() {
         {run && (
           <span className={"pill " + (running ? "live" : "done")}>
             {status.generation == null ? "no data"
-              : `${running ? (status.paused ? "❚❚ paused" : "● live") : "■ done"} · gen ${status.generation}`}
+              : `${running ? "● live" : "■ stopped"} · gen ${status.generation}`}
           </span>
         )}
         <div className="grow" />
         {run && (
           <span className="pill">
-            {meta.board ? `${meta.board}×${meta.board} · ${meta.filters}f/${meta.blocks}b · depth ${meta.depth}` : "—"}
+            {meta.board
+              ? `${meta.board}×${meta.board} · ${meta.trunk_channels ?? meta.filters}c/${meta.trunk_blocks ?? meta.blocks}b · sims ${meta.sims ?? meta.depth}`
+              : "—"}
           </span>
         )}
       </header>

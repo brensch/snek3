@@ -247,7 +247,13 @@ impl MctsTree {
         node.nvisit = nvisit;
         node.wsum = wsum;
         node.expanded = true;
-        self.backup(value);
+        let mut leaf_value = *value;
+        for (i, v) in leaf_value.iter_mut().enumerate().take(n) {
+            if !board.snakes[i].alive() {
+                *v = -1.0;
+            }
+        }
+        self.backup(&leaf_value);
     }
 
     /// Per-snake root targets: visit-count policy mapped to 4 move slots, and the
@@ -381,6 +387,25 @@ mod tests {
         b
     }
 
+    fn dead_leaf_ffa_board() -> Board {
+        let mut b = Board::new(11, 11);
+        // Snake 0 moving Up hits its own body at (5,6), but the game continues
+        // with the other snakes alive. That leaf must be -1 for snake 0 even if
+        // the value net gives a bad estimate for the dead snake.
+        b.add_snake(&[
+            Point::new(5, 5),
+            Point::new(5, 4),
+            Point::new(4, 4),
+            Point::new(4, 5),
+            Point::new(5, 6),
+            Point::new(4, 6),
+        ]);
+        b.add_snake(&[Point::new(9, 9), Point::new(9, 8)]);
+        b.add_snake(&[Point::new(1, 9), Point::new(1, 8)]);
+        b.add_snake(&[Point::new(9, 1), Point::new(9, 2)]);
+        b
+    }
+
     /// Drive the forest with a uniform policy / zero value and check the search
     /// mechanics: the tree grows, and root visit-count policies are valid
     /// distributions over each snake's legal moves.
@@ -438,5 +463,32 @@ mod tests {
         // Sanity: still a valid distribution after many sims.
         let p0: f32 = policies[0..4].iter().sum();
         assert!((p0 - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn mcts_dead_nonterminal_leaf_overrides_net_value() {
+        let mut forest = MctsForest::new(&[dead_leaf_ffa_board()], 1.5);
+        let n = forest.n_snakes;
+
+        let pending = forest.select();
+        assert_eq!(pending, vec![0]);
+        let mut root_pol = vec![0.01f32; n * 4];
+        root_pol[Move::Up.index()] = 0.97;
+        let root_val = vec![0.0f32; n];
+        forest.expand_backup(&pending, &root_pol, &root_val);
+
+        let pending = forest.select();
+        assert_eq!(pending, vec![0]);
+        let bad_leaf_pol = vec![0.25f32; n * 4];
+        let bad_leaf_val = vec![1.0f32; n];
+        forest.expand_backup(&pending, &bad_leaf_pol, &bad_leaf_val);
+
+        let root = &forest.trees[0].nodes[0];
+        let up_idx = root.cands[0]
+            .iter()
+            .position(|&m| m == Move::Up)
+            .expect("Up remains a candidate");
+        assert_eq!(root.nvisit[0][up_idx], 1.0);
+        assert_eq!(root.wsum[0][up_idx], -1.0);
     }
 }

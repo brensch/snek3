@@ -80,9 +80,9 @@ export default function GenerationView({ run, gamesIndex, evalIndex = [] }) {
   // All games in one flat list, filtered to the selected matchup ("all" = no filter).
   const shownGames = useMemo(() => {
     const games = genData?.games || [];
-    return matchFilter === "all"
-      ? games
-      : games.filter((g) => (g.opponent || "baseline") === matchFilter);
+    return games
+      .map((game, gameIndex) => ({ game, gameIndex }))
+      .filter(({ game }) => matchFilter === "all" || (game.opponent || "baseline") === matchFilter);
   }, [genData, matchFilter]);
 
   const prettyMatch = (k) => {
@@ -174,13 +174,19 @@ export default function GenerationView({ run, gamesIndex, evalIndex = [] }) {
                 ))}
               </div>
               <div className="board-grid" style={{ "--tile-width": `${tileWidth}px` }}>
-                {shownGames.map((g, i) => (
+                {shownGames.map(({ game: g, gameIndex }) => (
                   <MiniBoard
-                    key={`${g.opponent}-${i}`}
+                    key={`${g.opponent}-${gameIndex}`}
                     game={g}
                     tick={tick}
                     playing={playing}
                     onPlay={() => setPlaying(true)}
+                    context={{
+                      run,
+                      file: activeFile,
+                      gen: activeGen,
+                      gameIndex,
+                    }}
                   />
                 ))}
               </div>

@@ -1,8 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { api } from "./api.js";
+import ParamRows from "./ParamRows.jsx";
 
 // Landing page: start a new named run, or pick an existing one to view.
-const NEW_FIELDS = ["board", "filters", "blocks", "depth", "count", "samples"];
+const NEW_FIELDS = [
+  "board", "num_snakes", "trunk_channels", "trunk_blocks",
+  "count", "samples", "sims", "train_steps", "batch_size",
+  "exploration_prob", "draw_value", "max_turns", "buffer_size",
+  "sample_games", "sample_every", "keep_games", "skip_short_draw_turns",
+  "eval_batch_size", "generations",
+];
 
 export default function Home({ runs, liveRun, onSelect }) {
   const [name, setName] = useState("");
@@ -32,7 +39,7 @@ export default function Home({ runs, liveRun, onSelect }) {
   const resume = async (r, e) => {
     e.stopPropagation();
     setBusy(true);
-    try { await api.resumeRun(r); flash(`resuming ${r}…`); onSelect(r); }
+    try { await api.resumeRun(r); flash(`starting ${r}…`); onSelect(r); }
     catch (err) { flash(String(err.message || err), false); }
     finally { setBusy(false); }
   };
@@ -47,16 +54,13 @@ export default function Home({ runs, liveRun, onSelect }) {
           <button disabled={busy} onClick={start}>Start run</button>
           {msg && <span className={msg.ok ? "ok" : "err"}>{msg.text}</span>}
         </div>
-        <div className="params" style={{ marginTop: 4 }}>
-          {NEW_FIELDS.map((k) => (
-            <label key={k} className="param">
-              <span>{k}</span>
-              <input type="number" step="any" placeholder={base[k] ?? ""}
-                value={draft[k] ?? ""}
-                onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))} />
-            </label>
-          ))}
-        </div>
+        <ParamRows
+          keys={NEW_FIELDS}
+          placeholders={base}
+          draft={draft}
+          onDraft={(k, v) => setDraft((d) => ({ ...d, [k]: v }))}
+          title="New run parameters"
+        />
         <p className="muted" style={{ marginTop: 8 }}>
           A new run starts fresh and runs until you stop it. Starting one switches
           the trainer to it (the current run, if any, is checkpointed first). Leave
@@ -77,8 +81,8 @@ export default function Home({ runs, liveRun, onSelect }) {
                 </button>
                 {r !== liveRun && (
                   <button className="run-resume" disabled={busy}
-                    title="Continue this run from its checkpoint"
-                    onClick={(e) => resume(r, e)}>Resume</button>
+                    title="Start this run from its checkpoint"
+                    onClick={(e) => resume(r, e)}>Start</button>
                 )}
               </li>
             ))}

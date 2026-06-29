@@ -29,8 +29,43 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
+export function boardLayout(canvas, fr) {
+  if (!canvas || !fr) return null;
+  const W = fr.width, H = fr.height;
+  const cell = Math.floor(Math.min(canvas.width, canvas.height) / Math.max(W, H));
+  const ox = Math.floor((canvas.width - cell * W) / 2);
+  const oy = Math.floor((canvas.height - cell * H) / 2);
+  return {
+    W, H, cell, ox, oy,
+    px: (x) => ox + x * cell,
+    py: (y) => oy + (H - 1 - y) * cell,
+  };
+}
+
+export function eventToBoardCell(canvas, fr, event) {
+  const layout = boardLayout(canvas, fr);
+  if (!layout) return null;
+  const rect = canvas.getBoundingClientRect();
+  const cx = (event.clientX - rect.left) * (canvas.width / rect.width);
+  const cy = (event.clientY - rect.top) * (canvas.height / rect.height);
+  const x = Math.floor((cx - layout.ox) / layout.cell);
+  const row = Math.floor((cy - layout.oy) / layout.cell);
+  const y = layout.H - 1 - row;
+  if (x < 0 || x >= layout.W || y < 0 || y >= layout.H) return null;
+  return { x, y, canvasX: cx, canvasY: cy };
+}
+
+export function snakeAtCell(fr, x, y) {
+  if (!fr?.snakes) return null;
+  for (let si = fr.snakes.length - 1; si >= 0; si--) {
+    const s = fr.snakes[si];
+    if ((s.body || []).some(([bx, by]) => bx === x && by === y)) return si;
+  }
+  return null;
+}
+
 // Draw one snapshot frame onto a square canvas.
-export function drawFrame(canvas, fr, opponent = "baseline") {
+export function drawFrame(canvas, fr, opponent = "baseline", hoverSnake = null) {
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!fr) {
@@ -39,12 +74,7 @@ export function drawFrame(canvas, fr, opponent = "baseline") {
     ctx.fillText("…", 8, 16);
     return;
   }
-  const W = fr.width, H = fr.height;
-  const cell = Math.floor(Math.min(canvas.width, canvas.height) / Math.max(W, H));
-  const ox = Math.floor((canvas.width - cell * W) / 2);
-  const oy = Math.floor((canvas.height - cell * H) / 2);
-  const px = (x) => ox + x * cell;
-  const py = (y) => oy + (H - 1 - y) * cell;
+  const { W, H, cell, ox, oy, px, py } = boardLayout(canvas, fr);
 
   ctx.fillStyle = "#0b0e13";
   ctx.fillRect(ox, oy, W * cell, H * cell);
@@ -63,6 +93,11 @@ export function drawFrame(canvas, fr, opponent = "baseline") {
       const pad = Math.max(1, cell * 0.12);
       roundRect(ctx, px(x) + pad, py(y) + pad, cell - 2 * pad, cell - 2 * pad, cell * 0.25);
       ctx.fill();
+      if (si === hoverSnake) {
+        ctx.strokeStyle = "rgba(255,255,255,0.9)";
+        ctx.lineWidth = Math.max(1.5, cell * 0.08);
+        ctx.stroke();
+      }
       if (bi === 0 && cell >= 12) {
         ctx.fillStyle = "rgba(255,255,255,0.95)";
         ctx.font = `bold ${Math.floor(cell * 0.55)}px ui-sans-serif`;

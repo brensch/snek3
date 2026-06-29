@@ -151,16 +151,9 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) --keep-games $(KEEP_GAMES) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
-server: build ## Start the AlphaZero run (single grid net, N-player FFA) + in-process live dashboard on DASH_PORT. Override RUN_ID, FRESH=1, COUNT/SIMS/SAMPLES...
+server: build ## Start trainer + in-process dashboard on DASH_PORT. Resumes latest run unless RUN_ID is set.
 	$(PY) -m azsnek.train \
-		--serve --serve-port $(DASH_PORT) \
-		--generations $(GENERATIONS) --board $(BOARD) --num-snakes $(NUM_SNAKES) \
-		--samples $(SAMPLES) --count $(COUNT) --sims $(SIMS) --c-puct $(C_PUCT) \
-		--trunk-channels $(TRUNK_CHANNELS) --trunk-blocks $(TRUNK_BLOCKS) \
-		--lr $(LR) --train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) --buffer-size $(BUFFER_SIZE) \
-		--exploration-prob $(EXPLORATION_PROB) --draw-value $(DRAW_VALUE) --max-turns $(MAX_TURNS) \
-		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) --keep-games $(KEEP_GAMES) \
-		--search-threads $(SEARCH_THREADS) --eval-batch-size $(EVAL_BATCH_SIZE) \
+		--serve --serve-port $(DASH_PORT) --runs-dir $(RUNS_DIR) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
 ui: ## Build the React dashboard UI (-> python/dashboard/static)
