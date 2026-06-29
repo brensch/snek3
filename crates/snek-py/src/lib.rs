@@ -16,11 +16,12 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::{prelude::*, ThreadPoolBuilder};
+use serde::{Deserialize, Serialize};
 use snek_core::{encode_into, obs_side, standard_start, Board, Move, NUM_CHANNELS};
 use snek_infer::Net;
-use snek_search::{mask_obvious_immediate_deaths, uct_actions, Forest, MctsForest};
 #[cfg(test)]
 use snek_search::obvious_immediate_death;
+use snek_search::{mask_obvious_immediate_deaths, uct_actions, Forest, MctsForest};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -608,10 +609,7 @@ fn clear_cancel() {
 #[pyfunction]
 fn selfplay_progress(py: Python<'_>) -> PyResult<PyObject> {
     let d = PyDict::new_bound(py);
-    d.set_item(
-        "active",
-        SELFPLAY_PROGRESS_ACTIVE.load(Ordering::Relaxed),
-    )?;
+    d.set_item("active", SELFPLAY_PROGRESS_ACTIVE.load(Ordering::Relaxed))?;
     d.set_item("done", SELFPLAY_PROGRESS_DONE.load(Ordering::Relaxed))?;
     d.set_item("total", SELFPLAY_PROGRESS_TOTAL.load(Ordering::Relaxed))?;
     d.set_item(
@@ -666,6 +664,29 @@ fn drop_selfplay_state(state_id: u64) -> PyResult<bool> {
     Ok(removed)
 }
 
+#[pyfunction]
+fn save_selfplay_state(state_id: u64, path: &str) -> PyResult<bool> {
+    let states = selfplay_states()
+        .lock()
+        .map_err(|_| PyValueError::new_err("self-play state lock poisoned"))?;
+    let Some(state) = states.get(&state_id) else {
+        return Ok(false);
+    };
+    save_selfplay_state_to_path(path, state).map_err(PyValueError::new_err)?;
+    Ok(true)
+}
+
+#[pyfunction]
+fn load_selfplay_state(path: &str) -> PyResult<u64> {
+    let state = load_selfplay_state_from_path(path).map_err(PyValueError::new_err)?;
+    let id = NEXT_SELFPLAY_STATE_ID.fetch_add(1, Ordering::SeqCst);
+    selfplay_states()
+        .lock()
+        .map_err(|_| PyValueError::new_err("self-play state lock poisoned"))?
+        .insert(id, state);
+    Ok(id)
+}
+
 /// Sample one move from a 4-slot policy, mixing `explore` of a uniform over the
 /// snake's *legal* (nonzero) moves. Dead/terminal snakes (all-zero) -> Up (ignored).
 fn sample_move_with_play_policy(
@@ -713,6 +734,79 @@ struct Slot {
     steps: usize,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct SerSlot {
+    obs: Vec<f32>,
+    pol: Vec<f32>,
+    value: Vec<f32>,
+    alive: Vec<bool>,
+    frames: Vec<String>,
+    steps: usize,
+}
+
+impl From<&Slot> for SerSlot {
+    fn from(slot: &Slot) -> Self {
+        Self {
+            obs: slot.obs.clone(),
+            pol: slot.pol.clone(),
+            value: slot.value.clone(),
+            alive: slot.alive.clone(),
+            frames: slot.frames.iter().map(|v| v.to_string()).collect(),
+            steps: slot.steps,
+        }
+    }
+}
+
+fn deserialize_slot(slot: SerSlot) -> Result<Slot, String> {
+    Ok(Slot {
+        obs: slot.obs,
+        pol: slot.pol,
+        value: slot.value,
+        alive: slot.alive,
+        frames: slot
+            .frames
+            .into_iter()
+            .map(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, String>>()?,
+        steps: slot.steps,
+    })
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SerSnake {
+    body: Vec<[i8; 2]>,
+    health: i16,
+    eliminated: Option<u8>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SerBoard {
+    width: i8,
+    height: i8,
+    turn: u32,
+    snakes: Vec<SerSnake>,
+    food: Vec<[i8; 2]>,
+    hazards: Vec<[i8; 2]>,
+    hazard_damage: i16,
+    min_food: i32,
+    food_spawn_chance: i32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SerSelfPlayState {
+    version: u32,
+    board: i8,
+    num_snakes: usize,
+    count: usize,
+    boards: Vec<Vec<SerBoard>>,
+    slots: Vec<Vec<SerSlot>>,
+    turns: Vec<Vec<u32>>,
+    rng: Xoshiro256PlusPlus,
+}
+
+const SELFPLAY_STATE_VERSION: u32 = 1;
+
+#[derive(Clone)]
 struct SelfPlayState {
     board: i8,
     num_snakes: usize,
@@ -721,6 +815,160 @@ struct SelfPlayState {
     slots: Vec<Vec<Slot>>,
     turns: Vec<Vec<u32>>,
     rng: Xoshiro256PlusPlus,
+}
+
+fn cause_to_u8(c: snek_core::EliminatedCause) -> u8 {
+    match c {
+        snek_core::EliminatedCause::Collision => 0,
+        snek_core::EliminatedCause::SelfCollision => 1,
+        snek_core::EliminatedCause::OutOfBounds => 2,
+        snek_core::EliminatedCause::OutOfHealth => 3,
+        snek_core::EliminatedCause::HeadToHead => 4,
+        snek_core::EliminatedCause::Hazard => 5,
+    }
+}
+
+fn cause_from_u8(v: u8) -> Result<snek_core::EliminatedCause, String> {
+    match v {
+        0 => Ok(snek_core::EliminatedCause::Collision),
+        1 => Ok(snek_core::EliminatedCause::SelfCollision),
+        2 => Ok(snek_core::EliminatedCause::OutOfBounds),
+        3 => Ok(snek_core::EliminatedCause::OutOfHealth),
+        4 => Ok(snek_core::EliminatedCause::HeadToHead),
+        5 => Ok(snek_core::EliminatedCause::Hazard),
+        _ => Err(format!("unknown eliminated cause {v}")),
+    }
+}
+
+fn serialize_board(board: &Board) -> SerBoard {
+    SerBoard {
+        width: board.width,
+        height: board.height,
+        turn: board.turn,
+        snakes: board
+            .snakes
+            .iter()
+            .map(|s| SerSnake {
+                body: s.body.iter().map(|p| [p.x, p.y]).collect(),
+                health: s.health,
+                eliminated: s.eliminated.map(cause_to_u8),
+            })
+            .collect(),
+        food: board.food.iter().map(|p| [p.x, p.y]).collect(),
+        hazards: board.hazards.iter().map(|p| [p.x, p.y]).collect(),
+        hazard_damage: board.hazard_damage,
+        min_food: board.min_food,
+        food_spawn_chance: board.food_spawn_chance,
+    }
+}
+
+fn deserialize_board(board: SerBoard) -> Result<Board, String> {
+    let mut out = Board::new(board.width, board.height);
+    out.turn = board.turn;
+    out.food = board
+        .food
+        .into_iter()
+        .map(|p| snek_core::Point::new(p[0], p[1]))
+        .collect();
+    out.hazards = board
+        .hazards
+        .into_iter()
+        .map(|p| snek_core::Point::new(p[0], p[1]))
+        .collect();
+    out.hazard_damage = board.hazard_damage;
+    out.min_food = board.min_food;
+    out.food_spawn_chance = board.food_spawn_chance;
+    for snake in board.snakes {
+        let mut body = snek_core::Body::new();
+        let points: Vec<snek_core::Point> = snake
+            .body
+            .into_iter()
+            .map(|p| snek_core::Point::new(p[0], p[1]))
+            .collect();
+        body.init_from_head_first(&points);
+        out.snakes.push(snek_core::Snake {
+            body,
+            health: snake.health,
+            eliminated: snake.eliminated.map(cause_from_u8).transpose()?,
+        });
+    }
+    Ok(out)
+}
+
+impl From<&SelfPlayState> for SerSelfPlayState {
+    fn from(state: &SelfPlayState) -> Self {
+        Self {
+            version: SELFPLAY_STATE_VERSION,
+            board: state.board,
+            num_snakes: state.num_snakes,
+            count: state.count,
+            boards: state
+                .boards
+                .iter()
+                .map(|buf| buf.iter().map(serialize_board).collect())
+                .collect(),
+            slots: state
+                .slots
+                .iter()
+                .map(|buf| buf.iter().map(SerSlot::from).collect())
+                .collect(),
+            turns: state.turns.clone(),
+            rng: state.rng.clone(),
+        }
+    }
+}
+
+fn deserialize_selfplay_state(state: SerSelfPlayState) -> Result<SelfPlayState, String> {
+    if state.version != SELFPLAY_STATE_VERSION {
+        return Err(format!(
+            "unsupported self-play state version {}",
+            state.version
+        ));
+    }
+    let boards = state
+        .boards
+        .into_iter()
+        .map(|buf| buf.into_iter().map(deserialize_board).collect())
+        .collect::<Result<Vec<Vec<Board>>, String>>()?;
+    let slots = state
+        .slots
+        .into_iter()
+        .map(|buf| buf.into_iter().map(deserialize_slot).collect())
+        .collect::<Result<Vec<Vec<Slot>>, String>>()?;
+    Ok(SelfPlayState {
+        board: state.board,
+        num_snakes: state.num_snakes,
+        count: state.count,
+        boards,
+        slots,
+        turns: state.turns,
+        rng: state.rng,
+    })
+}
+
+fn save_selfplay_state_to_path(path: &str, state: &SelfPlayState) -> Result<(), String> {
+    let path = std::path::Path::new(path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+    let bytes = bincode::serialize(&SerSelfPlayState::from(state)).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension(format!(
+        "{}tmp",
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{s}."))
+            .unwrap_or_default()
+    ));
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+fn load_selfplay_state_from_path(path: &str) -> Result<SelfPlayState, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let state: SerSelfPlayState = bincode::deserialize(&bytes).map_err(|e| e.to_string())?;
+    deserialize_selfplay_state(state)
 }
 
 fn new_selfplay_state(board: i8, num_snakes: usize, count: usize, seed: u64) -> SelfPlayState {
@@ -952,7 +1200,7 @@ fn select_write(
 #[pyo3(signature = (onnx_path, board=11, num_snakes=2, count=1024, sims=32, c_puct=1.5,
     samples_per_gen=30000, seed=0, exploration_prob=0.25, max_turns=0, eval_chunk=16384,
     draw_value=0.0, skip_short_draw_turns=0, record_games=0, bootstrap_value=false,
-    state_id=None))]
+    state_id=None, state_path=None))]
 #[allow(clippy::too_many_arguments)]
 fn generate_selfplay<'py>(
     py: Python<'py>,
@@ -972,6 +1220,7 @@ fn generate_selfplay<'py>(
     record_games: usize,
     bootstrap_value: bool,
     state_id: Option<u64>,
+    state_path: Option<String>,
 ) -> PyResult<(
     Bound<'py, PyArray4<f32>>,
     Bound<'py, PyArray2<f32>>,
@@ -1059,6 +1308,7 @@ fn generate_selfplay<'py>(
     let mut slots = state.slots;
     let mut turns = state.turns;
     let mut rng = state.rng;
+    let state_path_for_run = state_path.clone();
 
     let mut completed_samples: Vec<GameSamples> = Vec::new();
     let mut collected = 0usize;
@@ -1092,11 +1342,36 @@ fn generate_selfplay<'py>(
         SelfPlayState,
     );
     let run = move || -> Result<SpOut, String> {
+        macro_rules! check_cancelled_or_persist {
+            () => {
+                if let Err(e) = check_cancelled() {
+                    let state = SelfPlayState {
+                        board,
+                        num_snakes: n,
+                        count,
+                        boards: boards.clone(),
+                        slots: slots.clone(),
+                        turns: turns.clone(),
+                        rng: rng.clone(),
+                    };
+                    if let Some(path) = state_path_for_run.as_deref() {
+                        save_selfplay_state_to_path(path, &state)?;
+                    }
+                    if let Some(id) = state_id {
+                        selfplay_states()
+                            .lock()
+                            .map_err(|_| "self-play state lock poisoned".to_string())?
+                            .insert(id, state);
+                    }
+                    return Err(e);
+                }
+            };
+        }
         let progress_started = Instant::now();
         let progress_interval = ((samples_per_gen + 9) / 10).max(1);
         let mut next_progress = progress_interval;
         while collected < samples_per_gen {
-            check_cancelled()?;
+            check_cancelled_or_persist!();
             let mut forests = [
                 MctsForest::new_with_draw_value(&boards[0], c_puct, draw_value),
                 MctsForest::new_with_draw_value(&boards[1], c_puct, draw_value),
@@ -1114,7 +1389,7 @@ fn generate_selfplay<'py>(
 
             // Pipeline: always one batch on the GPU + one queued; CPU does the other's backup+select.
             while sims_done[0] < sims || sims_done[1] < sims {
-                check_cancelled()?;
+                check_cancelled_or_persist!();
                 let w = Instant::now();
                 let (id, pol, val) = rx_res.recv().map_err(|_| "gpu gone".to_string())?;
                 t_recv += w.elapsed();
@@ -1141,7 +1416,7 @@ fn generate_selfplay<'py>(
                 let trn = &mut turns[b];
                 for g in 0..count {
                     if g % 64 == 0 {
-                        check_cancelled()?;
+                        check_cancelled_or_persist!();
                     }
                     let bd = &bds[g];
                     let slot = &mut slt[g];
@@ -1166,20 +1441,14 @@ fn generate_selfplay<'py>(
                 }
                 for g in 0..count {
                     if g % 64 == 0 {
-                        check_cancelled()?;
+                        check_cancelled_or_persist!();
                     }
                     for s in 0..n {
                         let base = (g * n + s) * 4;
-                        let play_base = mask_obvious_immediate_deaths(
-                            &bds[g],
-                            s,
-                            &root_pol[base..base + 4],
-                        );
-                        let (chosen, play_policy) = sample_move_with_play_policy(
-                            &play_base,
-                            exploration_prob,
-                            &mut rng,
-                        );
+                        let play_base =
+                            mask_obvious_immediate_deaths(&bds[g], s, &root_pol[base..base + 4]);
+                        let (chosen, play_policy) =
+                            sample_move_with_play_policy(&play_base, exploration_prob, &mut rng);
                         actions[s] = chosen;
                         if record_games > 0 {
                             if let Some(frame) = slt[g].frames.last_mut() {
@@ -1192,7 +1461,7 @@ fn generate_selfplay<'py>(
                 }
                 for g in 0..count {
                     if g % 64 == 0 {
-                        check_cancelled()?;
+                        check_cancelled_or_persist!();
                     }
                     let overrun = max_turns > 0 && trn[g] as i64 >= max_turns;
                     if !(bds[g].is_terminal() || overrun) {
@@ -1374,6 +1643,9 @@ fn generate_selfplay<'py>(
         selected_length_buckets,
         next_state,
     ) = run_res.map_err(PyValueError::new_err)?;
+    if let Some(path) = state_path.as_deref() {
+        save_selfplay_state_to_path(path, &next_state).map_err(PyValueError::new_err)?;
+    }
     if let Some(id) = state_id {
         selfplay_states()
             .lock()
@@ -1424,8 +1696,10 @@ fn generate_selfplay<'py>(
 #[cfg(test)]
 mod tests {
     use super::{
-        mask_obvious_immediate_deaths, obvious_immediate_death, terminal_sample_value,
+        load_selfplay_state_from_path, mask_obvious_immediate_deaths, new_selfplay_state,
+        obvious_immediate_death, save_selfplay_state_to_path, terminal_sample_value, SelfPlayState,
     };
+    use rand::RngCore;
     use snek_core::{Board, Move, Point};
 
     #[test]
@@ -1497,6 +1771,75 @@ mod tests {
             Point::new(3, 2),
         ]);
         assert!(!obvious_immediate_death(&tail_board, 0, Move::Right));
+    }
+
+    fn assert_selfplay_state_eq(a: &SelfPlayState, b: &SelfPlayState) {
+        assert_eq!(a.board, b.board);
+        assert_eq!(a.num_snakes, b.num_snakes);
+        assert_eq!(a.count, b.count);
+        assert_eq!(a.turns, b.turns);
+        assert_eq!(a.boards.len(), b.boards.len());
+        for (ba, bb) in a.boards.iter().flatten().zip(b.boards.iter().flatten()) {
+            assert_eq!(ba.width, bb.width);
+            assert_eq!(ba.height, bb.height);
+            assert_eq!(ba.turn, bb.turn);
+            assert_eq!(ba.food, bb.food);
+            assert_eq!(ba.hazards, bb.hazards);
+            assert_eq!(ba.hazard_damage, bb.hazard_damage);
+            assert_eq!(ba.min_food, bb.min_food);
+            assert_eq!(ba.food_spawn_chance, bb.food_spawn_chance);
+            assert_eq!(ba.snakes.len(), bb.snakes.len());
+            for (sa, sb) in ba.snakes.iter().zip(bb.snakes.iter()) {
+                assert_eq!(sa.health, sb.health);
+                assert_eq!(sa.eliminated, sb.eliminated);
+                assert_eq!(
+                    sa.body.iter().collect::<Vec<_>>(),
+                    sb.body.iter().collect::<Vec<_>>()
+                );
+            }
+        }
+        assert_eq!(a.slots.len(), b.slots.len());
+        for (sa, sb) in a.slots.iter().flatten().zip(b.slots.iter().flatten()) {
+            assert_eq!(sa.obs, sb.obs);
+            assert_eq!(sa.pol, sb.pol);
+            assert_eq!(sa.value, sb.value);
+            assert_eq!(sa.alive, sb.alive);
+            assert_eq!(sa.frames, sb.frames);
+            assert_eq!(sa.steps, sb.steps);
+        }
+        let mut ra = a.rng.clone();
+        let mut rb = b.rng.clone();
+        for _ in 0..16 {
+            assert_eq!(ra.next_u64(), rb.next_u64());
+        }
+    }
+
+    #[test]
+    fn selfplay_state_round_trips_full_inflight_slots() {
+        let mut state = new_selfplay_state(11, 2, 3, 12345);
+        state.boards[0][1].turn = 17;
+        state.boards[0][1].food.push(Point::new(4, 5));
+        state.boards[0][1].hazards.push(Point::new(6, 7));
+        state.boards[0][1].snakes[0].health = 42;
+        state.boards[0][1].snakes[1].eliminated = Some(snek_core::EliminatedCause::Collision);
+        state.turns[0][1] = 17;
+        state.slots[0][1].obs = vec![1.25, -2.5, 3.75];
+        state.slots[0][1].pol = vec![0.1, 0.2, 0.3, 0.4];
+        state.slots[0][1].value = vec![-0.5, 0.75];
+        state.slots[0][1].alive = vec![true, false, true];
+        state.slots[0][1].frames = vec![serde_json::json!({"turn": 17, "note": "roundtrip"})];
+        state.slots[0][1].steps = 1;
+        let _ = state.rng.next_u64();
+
+        let path = std::env::temp_dir().join(format!(
+            "snek-selfplay-state-{}-{}.bin",
+            std::process::id(),
+            state.rng.next_u64()
+        ));
+        save_selfplay_state_to_path(path.to_str().unwrap(), &state).unwrap();
+        let loaded = load_selfplay_state_from_path(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(path).ok();
+        assert_selfplay_state_eq(&state, &loaded);
     }
 }
 
@@ -1728,6 +2071,8 @@ fn snek(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(selfplay_progress, m)?)?;
     m.add_function(wrap_pyfunction!(create_selfplay_state, m)?)?;
     m.add_function(wrap_pyfunction!(drop_selfplay_state, m)?)?;
+    m.add_function(wrap_pyfunction!(save_selfplay_state, m)?)?;
+    m.add_function(wrap_pyfunction!(load_selfplay_state, m)?)?;
     m.add_function(wrap_pyfunction!(generate_selfplay, m)?)?;
     m.add_function(wrap_pyfunction!(generate_selfplay_le, m)?)?;
     Ok(())

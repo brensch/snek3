@@ -650,12 +650,28 @@ def train_one_run(args, state, device, logger):
                         persist=lambda p: run.write_json("params.json", p))
 
     onnx_path = run.dir / "model.onnx"
-    selfplay_state_id = snek.create_selfplay_state(
-        board=sp.board,
-        num_snakes=sp.num_snakes,
-        count=args.count,
-        seed=10_000 + start_gen,
-    )
+    selfplay_state_path = run.dir / "selfplay_state.bin"
+    if args.fresh:
+        selfplay_state_path.unlink(missing_ok=True)
+    if selfplay_state_path.exists() and not args.fresh:
+        try:
+            selfplay_state_id = snek.load_selfplay_state(str(selfplay_state_path))
+            log_phase(logger, "RESUME", f"restored in-flight self-play state from {selfplay_state_path}")
+        except Exception as e:  # noqa: BLE001
+            log_phase(logger, "WARN", f"could not restore in-flight self-play state: {e}")
+            selfplay_state_id = snek.create_selfplay_state(
+                board=sp.board,
+                num_snakes=sp.num_snakes,
+                count=args.count,
+                seed=10_000 + start_gen,
+            )
+    else:
+        selfplay_state_id = snek.create_selfplay_state(
+            board=sp.board,
+            num_snakes=sp.num_snakes,
+            count=args.count,
+            seed=10_000 + start_gen,
+        )
     gen_iter = (
         itertools.count(start_gen) if (state is not None and args.generations == 0)
         else range(start_gen, args.generations if args.generations else start_gen + 1)
@@ -716,7 +732,7 @@ def train_one_run(args, state, device, logger):
                 exploration_prob=args.exploration_prob, max_turns=args.max_turns,
                 draw_value=args.draw_value, skip_short_draw_turns=args.skip_short_draw_turns,
                 record_games=rust_sample_games, bootstrap_value=args.bootstrap_value,
-                state_id=selfplay_state_id,
+                state_id=selfplay_state_id, state_path=str(selfplay_state_path),
             )
         except Exception as e:
             msg = str(e).lower()
@@ -726,7 +742,11 @@ def train_one_run(args, state, device, logger):
             )
             if not cancelled:
                 raise
-            log_phase(logger, "STOP", f"gen={gen} self-play cancelled; discarding partial generation")
+            log_phase(
+                logger,
+                "STOP",
+                f"gen={gen} self-play cancelled; saved in-flight games to {selfplay_state_path}",
+            )
             run.write_status(
                 {
                     "generation": gen - 1,
