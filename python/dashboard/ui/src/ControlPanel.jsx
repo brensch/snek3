@@ -58,6 +58,7 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
 
   const running = status?.running;
   const prog = status?.progress;
+  const stopping = status?.phase === "stopping" || status?.phase === "switching";
   const stateClass = running ? "running" : "stopped";
   const stateWord = running ? "RUNNING" : "STOPPED";
   const determinate = prog && prog.total > 1;
@@ -83,9 +84,9 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
           <span className="state-word">{stateWord}</span>
           {status?.generation != null && <span className="state-gen">gen {status.generation}</span>}
           <div className="grow" />
-          {running && <button className="danger" disabled={busy}
+          {running && <button className="danger" disabled={busy || stopping}
             onClick={() => doControl("stop")}>
-            Stop
+            {stopping ? "Stopping" : "Stop"}
           </button>}
         </div>
 
