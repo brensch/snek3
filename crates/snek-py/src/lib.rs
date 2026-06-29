@@ -675,7 +675,7 @@ fn sample_move(probs: &[f32], explore: f32, rng: &mut Xoshiro256PlusPlus) -> Mov
     sample_move_with_play_policy(probs, explore, rng).0
 }
 
-fn obvious_self_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
+fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
     let Some(snake) = board.snakes.get(snake_idx) else {
         return false;
     };
@@ -688,10 +688,25 @@ fn obvious_self_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
     }
     let mut body = snake.body;
     body.advance(next);
-    body.collides_excluding_head(next)
+    if body.collides_excluding_head(next) {
+        return true;
+    }
+    for (i, other) in board.snakes.iter().enumerate() {
+        if i == snake_idx || !other.alive() {
+            continue;
+        }
+        // Opponent heads and tails are tactically conditional. Interior body
+        // segments are stable collision targets for this simultaneous turn.
+        for j in 1..other.len().saturating_sub(1) {
+            if other.body.get(j) == next {
+                return true;
+            }
+        }
+    }
+    false
 }
 
-fn mask_obvious_self_deaths(board: &Board, snake_idx: usize, probs: &[f32]) -> [f32; 4] {
+fn mask_obvious_immediate_deaths(board: &Board, snake_idx: usize, probs: &[f32]) -> [f32; 4] {
     let mut original = [0.0f32; 4];
     let mut total = 0.0f32;
     for i in 0..4 {
@@ -712,7 +727,7 @@ fn mask_obvious_self_deaths(board: &Board, snake_idx: usize, probs: &[f32]) -> [
     let mut safe_count = 0usize;
     for i in 0..4 {
         let p = original[i];
-        let death = obvious_self_death(board, snake_idx, Move::from_index(i));
+        let death = obvious_immediate_death(board, snake_idx, Move::from_index(i));
         if !death {
             safe_count += 1;
             out[i] = p;
@@ -729,7 +744,7 @@ fn mask_obvious_self_deaths(board: &Board, snake_idx: usize, probs: &[f32]) -> [
     } else {
         let u = 1.0 / safe_count as f32;
         for i in 0..4 {
-            if !obvious_self_death(board, snake_idx, Move::from_index(i)) {
+            if !obvious_immediate_death(board, snake_idx, Move::from_index(i)) {
                 out[i] = u;
             }
         }
@@ -1192,7 +1207,7 @@ fn generate_selfplay<'py>(
                     }
                     for s in 0..n {
                         let base = (g * n + s) * 4;
-                        let play_base = mask_obvious_self_deaths(
+                        let play_base = mask_obvious_immediate_deaths(
                             &bds[g],
                             s,
                             &root_pol[base..base + 4],
@@ -1427,7 +1442,9 @@ fn generate_selfplay<'py>(
 
 #[cfg(test)]
 mod tests {
-    use super::{mask_obvious_self_deaths, obvious_self_death, terminal_sample_value};
+    use super::{
+        mask_obvious_immediate_deaths, obvious_immediate_death, terminal_sample_value,
+    };
     use snek_core::{Board, Move, Point};
 
     #[test]
@@ -1448,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn obvious_self_death_masks_wall_and_self_collision() {
+    fn obvious_immediate_death_masks_wall_and_self_collision() {
         let mut board = Board::new(5, 5);
         board.add_snake(&[
             Point::new(1, 1),
@@ -1456,17 +1473,17 @@ mod tests {
             Point::new(2, 2),
             Point::new(2, 1),
         ]);
-        assert!(obvious_self_death(&board, 0, Move::Up));
-        assert!(!obvious_self_death(&board, 0, Move::Left));
+        assert!(obvious_immediate_death(&board, 0, Move::Up));
+        assert!(!obvious_immediate_death(&board, 0, Move::Left));
 
-        let masked = mask_obvious_self_deaths(&board, 0, &[0.25, 0.25, 0.25, 0.25]);
+        let masked = mask_obvious_immediate_deaths(&board, 0, &[0.25, 0.25, 0.25, 0.25]);
         assert_eq!(masked[Move::Up.index()], 0.0);
         assert!(masked[Move::Left.index()] > 0.0);
         assert!((masked.iter().sum::<f32>() - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn obvious_self_death_allows_tail_chase() {
+    fn obvious_immediate_death_allows_own_tail_chase() {
         let mut board = Board::new(5, 5);
         board.add_snake(&[
             Point::new(1, 1),
@@ -1474,7 +1491,31 @@ mod tests {
             Point::new(0, 2),
             Point::new(0, 1),
         ]);
-        assert!(!obvious_self_death(&board, 0, Move::Left));
+        assert!(!obvious_immediate_death(&board, 0, Move::Left));
+    }
+
+    #[test]
+    fn obvious_immediate_death_masks_opponent_interior_but_not_tail() {
+        let mut board = Board::new(7, 7);
+        board.add_snake(&[Point::new(2, 2), Point::new(2, 1)]);
+        board.add_snake(&[
+            Point::new(5, 2),
+            Point::new(4, 2),
+            Point::new(3, 2),
+            Point::new(3, 1),
+        ]);
+        assert!(obvious_immediate_death(&board, 0, Move::Right));
+
+        let mut tail_board = Board::new(7, 7);
+        tail_board.add_snake(&[Point::new(2, 2), Point::new(2, 1)]);
+        tail_board.add_snake(&[
+            Point::new(5, 2),
+            Point::new(5, 1),
+            Point::new(4, 1),
+            Point::new(3, 1),
+            Point::new(3, 2),
+        ]);
+        assert!(!obvious_immediate_death(&tail_board, 0, Move::Right));
     }
 }
 

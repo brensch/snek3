@@ -22,7 +22,7 @@ use snek_core::{encode_into, obs_side, Board, Move, MAX_SNAKES, NUM_CHANNELS};
 
 const DUMMY_MOVE: Move = Move::Up;
 
-fn obvious_self_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
+fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
     let Some(snake) = board.snakes.get(snake_idx) else {
         return false;
     };
@@ -35,7 +35,20 @@ fn obvious_self_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
     }
     let mut body = snake.body;
     body.advance(next);
-    body.collides_excluding_head(next)
+    if body.collides_excluding_head(next) {
+        return true;
+    }
+    for (i, other) in board.snakes.iter().enumerate() {
+        if i == snake_idx || !other.alive() {
+            continue;
+        }
+        for j in 1..other.len().saturating_sub(1) {
+            if other.body.get(j) == next {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// One edge taken during a descent: the node and, per snake, which candidate
@@ -238,12 +251,12 @@ impl MctsTree {
             let k = cands[i].len();
             let any_safe = cands[i]
                 .iter()
-                .any(|&m| !obvious_self_death(&board, i, m));
+                .any(|&m| !obvious_immediate_death(&board, i, m));
             // gather policy mass on this snake's candidate moves, renormalize
             let mut p = vec![0.0f32; k];
             let mut s = 0.0f32;
             for (a, m) in cands[i].iter().enumerate() {
-                let pm = if any_safe && obvious_self_death(&board, i, *m) {
+                let pm = if any_safe && obvious_immediate_death(&board, i, *m) {
                     0.0
                 } else {
                     policy[i * 4 + m.index()].max(0.0)
@@ -258,11 +271,11 @@ impl MctsTree {
             } else {
                 let safe_k = cands[i]
                     .iter()
-                    .filter(|&&m| !any_safe || !obvious_self_death(&board, i, m))
+                    .filter(|&&m| !any_safe || !obvious_immediate_death(&board, i, m))
                     .count()
                     .max(1);
                 for (a, x) in p.iter_mut().enumerate() {
-                    *x = if !any_safe || !obvious_self_death(&board, i, cands[i][a]) {
+                    *x = if !any_safe || !obvious_immediate_death(&board, i, cands[i][a]) {
                         1.0 / safe_k as f32
                     } else {
                         0.0
@@ -438,6 +451,28 @@ mod tests {
         b
     }
 
+    fn opponent_body_board(tail_at_target: bool) -> Board {
+        let mut b = Board::new(7, 7);
+        b.add_snake(&[Point::new(2, 2), Point::new(2, 1)]);
+        if tail_at_target {
+            b.add_snake(&[
+                Point::new(5, 2),
+                Point::new(5, 1),
+                Point::new(4, 1),
+                Point::new(3, 1),
+                Point::new(3, 2),
+            ]);
+        } else {
+            b.add_snake(&[
+                Point::new(5, 2),
+                Point::new(4, 2),
+                Point::new(3, 2),
+                Point::new(3, 1),
+            ]);
+        }
+        b
+    }
+
     /// Drive the forest with a uniform policy / zero value and check the search
     /// mechanics: the tree grows, and root visit-count policies are valid
     /// distributions over each snake's legal moves.
@@ -527,5 +562,19 @@ mod tests {
         }
         let root = &forest.trees[0].nodes[0];
         assert_eq!(root.nvisit[0][up_idx], 0.0);
+    }
+
+    #[test]
+    fn obvious_immediate_death_distinguishes_opponent_tail() {
+        assert!(obvious_immediate_death(
+            &opponent_body_board(false),
+            0,
+            Move::Right
+        ));
+        assert!(!obvious_immediate_death(
+            &opponent_body_board(true),
+            0,
+            Move::Right
+        ));
     }
 }
