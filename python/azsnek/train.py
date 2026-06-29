@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import signal
 import sys
 import time
@@ -52,6 +53,7 @@ from .selfplay import ReplayBuffer, Samples, SelfPlayConfig, generate, save_shar
 
 
 DEFAULT_PARAMS_PATH = Path(__file__).with_name("default_params.json")
+DEFAULT_SERVING_CKPT_DIR = Path("checkpoints")
 META_ARG_ALIASES = {
     "samples_per_gen": "samples",
 }
@@ -318,6 +320,8 @@ def export_onnx(net, channels: int, board: int, device, path) -> None:
     """Export the current net to ONNX so the Rust self-play can run it on GPU."""
     import warnings
 
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     net.eval()
     side = board  # absolute board coords: obs_side(board) == board
     dummy = torch.zeros(1, channels, side, side, device=device)
@@ -338,6 +342,21 @@ def export_onnx(net, channels: int, board: int, device, path) -> None:
             dynamic_axes=dyn,
             opset_version=17, dynamo=False,
         )
+
+
+def publish_serving_checkpoint(net, channels: int, board: int, device, state_path: Path, ckpt_dir: Path) -> None:
+    """Publish the latest train state and ONNX model for the live Battlesnake API."""
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    latest_pt = ckpt_dir / "latest.pt"
+    latest_onnx = ckpt_dir / "latest.onnx"
+
+    tmp_pt = latest_pt.with_suffix(".pt.tmp")
+    shutil.copyfile(state_path, tmp_pt)
+    tmp_pt.replace(latest_pt)
+
+    tmp_onnx = latest_onnx.with_suffix(".onnx.tmp")
+    export_onnx(net, channels, board, device, tmp_onnx)
+    tmp_onnx.replace(latest_onnx)
 
 
 def main():
@@ -502,7 +521,7 @@ def train_one_run(args, state, device, logger):
             "device": str(device),
         },
     )
-    ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else run.dir / "ckpt"
+    ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else DEFAULT_SERVING_CKPT_DIR
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log_phase(logger, "SETUP", f"run_id={run.run_id} ckpt_dir={ckpt_dir}")
     run.write_json("meta.json", {**run.read_json("meta.json"), "ckpt_dir": str(ckpt_dir)})
@@ -813,6 +832,7 @@ def train_one_run(args, state, device, logger):
         log_phase(logger, "SAVING", f"gen={gen} checkpoint=state metrics=status")
         t_phase = time.time()
         save_state(gen)  # full resumable state, every generation (atomic write)
+        publish_serving_checkpoint(net, cfg.channels, sp.board, device, run.state_path, ckpt_dir)
         metric["save_seconds"] = round(time.time() - t_phase, 1)
         run.append_metric(metric)
         metrics_history.append(metric)

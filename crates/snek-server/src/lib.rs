@@ -2,17 +2,19 @@
 //! policy+value net — the *same* search used in self-play (`crates/snek-search`
 //! `MctsForest`), so what we serve matches what we trained.
 //!
-//! [`serve_move`] is stateless per move (board + our index only): no opponent
+//! [`serve_move_until`] is stateless per move (board + our index only): no opponent
 //! modelling, no temperature — the policy/value net plus the tree search handle
 //! everything. The HTTP `/move` handler (`main.rs`) routes through it.
+
+use std::time::Instant;
 
 use snek_core::{obs_h, obs_w, Board, Move, NUM_CHANNELS};
 use snek_infer::Net;
 use snek_search::MctsForest;
 
 pub struct Config {
-    /// MCTS simulations per move (the inference-time search budget).
-    pub sims: usize,
+    /// Safety cap on MCTS simulations. Live serving is deadline-bound first.
+    pub max_sims: usize,
     /// PUCT exploration constant (match self-play for train/serve parity).
     pub c_puct: f32,
     /// Terminal value of a draw at search leaves (match training).
@@ -35,7 +37,11 @@ pub fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
 pub fn safe_move(board: &Board, me: usize) -> usize {
     let s = &board.snakes[me];
     let head = s.head();
-    let neck = if s.len() >= 2 { Some(s.body.get(1)) } else { None };
+    let neck = if s.len() >= 2 {
+        Some(s.body.get(1))
+    } else {
+        None
+    };
     for m in Move::ALL {
         let nh = m.apply(head);
         if Some(nh) != neck && board.in_bounds(nh) {
@@ -45,10 +51,16 @@ pub fn safe_move(board: &Board, me: usize) -> usize {
     Move::Up.index()
 }
 
-/// One AlphaZero move for snake `me` on `board`: run `cfg.sims` decoupled-PUCT
-/// simulations (leaves evaluated by `net`), then play the most-visited root
-/// action. Identical search to self-play, so serving cannot diverge from training.
-pub fn serve_move(net: &mut Net, cfg: &Config, board: &Board, me: usize) -> usize {
+/// One AlphaZero move for snake `me` on `board`: run decoupled-PUCT until the
+/// request deadline or `cfg.max_sims`, then play the most-visited root action.
+/// Identical search to self-play, so serving cannot diverge from training.
+pub fn serve_move_until(
+    net: &mut Net,
+    cfg: &Config,
+    board: &Board,
+    me: usize,
+    deadline: Instant,
+) -> usize {
     if board.is_terminal() || !board.snakes[me].alive() {
         return safe_move(board, me);
     }
@@ -58,7 +70,10 @@ pub fn serve_move(net: &mut Net, cfg: &Config, board: &Board, me: usize) -> usiz
         MctsForest::new_with_draw_value(std::slice::from_ref(board), cfg.c_puct, cfg.draw_value);
     let obs_size = forest.obs_size();
 
-    for _ in 0..cfg.sims {
+    for _ in 0..cfg.max_sims {
+        if Instant::now() >= deadline {
+            break;
+        }
         let pending = forest.select();
         if pending.is_empty() {
             break; // tree fully resolved (all terminal)
@@ -98,4 +113,15 @@ pub fn serve_move(net: &mut Net, cfg: &Config, board: &Board, me: usize) -> usiz
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
         .map(|(k, _)| k)
         .unwrap_or(0)
+}
+
+/// Fixed-budget wrapper for tests/tools that do not have a request deadline.
+pub fn serve_move(net: &mut Net, cfg: &Config, board: &Board, me: usize) -> usize {
+    serve_move_until(
+        net,
+        cfg,
+        board,
+        me,
+        Instant::now() + std::time::Duration::from_secs(3600),
+    )
 }

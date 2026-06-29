@@ -17,9 +17,15 @@ RUNS_DIR    ?= runs
 PORT        ?= 8050
 SERVE_PORT  ?= 8000
 CKPT        ?=
-# Pure-Rust /move API (Albatross-faithful serving): exported model + checkpoint
-MODEL       ?= model.onnx
-CHECKPOINT  ?= runs/albatross-resp0/state.pt
+# Pure-Rust /move API: one canonical live model under checkpoints/.
+API_RUN_ID  ?= $(RUN_ID)
+CHECKPOINT  ?= $(if $(API_RUN_ID),runs/$(API_RUN_ID)/state.pt,checkpoints/latest.pt)
+MODEL       ?= checkpoints/latest.onnx
+API_MAX_SIMS ?= 100000
+API_TIMEOUT_MS ?= 500
+API_DEADLINE_MARGIN_MS ?= 150
+API_THREADS ?= 2
+API_EVAL_CHUNK ?= 4096
 
 # Training defaults (all overridable)
 GENERATIONS ?= 100000
@@ -98,7 +104,7 @@ ALB_DRAW_VALUE ?= -0.9  # equilibrium-search terminal value of a draw (negative 
 ALB_GENERATIONS ?= 0    # 0 = run forever until stopped via the dashboard/control API
 
 .DEFAULT_GOAL := help
-.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard serve export-model api-build api api-docker clean clean-all
+.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard serve export-model api-build api api-run api-docker clean clean-all
 
 help: ## Show this help
 	@echo "snek3 targets:"
@@ -166,16 +172,22 @@ serve: build ## Run the Battlesnake server (set CKPT=path and matching FILTERS/B
 	$(if $(CKPT),SNEK_CKPT=$(CKPT) ,)SNEK_FILTERS=$(FILTERS) SNEK_BLOCKS=$(BLOCKS) \
 		$(UVICORN) server.main:app --host 0.0.0.0 --port $(SERVE_PORT)
 
-export-model: build ## Export the Albatross proxy net CHECKPOINT -> MODEL (.onnx) for the Rust API
+export-model: build ## Export the AlphaZero net CHECKPOINT -> MODEL (.onnx) for the Rust API
+	mkdir -p checkpoints
+	$(if $(API_RUN_ID),cp $(CHECKPOINT) checkpoints/latest.pt.tmp && mv checkpoints/latest.pt.tmp checkpoints/latest.pt,)
 	PYTHONPATH=python $(PY) scripts/export_model.py $(CHECKPOINT) $(MODEL)
 
 api-build: ## Compile the pure-Rust /move API server (release)
 	cargo build --release --manifest-path crates/snek-server/Cargo.toml
 
-api: api-build ## Run the Rust /move API locally (needs `make export-model`; uses the venv onnxruntime). Override SERVE_PORT, SNEK_*
+api: api-build ## Run the Rust /move API locally. Run `make export-model` first. Override API_RUN_ID, SERVE_PORT.
 	ORT_DYLIB_PATH="$(shell ls $(VENV)/lib/python*/site-packages/onnxruntime/capi/libonnxruntime.so* 2>/dev/null | head -1)" \
-	SNEK_MODEL=$(MODEL) SNEK_PORT=$(SERVE_PORT) \
+	SNEK_MODEL=$(MODEL) SNEK_PORT=$(SERVE_PORT) SNEK_MAX_SIMS=$(API_MAX_SIMS) \
+	SNEK_TIMEOUT_MS=$(API_TIMEOUT_MS) SNEK_DEADLINE_MARGIN_MS=$(API_DEADLINE_MARGIN_MS) \
+	SNEK_THREADS=$(API_THREADS) SNEK_EVAL_CHUNK=$(API_EVAL_CHUNK) \
 	./crates/snek-server/target/release/snek-server
+
+api-run: export-model api ## Export the selected run checkpoint, then start the Rust /move API.
 
 api-docker: ## Build the CPU-only Docker image for the Rust API (expects MODEL in repo root)
 	docker build -f deploy/server.Dockerfile -t snek-api .

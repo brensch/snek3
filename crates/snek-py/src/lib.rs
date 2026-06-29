@@ -20,8 +20,8 @@ use snek_core::{encode_into, obs_side, standard_start, Board, Move, NUM_CHANNELS
 use snek_infer::Net;
 use snek_search::{uct_actions, Forest, MctsForest};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 static CANCEL_SELFPLAY: AtomicBool = AtomicBool::new(false);
 static NEXT_SELFPLAY_STATE_ID: AtomicU64 = AtomicU64::new(1);
@@ -1041,6 +1041,8 @@ fn generate_selfplay<'py>(
     let (tx_req, rx_req) = std::sync::mpsc::channel::<Req>();
     let (tx_res, rx_res) = std::sync::mpsc::channel::<Res>();
     let onnx = onnx_path.to_string();
+    let inference_progress = Arc::new(AtomicUsize::new(0));
+    let inference_progress_gpu = Arc::clone(&inference_progress);
     let gpu = std::thread::spawn(move || -> Result<(f64, f64, usize), String> {
         use std::time::{Duration, Instant};
         let mut net = Net::load(&onnx).map_err(|e| e.to_string())?;
@@ -1055,6 +1057,7 @@ fn generate_selfplay<'py>(
                 _ => break,
             };
             evals += m;
+            inference_progress_gpu.store(evals, Ordering::Relaxed);
             let f = Instant::now();
             let mut pol = vec![0.0f32; m * 4];
             let mut val = vec![0.0f32; m];
@@ -1118,6 +1121,7 @@ fn generate_selfplay<'py>(
     // It returns the accumulated outputs since boards/rng/channels aren't needed
     // after the loop. This lets us run it under `py.allow_threads`.
     let tx_req_c = tx_req.clone();
+    let inference_progress_c = Arc::clone(&inference_progress);
     type SpOut = (
         Vec<f32>,
         Vec<f32>,
@@ -1132,6 +1136,9 @@ fn generate_selfplay<'py>(
         SelfPlayState,
     );
     let run = move || -> Result<SpOut, String> {
+        let progress_started = Instant::now();
+        let progress_interval = 2000usize;
+        let mut next_progress = progress_interval;
         while collected < samples_per_gen {
             check_cancelled()?;
             let mut forests = [
@@ -1311,6 +1318,20 @@ fn generate_selfplay<'py>(
                     }
                     let game_sample_count = game_z.len();
                     collected += game_sample_count;
+                    while collected >= next_progress {
+                        let elapsed = progress_started.elapsed().as_secs_f64().max(1e-9);
+                        let inf = inference_progress_c.load(Ordering::Relaxed);
+                        eprintln!(
+                            "PLAYING    | samples={:>7}/{:<7} completed_games={:<5} samples_per_sec={:>6.0} inference_per_sec={:>8.0} elapsed={:>6.1}s",
+                            collected.min(samples_per_gen),
+                            samples_per_gen,
+                            completed_samples.len() + 1,
+                            collected as f64 / elapsed,
+                            inf as f64 / elapsed,
+                            elapsed,
+                        );
+                        next_progress += progress_interval;
+                    }
                     completed_samples.push(GameSamples {
                         turns: trn[g],
                         obs: game_obs,

@@ -19,11 +19,15 @@ __pycache__/
 
 # Training outputs
 checkpoints/
+!checkpoints/
+checkpoints/*
 runs/
 logs/
 *.pt
 *.pth.tar
 *.onnx
+!checkpoints/latest.pt
+!checkpoints/latest.onnx
 
 # Editor / OS
 .DS_Store

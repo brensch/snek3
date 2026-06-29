@@ -7,29 +7,36 @@
 //!   SNEK_MODEL        ONNX model path (default ./model.onnx)
 //!   SNEK_PORT         listen port (default 8000)
 //!   SNEK_THREADS      worker threads (default 2)
-//!   SNEK_SIMS         MCTS simulations per move (default 200)
+//!   SNEK_MAX_SIMS     safety cap on MCTS simulations per move (default 100000)
+//!   SNEK_TIMEOUT_MS   fallback request timeout when JSON lacks game.timeout (default 500)
+//!   SNEK_DEADLINE_MARGIN_MS  response margin reserved from timeout (default 150)
 //!   SNEK_C_PUCT       PUCT exploration constant (default 1.5)
 //!   SNEK_DRAW_VALUE   terminal value of a draw at leaves (default -0.25)
 //!   SNEK_EVAL_CHUNK   max obs rows per ONNX forward (default 4096)
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use snek_core::json::parse_move_request;
 use snek_infer::Net;
-use snek_server::{env_or, serve_move, Config, MOVES};
+use snek_server::{env_or, serve_move_until, Config, MOVES};
 use tiny_http::{Header, Method, Response, Server};
 
 struct App {
     net: Mutex<Net>,
     cfg: Config,
+    default_timeout_ms: u64,
+    deadline_margin_ms: u64,
 }
 
 fn main() {
     let model = std::env::var("SNEK_MODEL").unwrap_or_else(|_| "model.onnx".into());
     let port: u16 = env_or("SNEK_PORT", 8000);
     let threads: usize = env_or("SNEK_THREADS", 2usize).max(1);
+    let default_timeout_ms = env_or("SNEK_TIMEOUT_MS", 500u64);
+    let deadline_margin_ms = env_or("SNEK_DEADLINE_MARGIN_MS", 150u64);
     let cfg = Config {
-        sims: env_or("SNEK_SIMS", 200usize),
+        max_sims: max_sims_from_env(),
         c_puct: env_or("SNEK_C_PUCT", 1.5f32),
         draw_value: env_or("SNEK_DRAW_VALUE", -0.25f32),
         eval_chunk: env_or("SNEK_EVAL_CHUNK", 4096usize),
@@ -38,13 +45,19 @@ fn main() {
     let net =
         Net::load(&model).unwrap_or_else(|e| panic!("failed to load ONNX model '{model}': {e}"));
     eprintln!(
-        "snek-server: model={model} port={port} threads={threads} sims={} c_puct={} draw_value={}",
-        cfg.sims, cfg.c_puct, cfg.draw_value
+        "snek-server: model={model} port={port} threads={threads} max_sims={} timeout_ms={} deadline_margin_ms={} c_puct={} draw_value={}",
+        cfg.max_sims,
+        default_timeout_ms,
+        deadline_margin_ms,
+        cfg.c_puct,
+        cfg.draw_value
     );
 
     let app = Arc::new(App {
         net: Mutex::new(net),
         cfg,
+        default_timeout_ms,
+        deadline_margin_ms,
     });
 
     let server = Arc::new(Server::http(("0.0.0.0", port)).expect("bind"));
@@ -95,7 +108,27 @@ fn handle_move(app: &App, body: &str) -> String {
 }
 
 fn compute_move(app: &App, body: &str) -> Option<usize> {
+    let started = Instant::now();
+    let timeout_ms = request_timeout_ms(body).unwrap_or(app.default_timeout_ms);
+    let search_budget_ms = timeout_ms.saturating_sub(app.deadline_margin_ms).max(1);
+    let deadline = started + Duration::from_millis(search_budget_ms);
     let (board, me) = parse_move_request(body).ok()?;
     let mut net = app.net.lock().unwrap();
-    Some(serve_move(&mut net, &app.cfg, &board, me))
+    Some(serve_move_until(&mut net, &app.cfg, &board, me, deadline))
+}
+
+fn request_timeout_ms(body: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let timeout = v.get("game")?.get("timeout")?;
+    timeout
+        .as_u64()
+        .or_else(|| timeout.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn max_sims_from_env() -> usize {
+    std::env::var("SNEK_MAX_SIMS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or_else(|| std::env::var("SNEK_SIMS").ok().and_then(|v| v.parse().ok()))
+        .unwrap_or(100_000usize)
 }
