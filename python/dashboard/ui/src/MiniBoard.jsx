@@ -74,17 +74,19 @@ function SnakeSummaryRows({ frame, opponent }) {
       snake,
       index,
       value: Number.isFinite(Number(snake?.value)) ? Number(snake.value) : null,
-    }))
-    .sort((a, b) => {
-      if (a.value == null && b.value == null) return a.index - b.index;
-      if (a.value == null) return 1;
-      if (b.value == null) return -1;
-      return b.value - a.value || a.index - b.index;
-    });
+    }));
   if (!rows.length) return null;
 
   return (
     <div className="snake-summary-rows">
+      <div className="snake-summary-head">
+        <span />
+        <span />
+        <span />
+        <em>V</em>
+        <em>H</em>
+        <em>L</em>
+      </div>
       {rows.map(({ snake, index, value }) => {
         const clamped = value == null ? 0 : Math.max(-1, Math.min(1, value));
         const left = clamped < 0 ? `${(clamped + 1) * 50}%` : "50%";
@@ -100,9 +102,9 @@ function SnakeSummaryRows({ frame, opponent }) {
               />
               <b style={{ left: `${(clamped + 1) * 50}%` }} />
             </div>
-            <strong>v {fmtValue(value)}</strong>
-            <em>h {snake.health ?? "—"}</em>
-            <em>len {snake.body?.length ?? "—"}</em>
+            <strong>{fmtValue(value)}</strong>
+            <em>{snake.health ?? "—"}</em>
+            <em>{snake.body?.length ?? "—"}</em>
           </div>
         );
       })}

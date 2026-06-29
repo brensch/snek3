@@ -160,7 +160,7 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
   text-transform: uppercase;
   letter-spacing: .5px;
 }
-.board-cell { background: #0d1117; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.board-cell { min-width: 0; overflow: hidden; background: #0d1117; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
 .board-canvas-wrap { position: relative; }
 .board-cell canvas { width: 100%; height: auto; }
 .snake-tooltip {
@@ -287,19 +287,34 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
 }
 .snake-summary-rows {
   display: grid;
-  gap: 3px;
+  gap: 2px;
   margin-top: 7px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   font-size: 11px;
   color: var(--muted);
 }
+.snake-summary-head,
 .snake-summary-row {
   display: grid;
-  grid-template-columns: 12px 12px minmax(54px, 1fr) 50px 34px 46px;
+  grid-template-columns: 12px 11px minmax(30px, 1fr) minmax(34px, 42px) minmax(22px, 30px) minmax(20px, 26px);
   align-items: center;
-  gap: 5px;
-  min-height: 17px;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+.snake-summary-head {
+  min-height: 11px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--muted);
+}
+.snake-summary-row {
+  min-height: 17px;
 }
 .snake-summary-row.dead { opacity: .58; }
 .snake-summary-row .swatch {
@@ -312,6 +327,7 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
   color: var(--fg);
   font-weight: 650;
   text-align: center;
+  min-width: 0;
 }
 .value-track {
   position: relative;
@@ -353,11 +369,18 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
   font-weight: 650;
   text-align: right;
 }
+.snake-summary-head em,
 .snake-summary-row em {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   font-style: normal;
   text-align: right;
+}
+.snake-summary-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: clip;
 }
 canvas { display: block; background: #0b0e13; border-radius: 8px; max-width: 100%; }
 .chart-panel { min-width: 0; cursor: grab; }
