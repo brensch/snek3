@@ -55,14 +55,15 @@ export default function GenerationView({ run, gamesIndex, evalIndex = [] }) {
     return () => clearInterval(id);
   }, [playing, fps]);
 
-  const summarize = (games) => {
-    let w = 0, l = 0, d = 0;
-    for (const g of games) (g.winner === 0 ? (w++) : g.winner === 1 ? (l++) : (d++));
-    return `${w}W ${l}L ${d}D`;
+  const drawPctFromGames = (games) => {
+    const total = games?.length || 0;
+    if (!total) return "—";
+    const draws = games.filter((g) => Number(g.winner) < 0).length;
+    return pct(draws / total);
   };
   const summarizeSelfplay = (summary, fallbackGames) => {
-    if (!summary?.completed_games) return summarize(fallbackGames);
-    return `${summary.wins || 0}W ${summary.losses || 0}L ${summary.draws || 0}D`;
+    if (!summary?.completed_games) return drawPctFromGames(fallbackGames);
+    return pct(summary.draw_rate ?? ((summary.draws || 0) / Math.max(1, summary.completed_games)));
   };
   const pct = (value) => value == null ? "—" : `${(Number(value) * 100).toFixed(1)}%`;
   const num = (value, digits = 0) => value == null ? "—" : Number(value).toLocaleString(undefined, { maximumFractionDigits: digits });
@@ -114,13 +115,8 @@ export default function GenerationView({ run, gamesIndex, evalIndex = [] }) {
         <div className="game-summary">
           <div className="summary-stats">
             <span><b>{num(selfplay.completed_games)}</b><em>played</em></span>
-            <span><b>{selfplay.wins || 0}/{selfplay.losses || 0}/{selfplay.draws || 0}</b><em>W/L/D</em></span>
-            <span><b>{pct(selfplay.win_rate)}</b><em>total win</em></span>
-            <span><b>{pct(selfplay.decisive_win_rate)}</b><em>decisive</em></span>
             <span><b>{num(selfplay.turns?.mean, 1)}</b><em>avg turns</em></span>
-            <span><b>{num(selfplay.turns?.p50)} / {num(selfplay.turns?.p90)} / {num(selfplay.turns?.max)}</b><em>p50/p90/max</em></span>
-            <span><b>{num(selfplay.short_draws)}</b><em>short draws</em></span>
-            <span><b>{num(selfplay.overrun_draws)}</b><em>overruns</em></span>
+            <span><b>{pct(selfplay.draw_rate ?? ((selfplay.draws || 0) / Math.max(1, selfplay.completed_games)))}</b><em>draws</em></span>
           </div>
           <div className="length-hist">
             {(selfplay.length_histogram || []).map((bucket) => (
@@ -137,7 +133,7 @@ export default function GenerationView({ run, gamesIndex, evalIndex = [] }) {
       <div className="gen-layout">
         <div className="gentable">
           <table>
-            <thead><tr><th>gen</th><th>games</th><th>W/L/D</th></tr></thead>
+            <thead><tr><th>gen</th><th>games</th><th>draws</th></tr></thead>
             <tbody>
               {gamesIndex.map((f) => {
                 const active = genData && f.file === activeFile;

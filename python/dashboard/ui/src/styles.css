@@ -71,18 +71,19 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
 .summary-stats b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
 .summary-stats em { display: block; color: var(--muted); font-size: 11px; font-style: normal; }
 .length-hist {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(28px, 1fr));
   align-items: end;
   gap: 6px;
   min-height: 72px;
-  overflow-x: auto;
+  overflow: hidden;
   padding-bottom: 2px;
 }
 .hist-bin {
   display: grid;
   grid-template-rows: 46px 14px 14px;
   justify-items: center;
-  min-width: 34px;
+  min-width: 0;
   color: var(--muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
@@ -94,6 +95,12 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
   background: #60a5fa;
 }
 .hist-bin b { color: var(--fg); font-size: 10px; font-weight: 600; }
+.hist-bin span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* Fixed-width mini game boards grouped by opponent class. */
 .board-scroll {
@@ -171,7 +178,7 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
   padding-top: 7px;
   margin-top: 7px;
 }
-.policy-headings + .snake-tooltip-block {
+.snake-tooltip-block:first-child {
   border-top: 0;
   padding-top: 0;
   margin-top: 0;
@@ -202,18 +209,6 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
   font-size: 10px;
   font-style: normal;
 }
-.policy-headings {
-  display: grid;
-  grid-template-columns: 34px minmax(34px, 1fr) 42px 42px;
-  gap: 5px;
-  margin-bottom: 4px;
-  color: var(--muted);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: .3px;
-}
-.policy-headings span:nth-child(2) { grid-column: 3; text-align: right; }
-.policy-headings span:nth-child(3) { grid-column: 4; text-align: right; }
 .policy-rows {
   display: grid;
   gap: 4px;
@@ -224,6 +219,13 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
   align-items: center;
   gap: 5px;
   font-variant-numeric: tabular-nums;
+  padding: 2px 3px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+}
+.policy-row.chosen {
+  border-color: #34d399;
+  background: rgba(52, 211, 153, .08);
 }
 .policy-row em {
   color: var(--muted);

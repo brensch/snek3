@@ -27,7 +27,7 @@ function SnakePolicyBlock({ snake, snakeIndex, opponent }) {
           {!snake.alive && <em>dead</em>}
         </span>
         <b>
-          h {snake.health ?? "—"} · {snake.chosen_move != null ? MOVE_LABELS[snake.chosen_move] : "—"} · v {fmtValue(snake.value)}
+          h {snake.health ?? "—"} · v {fmtValue(snake.value)}
         </b>
       </div>
       {policy || playPolicy ? (
@@ -36,7 +36,7 @@ function SnakePolicyBlock({ snake, snakeIndex, opponent }) {
             const p = Number(policy?.[i]) || 0;
             const pp = Number(playPolicy?.[i]) || 0;
             return (
-              <div className="policy-row" key={label}>
+              <div className={"policy-row " + (snake.chosen_move === i ? "chosen" : "")} key={label}>
                 <em>{label}</em>
                 <i><span style={{ width: `${Math.max(3, ((policy ? p : pp) / maxP) * 100)}%` }} /></i>
                 <b>{fmtPct(p)}</b>
@@ -61,7 +61,6 @@ function PolicyTooltip({ frame, hover, opponent }) {
 
   return (
     <div className="snake-tooltip" style={{ left, top }}>
-      <div className="policy-headings"><span>move</span><span>target</span><span>played</span></div>
       {snakeIndexes.map((si) => (
         <SnakePolicyBlock key={si} snake={frame.snakes[si]} snakeIndex={si} opponent={opponent} />
       ))}

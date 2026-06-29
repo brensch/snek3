@@ -341,9 +341,8 @@ def summarize_completed_games(games: list[dict]) -> dict:
             "length_histogram": [],
         }
     turns = np.array([int(g.get("turns", 0)) for g in games], dtype=np.int32)
-    wins = sum(1 for g in games if g.get("winner") == 0)
-    losses = sum(1 for g in games if g.get("winner") == 1)
-    draws = len(games) - wins - losses
+    decisive_games = sum(1 for g in games if int(g.get("winner", -1)) >= 0)
+    draws = sum(1 for g in games if int(g.get("winner", -1)) < 0)
     overruns = sum(1 for g in games if g.get("overrun"))
     short_draws = sum(1 for g in games if g.get("short_draw"))
     terminal_draws = max(0, draws - overruns)
@@ -355,17 +354,16 @@ def summarize_completed_games(games: list[dict]) -> dict:
         count = int(((turns >= start) & (turns <= end)).sum())
         if count:
             hist.append({"min": start, "max": end, "count": count})
-    decisive = wins + losses
     return {
         "completed_games": len(games),
-        "wins": wins,
-        "losses": losses,
+        "decisive_games": decisive_games,
         "draws": draws,
         "overrun_draws": overruns,
         "terminal_draws": terminal_draws,
         "short_draws": short_draws,
-        "win_rate": round((wins + 0.5 * draws) / len(games), 4),
-        "decisive_win_rate": round(wins / decisive, 4) if decisive else None,
+        "draw_rate": round(draws / len(games), 4),
+        "terminal_draw_rate": round(terminal_draws / len(games), 4),
+        "overrun_draw_rate": round(overruns / len(games), 4),
         "total_samples": int(sum(int(g.get("samples", 0)) for g in games)),
         "total_turns": int(turns.sum()),
         "turns": {
@@ -917,19 +915,10 @@ def train_one_run(args, state, device, logger):
             "turns_per_sec": round(turns_per_sec, 0),
             "games_per_sec": round(games_per_sec, 2),
             "avg_game_len": selfplay_summary.get("turns", {}).get("mean"),
-            "draw_rate": round(
-                float(selfplay_summary.get("draws", 0)) / max(1, int(selfplay_summary.get("completed_games", 0))),
-                4,
-            ),
-            "terminal_draw_rate": round(
-                float(selfplay_summary.get("terminal_draws", 0)) / max(1, int(selfplay_summary.get("completed_games", 0))),
-                4,
-            ),
-            "overrun_draw_rate": round(
-                float(selfplay_summary.get("overrun_draws", 0)) / max(1, int(selfplay_summary.get("completed_games", 0))),
-                4,
-            ),
-            "decisive_win_rate": selfplay_summary.get("decisive_win_rate"),
+            "draw_rate": selfplay_summary.get("draw_rate"),
+            "terminal_draw_rate": selfplay_summary.get("terminal_draw_rate"),
+            "overrun_draw_rate": selfplay_summary.get("overrun_draw_rate"),
+            "decisive_win_rate": None,
             "win_rate": None,
             "sample_games": len(sampled_games),
             "completed_games": int(selfplay_summary.get("completed_games", 0)),
