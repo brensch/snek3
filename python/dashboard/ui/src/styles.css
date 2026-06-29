@@ -160,8 +160,8 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
   text-transform: uppercase;
   letter-spacing: .5px;
 }
-.board-cell { min-width: 0; overflow: hidden; background: #0d1117; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
-.board-canvas-wrap { position: relative; }
+.board-cell { min-width: 0; overflow: visible; background: #0d1117; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.board-canvas-wrap { position: relative; overflow: visible; }
 .board-cell canvas { width: 100%; height: auto; }
 .snake-tooltip {
   position: absolute;

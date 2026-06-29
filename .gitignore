@@ -34,3 +34,10 @@ logs/
 # Track the shared VS Code/Cursor settings (venv interpreter), ignore the rest.
 .vscode/*
 !.vscode/settings.json
+
+.env
+
+# Local Battlesnake CLI scratch output.
+local-vs-lan-game*.json
+local-vs-lan-viewer.log
+local-vs-lan-viewer.pid

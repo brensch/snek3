@@ -27,6 +27,16 @@ API_DEADLINE_MARGIN_MS ?= 150
 API_THREADS ?= 2
 API_EVAL_CHUNK ?= 4096
 API_MOVE_LOG_DIR ?= logs/api_moves
+BATTLESNAKE ?= $(HOME)/go/bin/battlesnake
+GAME_WIDTH ?= 11
+GAME_HEIGHT ?= 11
+GAME_TIMEOUT_MS ?= 500
+GAME_DELAY_MS ?= 250
+GAME_OUTPUT ?= local-vs-lan-game.json
+GAME_LOCAL_NAME ?= local-8000
+GAME_LOCAL_URL ?= http://127.0.0.1:8000
+GAME_LAN_NAME ?= lan-8080
+GAME_LAN_URL ?= http://192.168.1.22:8080
 
 # Training defaults (all overridable)
 GENERATIONS ?= 100000
@@ -105,14 +115,14 @@ ALB_DRAW_VALUE ?= -0.9  # equilibrium-search terminal value of a draw (negative 
 ALB_GENERATIONS ?= 0    # 0 = run forever until stopped via the dashboard/control API
 
 .DEFAULT_GOAL := help
-.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard serve export-model api-build api api-run api-docker clean clean-all
+.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard serve export-model api-build api api-run rungame api-docker clean clean-all
 
 help: ## Show this help
 	@echo "snek3 targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: GENERATIONS SAMPLES COUNT SIMS C_PUCT EXPLORATION_PROB DRAW_VALUE BOOTSTRAP_VALUE SKIP_SHORT_DRAW_TURNS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS BATCH_SIZE BUFFER_SIZE BOARD NUM_SNAKES TRUNK_CHANNELS TRUNK_BLOCKS MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY KEEP_GAMES RUN_ID FRESH ARGS LR PORT SERVE_PORT CKPT TORCH_INDEX"
+	@echo "Vars: GENERATIONS SAMPLES COUNT SIMS C_PUCT EXPLORATION_PROB DRAW_VALUE BOOTSTRAP_VALUE SKIP_SHORT_DRAW_TURNS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS BATCH_SIZE BUFFER_SIZE BOARD NUM_SNAKES TRUNK_CHANNELS TRUNK_BLOCKS MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY KEEP_GAMES RUN_ID FRESH ARGS LR PORT SERVE_PORT CKPT TORCH_INDEX BATTLESNAKE GAME_LOCAL_URL GAME_LAN_URL GAME_OUTPUT"
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
@@ -189,6 +199,16 @@ api: api-build ## Run the Rust /move API locally. Run `make export-model` first.
 	./crates/snek-server/target/release/snek-server
 
 api-run: export-model api ## Export the selected run checkpoint, then start the Rust /move API.
+
+rungame: ## Run a Battlesnake game between local API and LAN API, opening the viewer
+	$(BATTLESNAKE) play \
+		-W $(GAME_WIDTH) -H $(GAME_HEIGHT) \
+		--name $(GAME_LOCAL_NAME) --url $(GAME_LOCAL_URL) \
+		--name $(GAME_LAN_NAME) --url $(GAME_LAN_URL) \
+		--timeout $(GAME_TIMEOUT_MS) \
+		--browser \
+		--delay $(GAME_DELAY_MS) \
+		--output $(GAME_OUTPUT)
 
 api-docker: ## Build the CPU-only Docker image for the Rust API (expects MODEL in repo root)
 	docker build -f deploy/server.Dockerfile -t snek-api .
