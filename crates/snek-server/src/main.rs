@@ -1,7 +1,12 @@
 //! Battlesnake `/move` API server — pure-Rust AlphaZero serving for a small CPU
 //! box. Every `/move` runs decoupled-PUCT MCTS over the ONNX policy+value net via
 //! [`snek_server::serve_move`] — the same search as self-play, so what we serve
-//! matches what we trained. Stateless per move, so /start and /end are no-ops.
+//! matches what we trained. Stateless per move; `/end` finalizes the game log.
+//!
+//! Game recording (see [`recorder`]) is fully off the hot path: `/move` only
+//! pushes a small in-memory record over a channel — no serialization, no
+//! compression — and a background thread compresses + writes the whole game at
+//! the end, so per-move compute is never spent on logging.
 //!
 //! Config (env vars):
 //!   SNEK_MODEL        ONNX model path (default ./model.onnx)
@@ -13,7 +18,11 @@
 //!   SNEK_C_PUCT       PUCT exploration constant (default 1.5)
 //!   SNEK_DRAW_VALUE   terminal value of a draw at leaves (default -0.25)
 //!   SNEK_EVAL_CHUNK   max obs rows per ONNX forward (default 4096)
-//!   SNEK_MOVE_LOG_DIR per-game JSONL move log dir; empty disables (default logs/api_moves)
+//!   SNEK_MOVE_LOG_DIR per-game compressed game log dir; empty disables (default logs/api_moves)
+//!   SNEK_GAME_IDLE_SECS  finalize a silent game as incomplete after this many seconds (default 300)
+//!   SNEK_LOG_ZSTD_LEVEL  zstd level for game logs, compressed at game end (default 19)
+
+mod recorder;
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -21,6 +30,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use recorder::{ActionDebug, MoveRecord, Recorder, SearchInfo, SnakeState};
 use snek_core::json::parse_move_request;
 use snek_infer::Net;
 use snek_server::{env_or, serve_move_until_diagnostics, Config, SearchDecision, MOVES};
@@ -28,12 +38,13 @@ use tiny_http::{Header, Method, Response, Server};
 
 struct App {
     net: Mutex<Net>,
-    model: String,
     cfg: Config,
     default_timeout_ms: u64,
     deadline_margin_ms: u64,
-    move_log_dir: Option<PathBuf>,
-    move_log_lock: Mutex<()>,
+    /// Log dir, kept for the rare parse-error sidecar; `None` disables logging.
+    log_dir: Option<PathBuf>,
+    parse_err_lock: Mutex<()>,
+    recorder: Option<Recorder>,
 }
 
 fn main() {
@@ -42,7 +53,9 @@ fn main() {
     let threads: usize = env_or("SNEK_THREADS", 2usize).max(1);
     let default_timeout_ms = env_or("SNEK_TIMEOUT_MS", 500u64);
     let deadline_margin_ms = env_or("SNEK_DEADLINE_MARGIN_MS", 150u64);
-    let move_log_dir = move_log_dir();
+    let log_dir = move_log_dir();
+    let idle_timeout = Duration::from_secs(env_or("SNEK_GAME_IDLE_SECS", 300u64));
+    let zstd_level: i32 = env_or("SNEK_LOG_ZSTD_LEVEL", 19i32);
     let cfg = Config {
         max_sims: max_sims_from_env(),
         c_puct: env_or("SNEK_C_PUCT", 1.5f32),
@@ -61,14 +74,32 @@ fn main() {
         cfg.draw_value
     );
 
+    let recorder_cfg = serde_json::json!({
+        "max_sims": cfg.max_sims,
+        "c_puct": cfg.c_puct,
+        "draw_value": cfg.draw_value,
+        "eval_chunk": cfg.eval_chunk,
+        "default_timeout_ms": default_timeout_ms,
+        "deadline_margin_ms": deadline_margin_ms,
+    });
+    let recorder = Recorder::spawn(log_dir.clone(), model, recorder_cfg, idle_timeout, zstd_level);
+    if recorder.is_some() {
+        eprintln!(
+            "snek-server: recording games to {} (idle_timeout={}s, zstd={})",
+            log_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default(),
+            idle_timeout.as_secs(),
+            zstd_level
+        );
+    }
+
     let app = Arc::new(App {
         net: Mutex::new(net),
-        model,
         cfg,
         default_timeout_ms,
         deadline_margin_ms,
-        move_log_dir,
-        move_log_lock: Mutex::new(()),
+        log_dir,
+        parse_err_lock: Mutex::new(()),
+        recorder,
     });
 
     let server = Arc::new(Server::http(("0.0.0.0", port)).expect("bind"));
@@ -97,7 +128,11 @@ fn worker(server: &Server, app: &App) {
         let resp = match (&method, url.as_str()) {
             (Method::Get, "/") => info_json(),
             (Method::Post, "/move") => handle_move(app, &body),
-            (Method::Post, "/start") | (Method::Post, "/end") => "{}".to_string(),
+            (Method::Post, "/end") => {
+                handle_end(app, &body);
+                "{}".to_string()
+            }
+            (Method::Post, "/start") => "{}".to_string(),
             _ => "{}".to_string(),
         };
         let _ = req.respond(json_response(resp));
@@ -123,7 +158,10 @@ fn handle_move(app: &App, body: &str) -> String {
 
 fn compute_move(app: &App, body: &str) -> Option<usize> {
     let started = Instant::now();
-    let timeout_ms = request_timeout_ms(body).unwrap_or(app.default_timeout_ms);
+    // Parse the request once; reuse for the timeout and the in-memory record so
+    // the hot path never re-parses or serializes/compresses anything.
+    let request: serde_json::Value = serde_json::from_str(body).ok()?;
+    let timeout_ms = request_timeout_ms(&request).unwrap_or(app.default_timeout_ms);
     let search_budget_ms = timeout_ms.saturating_sub(app.deadline_margin_ms).max(1);
     let deadline = started + Duration::from_millis(search_budget_ms);
     let (board, me) = parse_move_request(body).ok()?;
@@ -132,24 +170,127 @@ fn compute_move(app: &App, body: &str) -> Option<usize> {
     let lock_wait_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
     let search_started = Instant::now();
     let decision = serve_move_until_diagnostics(&mut net, &app.cfg, &board, me, deadline);
+    drop(net);
     let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
     let total_ms = started.elapsed().as_secs_f64() * 1000.0;
-    log_move(
-        app,
-        body,
-        &decision,
-        timeout_ms,
-        search_budget_ms,
-        lock_wait_ms,
-        search_ms,
-        total_ms,
-    );
+    // Push a compact record into memory (a cheap channel send). All
+    // serialization + zstd happens later, at game end, on the recorder thread.
+    if let Some(rec) = &app.recorder {
+        if let Some((game_id, meta, record)) =
+            build_record(&request, me, &decision, [lock_wait_ms, search_ms, total_ms])
+        {
+            rec.record_move(game_id, meta, record);
+        }
+    }
     Some(decision.move_index)
 }
 
-fn request_timeout_ms(body: &str) -> Option<u64> {
-    let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    let timeout = v.get("game")?.get("timeout")?;
+/// Finalize a game on `/end` (the game-complete message): trigger the write off
+/// the hot path. Does no I/O itself.
+fn handle_end(app: &App, body: &str) {
+    let Some(rec) = &app.recorder else {
+        return;
+    };
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(id) = v.get("game").and_then(|g| g.get("id")).and_then(|i| i.as_str()) {
+            rec.finish(id.to_string());
+        }
+    }
+}
+
+/// Build the per-move record from an already-parsed request. Cheap: a handful of
+/// field reads, no serialization. `meta` (board size + ruleset) is attached only
+/// on the first turn we see, since it never changes within a game.
+fn build_record(
+    request: &serde_json::Value,
+    me: usize,
+    decision: &SearchDecision,
+    timing: [f64; 3],
+) -> Option<(String, Option<recorder::GameMeta>, MoveRecord)> {
+    let game_id = request
+        .get("game")
+        .and_then(|g| g.get("id"))
+        .and_then(|i| i.as_str())?
+        .to_string();
+    let turn = request.get("turn").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let board = request.get("board")?;
+    let width = board.get("width").and_then(|v| v.as_i64()).unwrap_or(0);
+    let height = board.get("height").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    let food = points_xy(board.get("food"));
+    let hazards = points_xy(board.get("hazards"));
+    let snakes = board
+        .get("snakes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|s| SnakeState {
+                    id: s.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    name: s.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    health: s.get("health").and_then(|v| v.as_i64()).unwrap_or(0) as i16,
+                    body: points_xy(s.get("body")),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let diag = &decision.diagnostics;
+    let root_actions = diag
+        .root_actions
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|a| ActionDebug(a.move_index as u8, a.prior, a.visits, a.q))
+                .collect()
+        })
+        .collect();
+    let search = SearchInfo {
+        sims_completed: diag.sims_completed,
+        terminal_only_sims: diag.terminal_only_sims,
+        eval_rows: diag.eval_rows,
+        forward_calls: diag.forward_calls,
+        stopped_reason: diag.stopped_reason,
+        fallback_reason: diag.fallback_reason,
+        root_policy: diag.root_policy.clone(),
+        root_values: diag.root_values.clone(),
+        root_actions,
+    };
+
+    let meta = if turn == 0 {
+        Some(recorder::meta_from_request(request, width, height))
+    } else {
+        None
+    };
+    let record = MoveRecord {
+        turn,
+        you: me,
+        chosen_move: decision.move_index as u8,
+        food,
+        hazards,
+        snakes,
+        search,
+        timing,
+    };
+    Some((game_id, meta, record))
+}
+
+fn points_xy(v: Option<&serde_json::Value>) -> Vec<[i8; 2]> {
+    v.and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    Some([
+                        p.get("x")?.as_i64()? as i8,
+                        p.get("y")?.as_i64()? as i8,
+                    ])
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn request_timeout_ms(request: &serde_json::Value) -> Option<u64> {
+    let timeout = request.get("game")?.get("timeout")?;
     timeout
         .as_u64()
         .or_else(|| timeout.as_str().and_then(|s| s.parse().ok()))
@@ -181,146 +322,29 @@ fn move_log_dir() -> Option<PathBuf> {
     }
 }
 
+/// Unparseable requests are rare and worth keeping verbatim; append them to a
+/// small plain-text sidecar rather than the compressed per-game logs.
 fn log_parse_error(app: &App, body: &str) {
-    let request_json = serde_json::from_str::<serde_json::Value>(body).unwrap_or_else(|_| {
-        serde_json::json!({
-            "unparsed_body": body,
-        })
-    });
-    let entry = serde_json::json!({
-        "kind": "snek-api-move",
-        "ok": false,
-        "error": "parse_move_request_failed",
-        "request": request_json,
-    });
-    append_move_log(app, "parse_errors", &entry);
-}
-
-fn log_move(
-    app: &App,
-    body: &str,
-    decision: &SearchDecision,
-    timeout_ms: u64,
-    search_budget_ms: u64,
-    lock_wait_ms: f64,
-    search_ms: f64,
-    total_ms: f64,
-) {
-    let request_json = match serde_json::from_str::<serde_json::Value>(body) {
-        Ok(v) => v,
-        Err(_) => serde_json::json!({"unparsed_body": body}),
-    };
-    let game = request_json
-        .get("game")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let game_id = game
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown_game");
-    let board = request_json
-        .get("board")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let you = request_json
-        .get("you")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let diag = &decision.diagnostics;
-    let root_actions = diag
-        .root_actions
-        .iter()
-        .map(|row| {
-            serde_json::Value::Array(
-                row.iter()
-                    .map(|a| {
-                        serde_json::json!({
-                            "move": MOVES[a.move_index],
-                            "move_index": a.move_index,
-                            "prior": a.prior,
-                            "visits": a.visits,
-                            "q": a.q,
-                        })
-                    })
-                    .collect(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let entry = serde_json::json!({
-        "kind": "snek-api-move",
-        "ok": true,
-        "game_id": game_id,
-        "turn": request_json.get("turn").and_then(|v| v.as_u64()),
-        "you_id": you.get("id").and_then(|v| v.as_str()),
-        "you_name": you.get("name").and_then(|v| v.as_str()),
-        "chosen_move": MOVES[decision.move_index],
-        "chosen_move_index": decision.move_index,
-        "model": app.model,
-        "config": {
-            "max_sims": app.cfg.max_sims,
-            "c_puct": app.cfg.c_puct,
-            "draw_value": app.cfg.draw_value,
-            "eval_chunk": app.cfg.eval_chunk,
-            "timeout_ms": timeout_ms,
-            "deadline_margin_ms": app.deadline_margin_ms,
-            "search_budget_ms": search_budget_ms,
-        },
-        "timing": {
-            "lock_wait_ms": lock_wait_ms,
-            "search_ms": search_ms,
-            "total_ms": total_ms,
-        },
-        "search": {
-            "sims_completed": diag.sims_completed,
-            "terminal_only_sims": diag.terminal_only_sims,
-            "eval_rows": diag.eval_rows,
-            "forward_calls": diag.forward_calls,
-            "stopped_reason": diag.stopped_reason,
-            "fallback_reason": diag.fallback_reason,
-            "root_policy": diag.root_policy,
-            "root_values": diag.root_values,
-            "root_actions": root_actions,
-        },
-        "board": board,
-        "you": you,
-        "request": request_json,
-    });
-    append_move_log(app, game_id, &entry);
-}
-
-fn append_move_log(app: &App, game_id: &str, entry: &serde_json::Value) {
-    let Some(dir) = &app.move_log_dir else {
+    let Some(dir) = &app.log_dir else {
         return;
     };
-    let filename = format!("{}.jsonl", safe_log_stem(game_id));
-    let path = dir.join(filename);
-    let _guard = app.move_log_lock.lock().ok();
+    let request_json = serde_json::from_str::<serde_json::Value>(body)
+        .unwrap_or_else(|_| serde_json::json!({ "unparsed_body": body }));
+    let entry = serde_json::json!({
+        "kind": "snek-api-parse-error",
+        "request": request_json,
+    });
+    let path = dir.join("parse_errors.jsonl");
+    let _guard = app.parse_err_lock.lock().ok();
     match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(mut file) => {
             let _ = writeln!(file, "{}", entry);
-            let _ = file.flush();
         }
         Err(e) => {
             eprintln!(
-                "snek-server: could not append move log {}: {e}",
+                "snek-server: could not append parse-error log {}: {e}",
                 path.display()
             );
         }
-    }
-}
-
-fn safe_log_stem(s: &str) -> String {
-    let mut out = String::with_capacity(s.len().max(1));
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-            out.push(c);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.is_empty() {
-        "unknown_game".into()
-    } else {
-        out
     }
 }
