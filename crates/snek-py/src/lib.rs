@@ -675,6 +675,68 @@ fn sample_move(probs: &[f32], explore: f32, rng: &mut Xoshiro256PlusPlus) -> Mov
     sample_move_with_play_policy(probs, explore, rng).0
 }
 
+fn obvious_self_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
+    let Some(snake) = board.snakes.get(snake_idx) else {
+        return false;
+    };
+    if !snake.alive() || snake.body.is_empty() {
+        return false;
+    }
+    let next = mv.apply(snake.head());
+    if !board.in_bounds(next) {
+        return true;
+    }
+    let mut body = snake.body;
+    body.advance(next);
+    body.collides_excluding_head(next)
+}
+
+fn mask_obvious_self_deaths(board: &Board, snake_idx: usize, probs: &[f32]) -> [f32; 4] {
+    let mut original = [0.0f32; 4];
+    let mut total = 0.0f32;
+    for i in 0..4 {
+        original[i] = probs[i].max(0.0);
+        total += original[i];
+    }
+    if total <= 1e-8
+        || board
+            .snakes
+            .get(snake_idx)
+            .map(|s| !s.alive())
+            .unwrap_or(true)
+    {
+        return original;
+    }
+    let mut out = [0.0f32; 4];
+    let mut safe_mass = 0.0f32;
+    let mut safe_count = 0usize;
+    for i in 0..4 {
+        let p = original[i];
+        let death = obvious_self_death(board, snake_idx, Move::from_index(i));
+        if !death {
+            safe_count += 1;
+            out[i] = p;
+            safe_mass += p;
+        }
+    }
+    if safe_count == 0 {
+        return original;
+    }
+    if safe_mass > 1e-8 {
+        for x in out.iter_mut() {
+            *x /= safe_mass;
+        }
+    } else {
+        let u = 1.0 / safe_count as f32;
+        for i in 0..4 {
+            if !obvious_self_death(board, snake_idx, Move::from_index(i)) {
+                out[i] = u;
+            }
+        }
+    }
+    out
+}
+
 /// Per-game pending step records (flattened, step-major) until the game ends.
 #[derive(Default, Clone)]
 struct Slot {
@@ -1130,8 +1192,13 @@ fn generate_selfplay<'py>(
                     }
                     for s in 0..n {
                         let base = (g * n + s) * 4;
-                        let (chosen, play_policy) = sample_move_with_play_policy(
+                        let play_base = mask_obvious_self_deaths(
+                            &bds[g],
+                            s,
                             &root_pol[base..base + 4],
+                        );
+                        let (chosen, play_policy) = sample_move_with_play_policy(
+                            &play_base,
                             exploration_prob,
                             &mut rng,
                         );
@@ -1360,7 +1427,8 @@ fn generate_selfplay<'py>(
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_sample_value;
+    use super::{mask_obvious_self_deaths, obvious_self_death, terminal_sample_value};
+    use snek_core::{Board, Move, Point};
 
     #[test]
     fn terminal_draw_only_rewards_final_survivors() {
@@ -1377,6 +1445,36 @@ mod tests {
         assert_eq!(terminal_sample_value(Some(2), 2, true, draw), 1.0);
         assert_eq!(terminal_sample_value(Some(2), 1, true, draw), -1.0);
         assert_eq!(terminal_sample_value(Some(2), 3, false, draw), -1.0);
+    }
+
+    #[test]
+    fn obvious_self_death_masks_wall_and_self_collision() {
+        let mut board = Board::new(5, 5);
+        board.add_snake(&[
+            Point::new(1, 1),
+            Point::new(1, 2),
+            Point::new(2, 2),
+            Point::new(2, 1),
+        ]);
+        assert!(obvious_self_death(&board, 0, Move::Up));
+        assert!(!obvious_self_death(&board, 0, Move::Left));
+
+        let masked = mask_obvious_self_deaths(&board, 0, &[0.25, 0.25, 0.25, 0.25]);
+        assert_eq!(masked[Move::Up.index()], 0.0);
+        assert!(masked[Move::Left.index()] > 0.0);
+        assert!((masked.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn obvious_self_death_allows_tail_chase() {
+        let mut board = Board::new(5, 5);
+        board.add_snake(&[
+            Point::new(1, 1),
+            Point::new(1, 2),
+            Point::new(0, 2),
+            Point::new(0, 1),
+        ]);
+        assert!(!obvious_self_death(&board, 0, Move::Left));
     }
 }
 
