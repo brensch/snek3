@@ -925,6 +925,10 @@ def train_one_run(args, state, device, logger):
                 float(selfplay_summary.get("terminal_draws", 0)) / max(1, int(selfplay_summary.get("completed_games", 0))),
                 4,
             ),
+            "overrun_draw_rate": round(
+                float(selfplay_summary.get("overrun_draws", 0)) / max(1, int(selfplay_summary.get("completed_games", 0))),
+                4,
+            ),
             "decisive_win_rate": selfplay_summary.get("decisive_win_rate"),
             "win_rate": None,
             "sample_games": len(sampled_games),

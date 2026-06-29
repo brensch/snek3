@@ -35,13 +35,12 @@ const CHARTS = [
     ],
   },
   {
-    title: "Outcomes",
+    title: "Draw monitoring",
     kind: "unit",
     series: [
-      { key: "draw_rate", label: "draw rate", color: "#f87171" },
-      { key: "terminal_draw_rate", label: "terminal draw rate", color: "#fb923c" },
-      { key: "decisive_win_rate", label: "snake 0 decisive win", color: "#a3e635" },
-      { key: "proxy_draw_rate", label: "proxy draw rate", color: "#fbbf24", dash: true },
+      { key: "terminal_draw_rate", label: "terminal draws", color: "#fb923c" },
+      { key: "overrun_draw_rate", label: "turn-cap draws", color: "#f87171" },
+      { key: "proxy_draw_rate", label: "proxy draws", color: "#fbbf24", dash: true },
     ],
   },
   {

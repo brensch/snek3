@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { drawFrame, eventToBoardCell, resultOf, snakeAtCell, snakeColor, snakeRole } from "./board.js";
+import { drawFrame, eventToBoardCell, resultOf, snakeColor, snakeRole, snakesAtCell } from "./board.js";
 
 const MOVE_LABELS = ["Up", "Down", "Left", "Right"];
 
@@ -11,31 +11,36 @@ function fmtValue(value) {
   return value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toFixed(3);
 }
 
-function PolicyTooltip({ frame, hover, opponent }) {
-  if (!frame || hover?.snake == null) return null;
-  const snake = frame.snakes?.[hover.snake];
-  if (!snake) return null;
-  const policy = Array.isArray(snake.policy) ? snake.policy : null;
-  const playPolicy = Array.isArray(snake.play_policy) ? snake.play_policy : null;
-  const maxP = policy ? Math.max(0.001, ...policy.map((v) => Number(v) || 0)) : 1;
-  const left = Math.min(Math.max(hover.left + 12, 6), 112);
-  const top = Math.min(Math.max(hover.top + 12, 6), 112);
+function SnakePolicyBlock({ snake, snakeIndex, opponent }) {
+  const policy = Array.isArray(snake?.policy) ? snake.policy : null;
+  const playPolicy = Array.isArray(snake?.play_policy) ? snake.play_policy : null;
+  const maxP = policy || playPolicy
+    ? Math.max(0.001, ...(policy || []).map((v) => Number(v) || 0), ...(playPolicy || []).map((v) => Number(v) || 0))
+    : 1;
 
   return (
-    <div className="snake-tooltip" style={{ left, top }}>
+    <div className={"snake-tooltip-block " + (snake.alive ? "alive" : "dead")}>
       <div className="snake-tooltip-head">
-        <span><i className="swatch" style={{ background: snakeColor(opponent, hover.snake) }} />{snakeRole(opponent, hover.snake)} {hover.snake}</span>
-        <b>{snake.chosen_move != null ? MOVE_LABELS[snake.chosen_move] : "—"} · v {fmtValue(snake.value)}</b>
+        <span>
+          <i className="swatch" style={{ background: snakeColor(opponent, snakeIndex) }} />
+          {snakeRole(opponent, snakeIndex)} {snakeIndex}
+          {!snake.alive && <em>dead</em>}
+        </span>
+        <b>
+          h {snake.health ?? "—"} · {snake.chosen_move != null ? MOVE_LABELS[snake.chosen_move] : "—"} · v {fmtValue(snake.value)}
+        </b>
       </div>
-      {policy ? (
+      {policy || playPolicy ? (
         <div className="policy-rows">
           {MOVE_LABELS.map((label, i) => {
-            const p = Number(policy[i]) || 0;
+            const p = Number(policy?.[i]) || 0;
+            const pp = Number(playPolicy?.[i]) || 0;
             return (
               <div className="policy-row" key={label}>
                 <em>{label}</em>
-                <i><span style={{ width: `${Math.max(3, (p / maxP) * 100)}%` }} /></i>
+                <i><span style={{ width: `${Math.max(3, ((policy ? p : pp) / maxP) * 100)}%` }} /></i>
                 <b>{fmtPct(p)}</b>
+                <strong>{fmtPct(playPolicy ? pp : null)}</strong>
               </div>
             );
           })}
@@ -43,11 +48,23 @@ function PolicyTooltip({ frame, hover, opponent }) {
       ) : (
         <div className="policy-empty">no search target</div>
       )}
-      {playPolicy && (
-        <div className="policy-empty">
-          play {MOVE_LABELS.map((m, i) => `${m} ${fmtPct(playPolicy[i])}`).join(" · ")}
-        </div>
-      )}
+    </div>
+  );
+}
+
+function PolicyTooltip({ frame, hover, opponent }) {
+  if (!frame || !hover?.snakes?.length) return null;
+  const snakeIndexes = hover.snakes.filter((si) => frame.snakes?.[si]);
+  if (!snakeIndexes.length) return null;
+  const left = Math.min(Math.max(hover.left + 12, 6), 112);
+  const top = Math.min(Math.max(hover.top + 12, 6), 112);
+
+  return (
+    <div className="snake-tooltip" style={{ left, top }}>
+      <div className="policy-headings"><span>move</span><span>target</span><span>played</span></div>
+      {snakeIndexes.map((si) => (
+        <SnakePolicyBlock key={si} snake={frame.snakes[si]} snakeIndex={si} opponent={opponent} />
+      ))}
     </div>
   );
 }
@@ -73,7 +90,7 @@ export default function MiniBoard({ game, tick, playing, onPlay, context = {} })
   }, [game]);
 
   useEffect(() => {
-    if (ref.current) drawFrame(ref.current, fr, game.opponent, hover?.snake ?? null);
+    if (ref.current) drawFrame(ref.current, fr, game.opponent, hover?.snakes ?? []);
   }, [fr, game.opponent, hover]);
 
   const [r, cls] = resultOf(game.winner);
@@ -104,15 +121,15 @@ export default function MiniBoard({ game, tick, playing, onPlay, context = {} })
       setHover(null);
       return;
     }
-    const snake = snakeAtCell(fr, cell.x, cell.y);
-    if (snake == null) {
+    const snakes = snakesAtCell(fr, cell.x, cell.y);
+    if (!snakes.length) {
       setHover(null);
       return;
     }
     if (autoplay) stopAutoplay();
     const rect = canvas.getBoundingClientRect();
     setHover({
-      snake,
+      snakes,
       left: e.clientX - rect.left,
       top: e.clientY - rect.top,
     });
@@ -220,15 +237,6 @@ export default function MiniBoard({ game, tick, playing, onPlay, context = {} })
           {copied ? "copied" : "copy"}
         </button>
         <span className="muted turn">{frame + 1}/{n}</span>
-      </div>
-      <div className="board-snakes">
-        {game.frames[0].snakes.map((_, i) => (
-          <span key={i}>
-            <i className="swatch" style={{ background: snakeColor(game.opponent, i) }} />
-            {snakeRole(game.opponent, i)}
-            {game.winner === i ? " ✓" : ""}
-          </span>
-        ))}
       </div>
     </div>
   );

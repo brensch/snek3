@@ -4,7 +4,7 @@ export const ROLE_COLORS = {
   net: "#3b82f6",
   baseline: "#22c55e",
 };
-export const COLORS = [ROLE_COLORS.net, ROLE_COLORS.baseline, "#f59e0b", "#ec4899", "#a78bfa", "#f87171", "#2dd4bf", "#facc15"];
+export const COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#ec4899", "#a78bfa", "#f87171", "#2dd4bf", "#facc15"];
 
 export function snakeRole(opponent, index) {
   if (opponent === "net") return "net";
@@ -15,8 +15,7 @@ export function snakeRole(opponent, index) {
 }
 
 export function snakeColor(opponent, index) {
-  // Snake 0 (our agent) blue, snake 1 (opponent) green; fall back by index.
-  return ROLE_COLORS[snakeRole(opponent, index)] || COLORS[index % COLORS.length];
+  return COLORS[index % COLORS.length];
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -56,16 +55,22 @@ export function eventToBoardCell(canvas, fr, event) {
 }
 
 export function snakeAtCell(fr, x, y) {
-  if (!fr?.snakes) return null;
-  for (let si = fr.snakes.length - 1; si >= 0; si--) {
-    const s = fr.snakes[si];
-    if ((s.body || []).some(([bx, by]) => bx === x && by === y)) return si;
-  }
-  return null;
+  const hits = snakesAtCell(fr, x, y);
+  return hits.length ? hits[0] : null;
+}
+
+export function snakesAtCell(fr, x, y) {
+  if (!fr?.snakes) return [];
+  return fr.snakes
+    .map((s, si) => ({ s, si }))
+    .filter(({ s }) => (s.body || []).some(([bx, by]) => bx === x && by === y))
+    .sort((a, b) => Number(b.s.alive) - Number(a.s.alive) || a.si - b.si)
+    .map(({ si }) => si);
 }
 
 // Draw one snapshot frame onto a square canvas.
-export function drawFrame(canvas, fr, opponent = "baseline", hoverSnake = null) {
+export function drawFrame(canvas, fr, opponent = "baseline", hoverSnakes = []) {
+  const hoverSet = new Set(Array.isArray(hoverSnakes) ? hoverSnakes : hoverSnakes == null ? [] : [hoverSnakes]);
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!fr) {
@@ -93,7 +98,7 @@ export function drawFrame(canvas, fr, opponent = "baseline", hoverSnake = null) 
       const pad = Math.max(1, cell * 0.12);
       roundRect(ctx, px(x) + pad, py(y) + pad, cell - 2 * pad, cell - 2 * pad, cell * 0.25);
       ctx.fill();
-      if (si === hoverSnake) {
+      if (hoverSet.has(si)) {
         ctx.strokeStyle = "rgba(255,255,255,0.9)";
         ctx.lineWidth = Math.max(1.5, cell * 0.08);
         ctx.stroke();
