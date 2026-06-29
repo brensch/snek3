@@ -16,6 +16,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'pyproject.toml'
+      - 'requirements.txt'
       - '.dockerignore'
       - '.github/workflows/api-image.yml'
 
@@ -46,7 +47,8 @@ jobs:
       - name: Export ONNX model
         run: |
           python -m venv .venv
-          .venv/bin/pip install -U pip maturin numpy
+          .venv/bin/pip install -U pip
+          .venv/bin/pip install -r requirements.txt
           .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
           .venv/bin/maturin develop --release
           PYTHONPATH=python .venv/bin/python scripts/export_model.py "$MODEL_CHECKPOINT" "$MODEL_ONNX"

@@ -126,7 +126,8 @@ help: ## Show this help
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
-	$(PIP) install -U pip maturin numpy pytest fastapi uvicorn httpx pylint
+	$(PIP) install -U pip
+	$(PIP) install -r requirements.txt
 	$(PIP) install torch --index-url $(TORCH_INDEX)
 	@echo "venv ready. Next: make build"
 

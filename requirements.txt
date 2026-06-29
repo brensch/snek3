@@ -1,0 +1,7 @@
+maturin>=1.7,<2.0
+numpy>=1.24
+fastapi
+uvicorn
+httpx
+pytest
+pylint

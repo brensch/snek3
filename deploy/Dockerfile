@@ -21,8 +21,10 @@ ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 WORKDIR /app
 # Python deps layer FIRST (torch is ~5GB) so it stays cached across source
 # changes — only re-runs if this list changes. Mirrors `make venv`.
+COPY requirements.txt /app/requirements.txt
 RUN python -m venv .venv \
- && .venv/bin/pip install -U pip maturin numpy fastapi uvicorn \
+ && .venv/bin/pip install -U pip \
+ && .venv/bin/pip install -r requirements.txt \
  && .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu128
 
 # Source + compile the Rust extension (re-runs on code change; ~2-3 min).
