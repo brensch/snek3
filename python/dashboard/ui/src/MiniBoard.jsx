@@ -68,6 +68,48 @@ function PolicyTooltip({ frame, hover, opponent }) {
   );
 }
 
+function SnakeSummaryRows({ frame, opponent }) {
+  const rows = (frame?.snakes || [])
+    .map((snake, index) => ({
+      snake,
+      index,
+      value: Number.isFinite(Number(snake?.value)) ? Number(snake.value) : null,
+    }))
+    .sort((a, b) => {
+      if (a.value == null && b.value == null) return a.index - b.index;
+      if (a.value == null) return 1;
+      if (b.value == null) return -1;
+      return b.value - a.value || a.index - b.index;
+    });
+  if (!rows.length) return null;
+
+  return (
+    <div className="snake-summary-rows">
+      {rows.map(({ snake, index, value }) => {
+        const clamped = value == null ? 0 : Math.max(-1, Math.min(1, value));
+        const left = clamped < 0 ? `${(clamped + 1) * 50}%` : "50%";
+        const width = `${Math.abs(clamped) * 50}%`;
+        return (
+          <div className={"snake-summary-row " + (snake.alive ? "alive" : "dead")} key={index}>
+            <i className="swatch" style={{ background: snakeColor(opponent, index) }} />
+            <span className="snake-summary-id">{index}</span>
+            <div className="value-track" aria-label={`snake ${index} value ${fmtValue(value)}`}>
+              <span
+                className={clamped >= 0 ? "pos" : "neg"}
+                style={{ left, width }}
+              />
+              <b style={{ left: `${(clamped + 1) * 50}%` }} />
+            </div>
+            <strong>v {fmtValue(value)}</strong>
+            <em>h {snake.health ?? "—"}</em>
+            <em>len {snake.body?.length ?? "—"}</em>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // One game's replay; `tick` is a shared clock so every board on the page plays
 // together (each loops over its own length).
 export default function MiniBoard({ game, tick, playing, onPlay, context = {} }) {
@@ -235,6 +277,7 @@ export default function MiniBoard({ game, tick, playing, onPlay, context = {} })
         </button>
         <span className="muted turn">{frame + 1}/{n}</span>
       </div>
+      <SnakeSummaryRows frame={fr} opponent={game.opponent} />
     </div>
   );
 }
