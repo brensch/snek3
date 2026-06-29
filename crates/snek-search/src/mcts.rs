@@ -22,7 +22,7 @@ use snek_core::{encode_into, obs_side, Board, Move, MAX_SNAKES, NUM_CHANNELS};
 
 const DUMMY_MOVE: Move = Move::Up;
 
-fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
+pub fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
     let Some(snake) = board.snakes.get(snake_idx) else {
         return false;
     };
@@ -49,6 +49,51 @@ fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
         }
     }
     false
+}
+
+pub fn mask_obvious_immediate_deaths(board: &Board, snake_idx: usize, probs: &[f32]) -> [f32; 4] {
+    let mut original = [0.0f32; 4];
+    let mut total = 0.0f32;
+    for i in 0..4 {
+        original[i] = probs.get(i).copied().unwrap_or(0.0).max(0.0);
+        total += original[i];
+    }
+    if total <= 1e-8
+        || board
+            .snakes
+            .get(snake_idx)
+            .map(|s| !s.alive())
+            .unwrap_or(true)
+    {
+        return original;
+    }
+    let mut out = [0.0f32; 4];
+    let mut safe_mass = 0.0f32;
+    let mut safe_count = 0usize;
+    for i in 0..4 {
+        let death = obvious_immediate_death(board, snake_idx, Move::from_index(i));
+        if !death {
+            safe_count += 1;
+            out[i] = original[i];
+            safe_mass += original[i];
+        }
+    }
+    if safe_count == 0 {
+        return original;
+    }
+    if safe_mass > 1e-8 {
+        for x in out.iter_mut() {
+            *x /= safe_mass;
+        }
+    } else {
+        let u = 1.0 / safe_count as f32;
+        for i in 0..4 {
+            if !obvious_immediate_death(board, snake_idx, Move::from_index(i)) {
+                out[i] = u;
+            }
+        }
+    }
+    out
 }
 
 /// One edge taken during a descent: the node and, per snake, which candidate
@@ -134,9 +179,13 @@ impl MctsTree {
             let nv = &node.nvisit[i];
             let total_n: f32 = nv.iter().sum();
             let sqrt_total = total_n.max(1.0).sqrt();
+            let has_positive_prior = node.prior[i].iter().any(|&p| p > 1e-8);
             let mut best_a = 0usize;
             let mut best_score = f32::NEG_INFINITY;
             for (a, &n_a) in nv.iter().enumerate().take(node.cands[i].len()) {
+                if has_positive_prior && node.prior[i][a] <= 1e-8 {
+                    continue;
+                }
                 let q = if n_a > 0.0 {
                     node.wsum[i][a] / n_a
                 } else {
@@ -249,37 +298,32 @@ impl MctsTree {
         let mut wsum = Vec::with_capacity(n);
         for i in 0..n {
             let k = cands[i].len();
-            let any_safe = cands[i]
-                .iter()
-                .any(|&m| !obvious_immediate_death(&board, i, m));
-            // gather policy mass on this snake's candidate moves, renormalize
+            let masked_policy = mask_obvious_immediate_deaths(&board, i, &policy[i * 4..i * 4 + 4]);
             let mut p = vec![0.0f32; k];
             let mut s = 0.0f32;
             for (a, m) in cands[i].iter().enumerate() {
-                let pm = if any_safe && obvious_immediate_death(&board, i, *m) {
-                    0.0
-                } else {
-                    policy[i * 4 + m.index()].max(0.0)
-                };
-                p[a] = pm;
-                s += pm;
+                p[a] = masked_policy[m.index()];
+                s += p[a];
             }
             if s > 1e-8 {
                 for x in p.iter_mut() {
                     *x /= s;
                 }
-            } else {
-                let safe_k = cands[i]
+            } else if k > 0 {
+                let safe_count = cands[i]
                     .iter()
-                    .filter(|&&m| !any_safe || !obvious_immediate_death(&board, i, m))
-                    .count()
-                    .max(1);
-                for (a, x) in p.iter_mut().enumerate() {
-                    *x = if !any_safe || !obvious_immediate_death(&board, i, cands[i][a]) {
-                        1.0 / safe_k as f32
-                    } else {
-                        0.0
-                    };
+                    .filter(|&&m| !obvious_immediate_death(&board, i, m))
+                    .count();
+                if safe_count > 0 {
+                    let u = 1.0 / safe_count as f32;
+                    for (a, x) in p.iter_mut().enumerate() {
+                        if !obvious_immediate_death(&board, i, cands[i][a]) {
+                            *x = u;
+                        }
+                    }
+                } else {
+                    let u = 1.0 / k as f32;
+                    p.fill(u);
                 }
             }
             prior.push(p);
@@ -591,6 +635,47 @@ mod tests {
             forest.expand_backup(&pending, &pol, &val);
         }
         let root = &forest.trees[0].nodes[0];
+        assert_eq!(root.nvisit[0][up_idx], 0.0);
+    }
+
+    #[test]
+    fn mcts_never_selects_masked_death_when_safe_moves_exist() {
+        let mut forest = MctsForest::new(&[dead_leaf_ffa_board()], 1.5);
+        let n = forest.n_snakes;
+
+        let pending = forest.select();
+        assert_eq!(pending, vec![0]);
+        let mut root_pol = vec![0.01f32; n * 4];
+        root_pol[Move::Up.index()] = 0.97;
+        let root_val = vec![0.0f32; n];
+        forest.expand_backup(&pending, &root_pol, &root_val);
+
+        let up_idx = forest.trees[0].nodes[0].cands[0]
+            .iter()
+            .position(|&m| m == Move::Up)
+            .expect("Up remains a candidate");
+        {
+            let root = &mut forest.trees[0].nodes[0];
+            for (a, prior) in root.prior[0].iter().enumerate() {
+                if a != up_idx && *prior > 0.0 {
+                    root.nvisit[0][a] = 1.0;
+                    root.wsum[0][a] = -1.0;
+                }
+            }
+        }
+
+        for _ in 0..64 {
+            let pending = forest.select();
+            if pending.is_empty() {
+                continue;
+            }
+            let pol = vec![0.25f32; pending.len() * n * 4];
+            let val = vec![0.0f32; pending.len() * n];
+            forest.expand_backup(&pending, &pol, &val);
+        }
+
+        let root = &forest.trees[0].nodes[0];
+        assert_eq!(root.prior[0][up_idx], 0.0);
         assert_eq!(root.nvisit[0][up_idx], 0.0);
     }
 

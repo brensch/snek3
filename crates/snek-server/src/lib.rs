@@ -23,6 +23,7 @@ pub struct RootActionDebug {
 #[derive(Clone, Debug)]
 pub struct SearchDiagnostics {
     pub sims_completed: usize,
+    pub terminal_only_sims: usize,
     pub eval_rows: usize,
     pub forward_calls: usize,
     pub stopped_reason: &'static str,
@@ -82,6 +83,7 @@ fn fallback_decision(board: &Board, me: usize, reason: &'static str) -> SearchDe
         move_index: safe_move(board, me),
         diagnostics: SearchDiagnostics {
             sims_completed: 0,
+            terminal_only_sims: 0,
             eval_rows: 0,
             forward_calls: 0,
             stopped_reason: reason,
@@ -112,6 +114,7 @@ pub fn serve_move_until_diagnostics(
         MctsForest::new_with_draw_value(std::slice::from_ref(board), cfg.c_puct, cfg.draw_value);
     let obs_size = forest.obs_size();
     let mut sims_completed = 0usize;
+    let mut terminal_only_sims = 0usize;
     let mut eval_rows = 0usize;
     let mut forward_calls = 0usize;
     let mut stopped_reason = "max_sims";
@@ -123,8 +126,9 @@ pub fn serve_move_until_diagnostics(
         }
         let pending = forest.select();
         if pending.is_empty() {
-            stopped_reason = "tree_resolved";
-            break; // tree fully resolved (all terminal)
+            terminal_only_sims += 1;
+            sims_completed += 1;
+            continue;
         }
         // Each pending leaf needs one egocentric encoding per snake (per-snake
         // policy/value), laid out [pending, agent]. Total rows = pending * n.
@@ -172,6 +176,7 @@ pub fn serve_move_until_diagnostics(
     if slots.iter().sum::<f32>() <= 1e-8 {
         let mut decision = fallback_decision(board, me, "empty_root_policy");
         decision.diagnostics.sims_completed = sims_completed;
+        decision.diagnostics.terminal_only_sims = terminal_only_sims;
         decision.diagnostics.eval_rows = eval_rows;
         decision.diagnostics.forward_calls = forward_calls;
         decision.diagnostics.stopped_reason = stopped_reason;
@@ -188,6 +193,7 @@ pub fn serve_move_until_diagnostics(
         move_index,
         diagnostics: SearchDiagnostics {
             sims_completed,
+            terminal_only_sims,
             eval_rows,
             forward_calls,
             stopped_reason,

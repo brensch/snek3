@@ -272,6 +272,7 @@ fn log_move(
         },
         "search": {
             "sims_completed": diag.sims_completed,
+            "terminal_only_sims": diag.terminal_only_sims,
             "eval_rows": diag.eval_rows,
             "forward_calls": diag.forward_calls,
             "stopped_reason": diag.stopped_reason,

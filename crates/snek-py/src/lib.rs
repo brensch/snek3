@@ -18,7 +18,9 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use snek_core::{encode_into, obs_side, standard_start, Board, Move, NUM_CHANNELS};
 use snek_infer::Net;
-use snek_search::{uct_actions, Forest, MctsForest};
+use snek_search::{mask_obvious_immediate_deaths, uct_actions, Forest, MctsForest};
+#[cfg(test)]
+use snek_search::obvious_immediate_death;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -673,83 +675,6 @@ fn sample_move_with_play_policy(
 
 fn sample_move(probs: &[f32], explore: f32, rng: &mut Xoshiro256PlusPlus) -> Move {
     sample_move_with_play_policy(probs, explore, rng).0
-}
-
-fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
-    let Some(snake) = board.snakes.get(snake_idx) else {
-        return false;
-    };
-    if !snake.alive() || snake.body.is_empty() {
-        return false;
-    }
-    let next = mv.apply(snake.head());
-    if !board.in_bounds(next) {
-        return true;
-    }
-    let mut body = snake.body;
-    body.advance(next);
-    if body.collides_excluding_head(next) {
-        return true;
-    }
-    for (i, other) in board.snakes.iter().enumerate() {
-        if i == snake_idx || !other.alive() {
-            continue;
-        }
-        // Opponent heads and tails are tactically conditional. Interior body
-        // segments are stable collision targets for this simultaneous turn.
-        for j in 1..other.len().saturating_sub(1) {
-            if other.body.get(j) == next {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn mask_obvious_immediate_deaths(board: &Board, snake_idx: usize, probs: &[f32]) -> [f32; 4] {
-    let mut original = [0.0f32; 4];
-    let mut total = 0.0f32;
-    for i in 0..4 {
-        original[i] = probs[i].max(0.0);
-        total += original[i];
-    }
-    if total <= 1e-8
-        || board
-            .snakes
-            .get(snake_idx)
-            .map(|s| !s.alive())
-            .unwrap_or(true)
-    {
-        return original;
-    }
-    let mut out = [0.0f32; 4];
-    let mut safe_mass = 0.0f32;
-    let mut safe_count = 0usize;
-    for i in 0..4 {
-        let p = original[i];
-        let death = obvious_immediate_death(board, snake_idx, Move::from_index(i));
-        if !death {
-            safe_count += 1;
-            out[i] = p;
-            safe_mass += p;
-        }
-    }
-    if safe_count == 0 {
-        return original;
-    }
-    if safe_mass > 1e-8 {
-        for x in out.iter_mut() {
-            *x /= safe_mass;
-        }
-    } else {
-        let u = 1.0 / safe_count as f32;
-        for i in 0..4 {
-            if !obvious_immediate_death(board, snake_idx, Move::from_index(i)) {
-                out[i] = u;
-            }
-        }
-    }
-    out
 }
 
 /// Per-game pending step records (flattened, step-major) until the game ends.
@@ -1691,8 +1616,9 @@ fn generate_selfplay_le<'py>(
             for g in 0..count {
                 for sk in 0..n {
                     let base = (g * n + sk) * 4;
-                    actions[sk] =
-                        sample_move(&root_pol[base..base + 4], exploration_prob, &mut rng);
+                    let play_base =
+                        mask_obvious_immediate_deaths(&boards[g], sk, &root_pol[base..base + 4]);
+                    actions[sk] = sample_move(&play_base, exploration_prob, &mut rng);
                 }
                 if let Some(m) = uct_move[g] {
                     actions[1] = m;
