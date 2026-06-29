@@ -193,10 +193,19 @@ class _Slot:
     turns: int = 0
 
 
-def _outcome(winner: int, n: int) -> np.ndarray:
-    """Undiscounted value target per snake: +1 winner, -1 loser, 0 draw."""
+def _outcome(winner: int, n: int, final_alive: np.ndarray | None = None, draw_value: float = 0.0) -> np.ndarray:
+    """Undiscounted value target per snake.
+
+    If there is no winner, only snakes that were alive entering the final step
+    receive draw value; snakes eliminated earlier are losses.
+    """
     if winner < 0:
-        return np.zeros(n, dtype=np.float32)
+        z = -np.ones(n, dtype=np.float32)
+        if final_alive is None:
+            z.fill(draw_value)
+        else:
+            z[np.asarray(final_alive, dtype=bool)] = draw_value
+        return z
     z = -np.ones(n, dtype=np.float32)
     z[winner] = 1.0
     return z
@@ -245,7 +254,8 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
             overrun = cfg.max_turns > 0 and slots[g].turns >= cfg.max_turns
             if not (bool(done[g]) or overrun):
                 continue
-            z = _outcome(int(winners[g]), cfg.num_snakes)
+            final_alive = slots[g].alive[-1] if slots[g].alive else np.zeros(cfg.num_snakes, dtype=bool)
+            z = _outcome(int(winners[g]), cfg.num_snakes, final_alive, cfg.draw_value)
             for rec_obs, rec_pol, rec_alive in zip(slots[g].obs, slots[g].pol, slots[g].alive):
                 live = rec_alive
                 if not live.any():
@@ -266,5 +276,4 @@ def generate(net: AZNet, device: torch.device, cfg: SelfPlayConfig, seed: int) -
         turns=turns_total,
         games=games_total,
     )
-
 

@@ -1,7 +1,7 @@
 # snek3 trainer-server — fully precompiled image (torch + Rust extension baked
 # in, so the pod boots straight into serving; no per-boot build).
 #
-# Built in CI -> ghcr.io/brensch/snek3:latest (see .github/workflows/docker.yml).
+# Built in CI -> ghcr.io/brensch/snek3:latest (see .github/workflows/trainer-image.yml).
 # Run:
 #   docker run --gpus all -p 8050:8050 ghcr.io/brensch/snek3:latest --run-id a100-test
 #

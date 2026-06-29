@@ -3,21 +3,12 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 // Three grouped charts. Each chart is a list of series; a series is plotted on
 // the chart's y-treatment (`kind`):
 //   unit   -> value on a fixed 0..1 axis (win rates, draw rate)
+//   percent -> value on a fixed 0..100 axis
 //   shared -> value / (max of this chart's series)  (losses share a scale)
 //   series -> value / (this series' own max), so each series peaks at the top
 //             (mixed scales; tooltip shows the real value)
 // Only series present in the run are drawn, so legacy MCTS runs still render.
 const CHARTS = [
-  {
-    title: "Strength — relative win rate (0–1)",
-    kind: "unit",
-    series: [
-      // AlphaZero progress signal: current net vs frozen past-selves.
-      { key: "self_vs_anchor", label: "vs anchor (phase start)", color: "#34d399" },
-      { key: "self_vs_recent", label: "vs recent self", color: "#22d3ee" },
-      { key: "win_rate", label: "vs baseline (if eval on)", color: "#a3e635", dash: true },
-    ],
-  },
   {
     title: "Losses (shared scale)",
     kind: "shared",
@@ -35,14 +26,48 @@ const CHARTS = [
     ],
   },
   {
-    title: "Throughput / utilization",
+    title: "Game length",
+    kind: "shared",
+    series: [
+      { key: "avg_game_len", label: "avg game turns", color: "#34d399" },
+      { key: "proxy_game_len", label: "proxy game turns", color: "#22d3ee", dash: true },
+      { key: "completed_games", label: "completed games", color: "#f472b6" },
+    ],
+  },
+  {
+    title: "Draw monitoring",
+    kind: "unit",
+    series: [
+      { key: "terminal_draw_rate", label: "terminal draws", color: "#fb923c" },
+      { key: "overrun_draw_rate", label: "turn-cap draws", color: "#f87171" },
+      { key: "proxy_draw_rate", label: "proxy draws", color: "#fbbf24", dash: true },
+    ],
+  },
+  {
+    title: "Generation time",
+    kind: "shared",
+    series: [
+      { key: "gen_seconds", label: "self-play seconds", color: "#94a3b8" },
+      { key: "train_seconds", label: "train seconds", color: "#60a5fa" },
+      { key: "save_seconds", label: "save seconds", color: "#c084fc" },
+    ],
+  },
+  {
+    title: "Throughput",
     kind: "series",
     series: [
-      { key: "completed_games", label: "games finished", color: "#f472b6" },
+      { key: "samples_per_sec", label: "samples/sec", color: "#34d399" },
       { key: "turns_per_sec", label: "turns/sec", color: "#f59e0b" },
+      { key: "games_per_sec", label: "games/sec", color: "#f472b6" },
       { key: "inference_per_sec", label: "inferences/sec", color: "#60a5fa" },
+    ],
+  },
+  {
+    title: "Utilization",
+    kind: "percent",
+    series: [
       { key: "gpu_busy_pct", label: "GPU busy %", color: "#34d399" },
-      { key: "gen_seconds", label: "gen seconds", color: "#94a3b8" },
+      { key: "selfplay_gpu_pct", label: "self-play GPU %", color: "#22d3ee" },
     ],
   },
 ];
@@ -90,10 +115,11 @@ function Chart({ metrics, title, kind, series }) {
   const frac = (s, v) => {
     if (v == null) return null;
     if (kind === "unit") return Math.min(1, Math.max(0, v));
+    if (kind === "percent") return Math.min(1, Math.max(0, v / 100));
     if (kind === "shared") return Math.min(1, Math.max(0, v / view.sharedMax));
     return Math.min(1, Math.max(0, v / (view.seriesMax[s.key] || 1))); // series: own max
   };
-  const topLabel = kind === "shared" ? view.sharedMax.toFixed(2) : kind === "unit" ? "1.00" : "max";
+  const topLabel = kind === "shared" ? view.sharedMax.toFixed(2) : kind === "unit" ? "1.00" : kind === "percent" ? "100" : "max";
 
   const H = 190;
   const padL = 38, padR = 10, padT = 12, padB = 20;

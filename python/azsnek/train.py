@@ -12,7 +12,10 @@ import json
 import logging
 import os
 import random
+import shutil
+import signal
 import sys
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -40,10 +43,104 @@ import snek
 import torch
 import torch.nn.functional as F
 
+import copy
+import itertools
+
+from . import control
 from .net import AZNet, NetConfig, autocast as net_autocast, device_auto
 from .runlog import RunWriter
 from .symmetry import augment_batch
 from .selfplay import ReplayBuffer, Samples, SelfPlayConfig, generate, save_shard, prune_shards
+
+
+DEFAULT_PARAMS_PATH = Path(__file__).with_name("default_params.json")
+DEFAULT_SERVING_CKPT_DIR = Path("checkpoints")
+META_ARG_ALIASES = {
+    "samples_per_gen": "samples",
+}
+NON_PARAM_KEYS = {"run_id", "ckpt_dir", "device"}
+
+
+def load_default_params() -> dict:
+    return json.loads(DEFAULT_PARAMS_PATH.read_text())
+
+
+def _read_json_if_exists(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _coerce_param_value(key: str, value):
+    if isinstance(value, bool):
+        return value
+    if key in {"lr", "c_puct", "exploration_prob", "draw_value"}:
+        return float(value)
+    if key == "arch":
+        return str(value)
+    return int(value)
+
+
+def apply_params_to_args(args, params: dict) -> None:
+    for key, value in params.items():
+        if key in NON_PARAM_KEYS or not hasattr(args, key) or value is None:
+            continue
+        setattr(args, key, _coerce_param_value(key, value))
+
+
+def run_config_params(runs_dir: str | Path, run_id: str) -> dict:
+    run_dir = Path(runs_dir) / run_id
+    meta = _read_json_if_exists(run_dir / "meta.json")
+    saved = {}
+    for key, value in meta.items():
+        saved[META_ARG_ALIASES.get(key, key)] = value
+    saved.update(_read_json_if_exists(run_dir / "params.json"))
+    return saved
+
+
+def _last_metric_gen(path: Path) -> int:
+    if not path.exists():
+        return -1
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return -1
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            gen = json.loads(line).get("gen")
+        except json.JSONDecodeError:
+            continue
+        return int(gen) if gen is not None else -1
+    return -1
+
+
+def latest_resumable_run(runs_dir: str | Path) -> str | None:
+    root = Path(runs_dir)
+    if not root.exists():
+        return None
+    candidates = []
+    for run_dir in root.iterdir():
+        if not run_dir.is_dir():
+            continue
+        state_path = run_dir / "state.pt"
+        meta_path = run_dir / "meta.json"
+        if not state_path.exists() and not meta_path.exists():
+            continue
+        mtime = max(
+            (p.stat().st_mtime for p in (state_path, run_dir / "metrics.jsonl", meta_path) if p.exists()),
+            default=run_dir.stat().st_mtime,
+        )
+        gen = _last_metric_gen(run_dir / "metrics.jsonl")
+        candidates.append((mtime, gen, run_dir.name))
+    if not candidates:
+        return None
+    return max(candidates)[2]
 
 
 PHASE_COLORS = {
@@ -57,6 +154,7 @@ PHASE_COLORS = {
     "SAVING": "\033[90m",
     "METRICS": "\033[36m",
     "ADAPTIVE": "\033[35m",
+    "STOP": "\033[31m",
     "DONE": "\033[32m",
     "WARN": "\033[31m",
 }
@@ -75,6 +173,17 @@ def setup_logger() -> logging.Logger:
     return logger
 
 
+def install_fast_sigint_handler():
+    def _fast_exit(_signum, _frame):
+        try:
+            snek.request_cancel()
+        except Exception:
+            pass
+        os._exit(130)
+
+    signal.signal(signal.SIGINT, _fast_exit)
+
+
 def _color_enabled() -> bool:
     return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -84,6 +193,71 @@ def log_phase(logger: logging.Logger, phase: str, message: str) -> None:
     if _color_enabled():
         label = f"{PHASE_COLORS.get(phase, '')}{label}{RESET}"
     logger.info("%s | %s", label, message)
+
+
+def _selfplay_inflight_progress(info: dict | None) -> dict:
+    if not info:
+        return {}
+    return {
+        "inflight_slots": int(info.get("nonempty_slots", 0)),
+        "inflight_steps": int(info.get("pending_steps", 0)),
+        "inflight_samples": int(info.get("pending_alive_samples", 0)),
+        "resumed_completed_games": int(info.get("completed_games", 0)),
+        "resumed_completed_samples": int(info.get("completed_samples", 0)),
+        "inflight_turn_mean": float(info.get("active_turn_mean", 0.0)),
+        "inflight_turn_max": int(info.get("active_turn_max", 0)),
+    }
+
+
+def start_selfplay_progress_monitor(
+    logger,
+    state,
+    gen: int,
+    target_samples: int,
+    started_at: float,
+    inflight_info: dict | None = None,
+):
+    """Poll Rust self-play progress while generate_selfplay runs without the GIL."""
+    stop = threading.Event()
+    interval = max(1, (int(target_samples) + 9) // 10)
+    inflight_progress = _selfplay_inflight_progress(inflight_info)
+
+    def run() -> None:
+        next_mark = interval
+        last_done = -1
+        while not stop.wait(0.5):
+            try:
+                progress = snek.selfplay_progress()
+            except Exception:
+                continue
+            done = int(progress.get("done", 0))
+            total = int(progress.get("total", target_samples) or target_samples)
+            if state is not None and done != last_done:
+                state.set_progress("self-play", min(done, total), total, gen, **inflight_progress)
+                last_done = done
+            while done >= next_mark and next_mark <= total:
+                elapsed = max(time.time() - started_at, 1e-9)
+                inferences = int(progress.get("inferences", 0))
+                completed_games = int(progress.get("completed_games", 0))
+                log_phase(
+                    logger,
+                    "PLAYING",
+                    f"gen={gen} samples={min(done, total):,}/{total:,} "
+                    f"completed_games={completed_games} "
+                    f"samples_per_sec={done / elapsed:.0f} "
+                    f"inference_per_sec={inferences / elapsed:.0f} "
+                    f"elapsed={elapsed:.1f}s",
+                )
+                next_mark += interval
+
+    thread = threading.Thread(target=run, name="selfplay-progress", daemon=True)
+    thread.start()
+
+    def finish() -> None:
+        stop.set()
+        thread.join(timeout=1.0)
+
+    return finish
 
 
 def train_on_samples(
@@ -167,9 +341,8 @@ def summarize_completed_games(games: list[dict]) -> dict:
             "length_histogram": [],
         }
     turns = np.array([int(g.get("turns", 0)) for g in games], dtype=np.int32)
-    wins = sum(1 for g in games if g.get("winner") == 0)
-    losses = sum(1 for g in games if g.get("winner") == 1)
-    draws = len(games) - wins - losses
+    decisive_games = sum(1 for g in games if int(g.get("winner", -1)) >= 0)
+    draws = sum(1 for g in games if int(g.get("winner", -1)) < 0)
     overruns = sum(1 for g in games if g.get("overrun"))
     short_draws = sum(1 for g in games if g.get("short_draw"))
     terminal_draws = max(0, draws - overruns)
@@ -181,18 +354,18 @@ def summarize_completed_games(games: list[dict]) -> dict:
         count = int(((turns >= start) & (turns <= end)).sum())
         if count:
             hist.append({"min": start, "max": end, "count": count})
-    decisive = wins + losses
     return {
         "completed_games": len(games),
-        "wins": wins,
-        "losses": losses,
+        "decisive_games": decisive_games,
         "draws": draws,
         "overrun_draws": overruns,
         "terminal_draws": terminal_draws,
         "short_draws": short_draws,
-        "win_rate": round((wins + 0.5 * draws) / len(games), 4),
-        "decisive_win_rate": round(wins / decisive, 4) if decisive else None,
+        "draw_rate": round(draws / len(games), 4),
+        "terminal_draw_rate": round(terminal_draws / len(games), 4),
+        "overrun_draw_rate": round(overruns / len(games), 4),
         "total_samples": int(sum(int(g.get("samples", 0)) for g in games)),
+        "total_turns": int(turns.sum()),
         "turns": {
             "min": int(turns.min()),
             "max": max_turn,
@@ -211,6 +384,8 @@ def export_onnx(net, channels: int, board: int, device, path) -> None:
     """Export the current net to ONNX so the Rust self-play can run it on GPU."""
     import warnings
 
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     net.eval()
     side = board  # absolute board coords: obs_side(board) == board
     dummy = torch.zeros(1, channels, side, side, device=device)
@@ -233,45 +408,62 @@ def export_onnx(net, channels: int, board: int, device, path) -> None:
         )
 
 
+def publish_serving_checkpoint(net, channels: int, board: int, device, state_path: Path, ckpt_dir: Path) -> None:
+    """Publish the latest train state and ONNX model for the live Battlesnake API."""
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    latest_pt = ckpt_dir / "latest.pt"
+    latest_onnx = ckpt_dir / "latest.onnx"
+
+    tmp_pt = latest_pt.with_suffix(".pt.tmp")
+    shutil.copyfile(state_path, tmp_pt)
+    tmp_pt.replace(latest_pt)
+
+    tmp_onnx = latest_onnx.with_suffix(".onnx.tmp")
+    export_onnx(net, channels, board, device, tmp_onnx)
+    tmp_onnx.replace(latest_onnx)
+
+
 def main():
     logger = setup_logger()
+    install_fast_sigint_handler()
+    defaults = load_default_params()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--generations", type=int, default=50)
-    ap.add_argument("--board", type=int, default=11, help="board side (square)")
-    ap.add_argument("--num-snakes", type=int, default=4,
+    ap.add_argument("--generations", type=int, default=defaults["generations"])
+    ap.add_argument("--board", type=int, default=defaults["board"], help="board side (square)")
+    ap.add_argument("--num-snakes", type=int, default=defaults["num_snakes"],
                     help="snakes per game; 4-player FFA subsumes 2-player as snakes die")
-    ap.add_argument("--samples", type=int, default=50_000)
-    ap.add_argument("--count", type=int, default=32)
+    ap.add_argument("--samples", type=int, default=defaults["samples"])
+    ap.add_argument("--count", type=int, default=defaults["count"])
     ap.add_argument(
         "--eval-batch-size",
         type=int,
-        default=8192,
+        default=defaults["eval_batch_size"],
         help="leaf observations per neural-net eval chunk; lower reduces eval tensor memory",
     )
     ap.add_argument(
         "--search-threads",
         type=int,
-        default=os.cpu_count() or 1,
+        default=defaults["search_threads"],
         help="Rayon threads for Rust search/encoding (default: all visible CPUs; 0 leaves Rayon default)",
     )
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--train-steps", type=int, default=1024, help="SGD steps per generation")
-    ap.add_argument("--batch-size", type=int, default=2048, help="SGD minibatch size")
-    ap.add_argument("--buffer-size", type=int, default=500_000, help="replay buffer capacity (samples)")
-    ap.add_argument("--max-turns", type=int, default=0, help="0 plays until terminal; positive values cap games as draws")
+    ap.add_argument("--lr", type=float, default=defaults["lr"])
+    ap.add_argument("--train-steps", type=int, default=defaults["train_steps"], help="SGD steps per generation")
+    ap.add_argument("--batch-size", type=int, default=defaults["batch_size"], help="SGD minibatch size")
+    ap.add_argument("--buffer-size", type=int, default=defaults["buffer_size"], help="replay buffer capacity (samples)")
+    ap.add_argument("--max-turns", type=int, default=defaults["max_turns"], help="0 plays until terminal; positive values cap games as draws")
     # AlphaZero MCTS search.
-    ap.add_argument("--sims", type=int, default=128, help="MCTS simulations per move")
-    ap.add_argument("--c-puct", type=float, default=1.5, help="PUCT exploration constant")
-    ap.add_argument("--exploration-prob", type=float, default=0.15, help="uniform-legal mix into the played action")
-    ap.add_argument("--draw-value", type=float, default=-0.25, help="value/search target for all draws")
+    ap.add_argument("--sims", type=int, default=defaults["sims"], help="MCTS simulations per move")
+    ap.add_argument("--c-puct", type=float, default=defaults["c_puct"], help="PUCT exploration constant")
+    ap.add_argument("--exploration-prob", type=float, default=defaults["exploration_prob"], help="uniform-legal mix into the played action")
+    ap.add_argument("--draw-value", type=float, default=defaults["draw_value"], help="value/search target for all draws")
     ap.add_argument("--bootstrap-value", action="store_true",
                     help="value target = search root (equilibrium) value per state instead of the flat game outcome")
-    ap.add_argument("--skip-short-draw-turns", type=int, default=0, help="drop terminal draw games up to this many turns from replay; 0 disables")
+    ap.add_argument("--skip-short-draw-turns", type=int, default=defaults["skip_short_draw_turns"], help="drop terminal draw games up to this many turns from replay; 0 disables")
     # Network architecture (default = KataGo-style grid trunk; see net.py).
-    ap.add_argument("--arch", type=str, default="grid", choices=["grid", "pyramid"])
-    ap.add_argument("--trunk-channels", type=int, default=96, help="grid trunk width")
-    ap.add_argument("--trunk-blocks", type=int, default=8, help="grid trunk depth")
-    ap.add_argument("--gpool-every", type=int, default=3,
+    ap.add_argument("--arch", type=str, default=defaults["arch"], choices=["grid", "pyramid"])
+    ap.add_argument("--trunk-channels", type=int, default=defaults["trunk_channels"], help="grid trunk width")
+    ap.add_argument("--trunk-blocks", type=int, default=defaults["trunk_blocks"], help="grid trunk depth")
+    ap.add_argument("--gpool-every", type=int, default=defaults["gpool_every"],
                     help="grid: every Nth block gets a global-pooling bias")
     ap.add_argument("--ckpt-dir", type=str, default=None, help="serving weights dir (default: runs/<run-id>/ckpt)")
     ap.add_argument("--serve", action=argparse.BooleanOptionalAction, default=True,
@@ -280,26 +472,77 @@ def main():
     ap.add_argument("--serve-port", type=int, default=8050)
     ap.add_argument("--runs-dir", type=str, default="runs", help="dashboard run root")
     ap.add_argument("--run-id", type=str, default=None, help="run dir name (default: timestamp)")
-    ap.add_argument("--sample-games", type=int, default=16,
+    ap.add_argument("--sample-games", type=int, default=defaults["sample_games"],
                     help="self-play games serialised per gen (recorded internally during generation)")
-    ap.add_argument("--sample-every", type=int, default=1, help="serialise self-play games every N generations")
-    ap.add_argument("--keep-games", type=int, default=40, help="keep this many recent game files")
+    ap.add_argument("--sample-every", type=int, default=defaults["sample_every"], help="serialise self-play games every N generations")
+    ap.add_argument("--keep-games", type=int, default=defaults["keep_games"], help="keep this many recent game files")
     ap.add_argument("--fresh", action="store_true", help="ignore saved state and restart this run-id from scratch")
     ap.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)  # deprecated: resume is the default
     args = ap.parse_args()
 
-    if args.search_threads:
-        os.environ["RAYON_NUM_THREADS"] = str(args.search_threads)
-        search_threads_configured = snek.set_search_threads(args.search_threads)
-    else:
-        search_threads_configured = False
-
     device = device_auto()
     log_phase(logger, "SETUP", f"device={device}")
-    if args.search_threads:
-        status = "configured" if search_threads_configured else "already initialized"
-        log_phase(logger, "SETUP", f"search_threads={args.search_threads} ({status})")
 
+    # Headless single run, or serve the dashboard and run on request.
+    if not args.serve:
+        train_one_run(args, None, device, logger)
+        return
+    from pathlib import Path as _Path
+    state = control.RunState()
+    state.set_base_spec({k: defaults[k] for k in control.NEW_RUN_PARAMS if k in defaults})
+    static_dir = _Path(__file__).resolve().parent.parent / "dashboard" / "static"
+    control.serve_in_thread(state, args.serve_host, args.serve_port, _Path(args.runs_dir), static_dir)
+    latest_run = None if args.run_id else latest_resumable_run(args.runs_dir)
+    log_phase(logger, "SERVE",
+              f"http://{args.serve_host}:{args.serve_port}  "
+              + (f"auto-starting {args.run_id}" if args.run_id else
+                 f"auto-resuming latest {latest_run}" if latest_run else
+                 "idle — log in and start a run from the dashboard"))
+    pending = (
+        {"name": args.run_id, "cli": True, "resume": not args.fresh}
+        if args.run_id else
+        {"name": latest_run, "resume": True} if latest_run else
+        None
+    )
+    while not state.shutdown:
+        if pending is None:
+            state.go_idle()
+            while not state.pending_run and not state.shutdown:
+                time.sleep(0.3)
+            if state.shutdown:
+                break
+            pending = state.take_new_run()
+            if pending is None:
+                continue
+        train_one_run(_args_for_pending(args, pending), state, device, logger)
+        pending = state.take_new_run()  # a switch request ends the run; loop into it
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    state.go_idle()
+    log_phase(logger, "DONE", "shutdown")
+
+
+def _args_for_pending(base, pending):
+    """Build an args namespace for a requested run: CLI run as launched; dashboard
+    'resume' continues from checkpoint; otherwise a fresh named run with overrides."""
+    a = copy.copy(base)
+    a.run_id = pending["name"]
+    a.fresh = not pending.get("resume", False)
+    if not a.fresh:
+        apply_params_to_args(a, run_config_params(a.runs_dir, a.run_id))
+    if pending.get("cli"):
+        return a
+    for k, v in (pending.get("overrides") or {}).items():
+        setattr(a, k, v)
+    return a
+
+
+def train_one_run(args, state, device, logger):
+    if args.search_threads:
+        os.environ["RAYON_NUM_THREADS"] = str(args.search_threads)
+        configured = snek.set_search_threads(args.search_threads)
+        status = "configured" if configured else "already initialized"
+        log_phase(logger, "SETUP", f"search_threads={args.search_threads} ({status})")
     sp = SelfPlayConfig(
         board=args.board,
         num_snakes=args.num_snakes,
@@ -321,12 +564,15 @@ def main():
             "arch": args.arch,
             "trunk_channels": args.trunk_channels,
             "trunk_blocks": args.trunk_blocks,
+            "count": args.count,
             "sims": args.sims,
             "c_puct": args.c_puct,
             "eval_batch_size": args.eval_batch_size,
             "max_turns": args.max_turns,
             "exploration_prob": args.exploration_prob,
             "draw_value": args.draw_value,
+            "bootstrap_value": args.bootstrap_value,
+            "skip_short_draw_turns": args.skip_short_draw_turns,
             "search_threads": args.search_threads,
             "generations": args.generations,
             "samples_per_gen": args.samples,
@@ -335,10 +581,11 @@ def main():
             "train_steps": args.train_steps,
             "batch_size": args.batch_size,
             "buffer_size": args.buffer_size,
+            "lr": args.lr,
             "device": str(device),
         },
     )
-    ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else run.dir / "ckpt"
+    ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else DEFAULT_SERVING_CKPT_DIR
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log_phase(logger, "SETUP", f"run_id={run.run_id} ckpt_dir={ckpt_dir}")
     run.write_json("meta.json", {**run.read_json("meta.json"), "ckpt_dir": str(ckpt_dir)})
@@ -415,32 +662,61 @@ def main():
                 except ValueError:
                     pass
 
-    # ---- Embedded live dashboard (served in-process by this trainer) ----
-    state = None
-    if args.serve:
-        import itertools
-        from pathlib import Path as _Path
-        from . import control
-        static_dir = _Path(__file__).resolve().parent.parent / "dashboard" / "static"
-        state = control.RunState()
-        control.serve_in_thread(state, args.serve_host, args.serve_port,
-                                _Path(args.runs_dir), static_dir)
+    # Register this run with the already-running dashboard server (if serving).
+    if state is not None:
         init_params = {k: getattr(args, k) for k in control.LIVE_PARAMS if hasattr(args, k)}
+        run.write_json("params.json", init_params)
         state.begin_run(run.run_id, run.read_json("meta.json"), init_params, metrics_history,
                         persist=lambda p: run.write_json("params.json", p))
-        log_phase(logger, "SERVE", f"http://{args.serve_host}:{args.serve_port}")
 
     onnx_path = run.dir / "model.onnx"
+    selfplay_state_path = run.dir / "selfplay_state.bin"
+    selfplay_state_info = None
+    if args.fresh:
+        selfplay_state_path.unlink(missing_ok=True)
+    if selfplay_state_path.exists() and not args.fresh:
+        try:
+            selfplay_state_id = snek.load_selfplay_state(str(selfplay_state_path))
+            selfplay_state_info = dict(snek.selfplay_state_info(selfplay_state_id) or {})
+            state_bytes = selfplay_state_path.stat().st_size
+            log_phase(
+                logger,
+                "RESUME",
+                f"restored in-flight self-play state from {selfplay_state_path} "
+                f"completed_games={selfplay_state_info.get('completed_games', 0):,} "
+                f"completed_samples={selfplay_state_info.get('completed_samples', 0):,} "
+                f"nonempty_slots={selfplay_state_info.get('nonempty_slots', 0):,} "
+                f"pending_steps={selfplay_state_info.get('pending_steps', 0):,} "
+                f"pending_alive_samples={selfplay_state_info.get('pending_alive_samples', 0):,} "
+                f"turn_mean={float(selfplay_state_info.get('active_turn_mean', 0.0)):.1f} "
+                f"turn_max={selfplay_state_info.get('active_turn_max', 0):,} "
+                f"bytes={state_bytes:,}",
+            )
+        except Exception as e:  # noqa: BLE001
+            log_phase(logger, "WARN", f"could not restore in-flight self-play state: {e}")
+            selfplay_state_id = snek.create_selfplay_state(
+                board=sp.board,
+                num_snakes=sp.num_snakes,
+                count=args.count,
+                seed=10_000 + start_gen,
+            )
+    else:
+        selfplay_state_id = snek.create_selfplay_state(
+            board=sp.board,
+            num_snakes=sp.num_snakes,
+            count=args.count,
+            seed=10_000 + start_gen,
+        )
     gen_iter = (
-        itertools.count(start_gen) if args.serve and args.generations == 0
+        itertools.count(start_gen) if (state is not None and args.generations == 0)
         else range(start_gen, args.generations if args.generations else start_gen + 1)
     )
     for gen in gen_iter:
         # pause/stop gate + live-param apply (dashboard control)
         if state is not None:
-            while state.paused and not (state.stopping or state.shutdown):
+            while state.paused and not (state.stopping or state.shutdown or state.pending_run):
                 time.sleep(0.3)
-            if state.stopping or state.shutdown:
+            if state.stopping or state.shutdown or state.pending_run:
                 break
             p = state.params_snapshot()
             args.count = p.get("count", args.count)
@@ -451,13 +727,29 @@ def main():
             args.batch_size = p.get("batch_size", args.batch_size)
             args.exploration_prob = p.get("exploration_prob", args.exploration_prob)
             args.draw_value = p.get("draw_value", args.draw_value)
+            args.max_turns = p.get("max_turns", args.max_turns)
+            args.sample_games = p.get("sample_games", args.sample_games)
+            args.sample_every = p.get("sample_every", args.sample_every)
+            args.keep_games = p.get("keep_games", args.keep_games)
+            args.skip_short_draw_turns = p.get("skip_short_draw_turns", args.skip_short_draw_turns)
             lr = p.get("lr", args.lr)
             for grp in opt.param_groups:
                 grp["lr"] = lr
             sp.samples_per_gen = args.samples
+            sp.max_turns = args.max_turns
             sp.exploration_prob = args.exploration_prob
             sp.draw_value = args.draw_value
+            active_selfplay_state_info = (
+                selfplay_state_info
+                if selfplay_state_info
+                and int(selfplay_state_info.get("board", sp.board)) == sp.board
+                and int(selfplay_state_info.get("num_snakes", sp.num_snakes)) == sp.num_snakes
+                and int(selfplay_state_info.get("count", args.count)) == args.count
+                else None
+            )
             state.set_status(generation=gen, phase="self-play", running=True)
+        else:
+            active_selfplay_state_info = selfplay_state_info
         # ---- GENERATE: Rust MCTS + ONNX/CUDA inference (no Python round-trips) ----
         log_phase(
             logger,
@@ -472,14 +764,61 @@ def main():
             if args.sample_games > 0 and args.sample_every and gen % args.sample_every == 0
             else 0
         )
-        generated = snek.generate_selfplay(
-            str(onnx_path), board=sp.board, num_snakes=sp.num_snakes,
-            count=args.count, sims=args.sims, c_puct=args.c_puct,
-            samples_per_gen=args.samples, seed=1000 + gen,
-            exploration_prob=args.exploration_prob, max_turns=args.max_turns,
-            draw_value=args.draw_value, skip_short_draw_turns=args.skip_short_draw_turns,
-            record_games=rust_sample_games, bootstrap_value=args.bootstrap_value,
-        )
+        try:
+            if state is not None:
+                restored_done = (
+                    int(active_selfplay_state_info.get("completed_samples", 0))
+                    if active_selfplay_state_info
+                    else 0
+                )
+                state.set_progress(
+                    "self-play",
+                    min(restored_done, args.samples),
+                    args.samples,
+                    gen,
+                    **_selfplay_inflight_progress(active_selfplay_state_info),
+                )
+            stop_progress_monitor = start_selfplay_progress_monitor(
+                logger, state, gen, args.samples, t0, active_selfplay_state_info
+            )
+            generated = snek.generate_selfplay(
+                str(onnx_path), board=sp.board, num_snakes=sp.num_snakes,
+                count=args.count, sims=args.sims, c_puct=args.c_puct,
+                samples_per_gen=args.samples, seed=1000 + gen,
+                exploration_prob=args.exploration_prob, max_turns=args.max_turns,
+                draw_value=args.draw_value, skip_short_draw_turns=args.skip_short_draw_turns,
+                record_games=rust_sample_games, bootstrap_value=args.bootstrap_value,
+                state_id=selfplay_state_id, state_path=str(selfplay_state_path),
+            )
+            selfplay_state_info = None
+        except Exception as e:
+            msg = str(e).lower()
+            cancelled = state is not None and (
+                state.stopping or state.shutdown or state.pending_run
+                or "cancelled" in msg or "interrupted" in msg
+            )
+            if not cancelled:
+                raise
+            log_phase(
+                logger,
+                "STOP",
+                f"gen={gen} self-play cancelled; saved in-flight games to {selfplay_state_path}",
+            )
+            run.write_status(
+                {
+                    "generation": gen - 1,
+                    "running": False,
+                    "total_generations": args.generations or None,
+                    "phase": "stopped",
+                }
+            )
+            if state is not None:
+                state.set_status(running=False, paused=False, phase="stopped", progress=None)
+            break
+        finally:
+            if "stop_progress_monitor" in locals():
+                stop_progress_monitor()
+                del stop_progress_monitor
         if len(generated) == 4:
             obs, pol, z, gen_stats = generated
             gen_stats = dict(gen_stats)
@@ -538,6 +877,8 @@ def main():
         )
 
         # ---- TRAIN: PyTorch SGD on a window of recent games ----
+        if state is not None:
+            state.set_status(generation=gen, phase="training", progress=None)
         log_phase(
             logger,
             "TRAINING",
@@ -556,7 +897,9 @@ def main():
             f"policy_loss={losses['policy_loss']:.4f} value_loss={losses['value_loss']:.4f}",
         )
 
-        turns_per_sec = samples.turns / max(t_gen, 1e-9)
+        total_completed_turns = int(selfplay_summary.get("total_turns", 0))
+        turns_per_sec = total_completed_turns / max(t_gen, 1e-9)
+        samples_per_sec = samples.obs.shape[0] / max(t_gen, 1e-9)
         games_per_sec = int(selfplay_summary.get("completed_games", 0)) / max(t_gen, 1e-9)
         metric = {
             "gen": gen,
@@ -568,8 +911,14 @@ def main():
             "target_max_prob": round(target_stats["target_max_prob"], 4),
             "gen_seconds": round(t_gen, 1),
             "train_seconds": round(t_train, 1),
+            "samples_per_sec": round(samples_per_sec, 0),
             "turns_per_sec": round(turns_per_sec, 0),
             "games_per_sec": round(games_per_sec, 2),
+            "avg_game_len": selfplay_summary.get("turns", {}).get("mean"),
+            "draw_rate": selfplay_summary.get("draw_rate"),
+            "terminal_draw_rate": selfplay_summary.get("terminal_draw_rate"),
+            "overrun_draw_rate": selfplay_summary.get("overrun_draw_rate"),
+            "decisive_win_rate": None,
             "win_rate": None,
             "sample_games": len(sampled_games),
             "completed_games": int(selfplay_summary.get("completed_games", 0)),
@@ -588,12 +937,15 @@ def main():
                 skipped_short_draw_games=int(gen_stats.get("skipped_short_draw_games", 0)),
                 skipped_short_draw_samples=int(gen_stats.get("skipped_short_draw_samples", 0)),
                 recorded_game_candidates=int(gen_stats.get("recorded_game_candidates", 0)),
+                length_balanced_samples=bool(gen_stats.get("length_balanced_samples", False)),
+                continuous_selfplay=bool(gen_stats.get("continuous_selfplay", False)),
+                selected_length_buckets=list(gen_stats.get("selected_length_buckets", [])),
             )
         msg = (
             f"gen {gen:3d} | samples {metric['samples']:6d} "
             f"| pol {metric['policy_loss']:.4f} val {metric['value_loss']:.4f} "
             f"| Hπ {metric['target_entropy']:.4f} maxπ {metric['target_max_prob']:.3f} "
-            f"| {turns_per_sec:5.0f} turns/s {games_per_sec:4.1f} games/s "
+            f"| {samples_per_sec:5.0f} samples/s {turns_per_sec:5.0f} turns/s {games_per_sec:4.1f} games/s "
             f"| gen {t_gen:5.1f}s train {t_train:4.1f}s"
         )
 
@@ -607,6 +959,7 @@ def main():
         log_phase(logger, "SAVING", f"gen={gen} checkpoint=state metrics=status")
         t_phase = time.time()
         save_state(gen)  # full resumable state, every generation (atomic write)
+        publish_serving_checkpoint(net, cfg.channels, sp.board, device, run.state_path, ckpt_dir)
         metric["save_seconds"] = round(time.time() - t_phase, 1)
         run.append_metric(metric)
         metrics_history.append(metric)
@@ -635,6 +988,10 @@ def main():
             "last": metric if "metric" in dir() else None,
         }
     )
+    try:
+        snek.drop_selfplay_state(selfplay_state_id)
+    except Exception:
+        pass
     log_phase(logger, "DONE", f"generations={args.generations}")
 
 

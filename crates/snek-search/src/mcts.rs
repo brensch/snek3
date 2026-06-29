@@ -22,6 +22,80 @@ use snek_core::{encode_into, obs_side, Board, Move, MAX_SNAKES, NUM_CHANNELS};
 
 const DUMMY_MOVE: Move = Move::Up;
 
+pub fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
+    let Some(snake) = board.snakes.get(snake_idx) else {
+        return false;
+    };
+    if !snake.alive() || snake.body.is_empty() {
+        return false;
+    }
+    let next = mv.apply(snake.head());
+    if !board.in_bounds(next) {
+        return true;
+    }
+    let mut body = snake.body;
+    body.advance(next);
+    if body.collides_excluding_head(next) {
+        return true;
+    }
+    for (i, other) in board.snakes.iter().enumerate() {
+        if i == snake_idx || !other.alive() {
+            continue;
+        }
+        for j in 1..other.len().saturating_sub(1) {
+            if other.body.get(j) == next {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn mask_obvious_immediate_deaths(board: &Board, snake_idx: usize, probs: &[f32]) -> [f32; 4] {
+    let mut original = [0.0f32; 4];
+    let mut total = 0.0f32;
+    for i in 0..4 {
+        original[i] = probs.get(i).copied().unwrap_or(0.0).max(0.0);
+        total += original[i];
+    }
+    if total <= 1e-8
+        || board
+            .snakes
+            .get(snake_idx)
+            .map(|s| !s.alive())
+            .unwrap_or(true)
+    {
+        return original;
+    }
+    let mut out = [0.0f32; 4];
+    let mut safe_mass = 0.0f32;
+    let mut safe_count = 0usize;
+    for i in 0..4 {
+        let death = obvious_immediate_death(board, snake_idx, Move::from_index(i));
+        if !death {
+            safe_count += 1;
+            out[i] = original[i];
+            safe_mass += original[i];
+        }
+    }
+    if safe_count == 0 {
+        return original;
+    }
+    if safe_mass > 1e-8 {
+        for x in out.iter_mut() {
+            *x /= safe_mass;
+        }
+    } else {
+        let u = 1.0 / safe_count as f32;
+        for i in 0..4 {
+            if !obvious_immediate_death(board, snake_idx, Move::from_index(i)) {
+                out[i] = u;
+            }
+        }
+    }
+    out
+}
+
 /// One edge taken during a descent: the node and, per snake, which candidate
 /// index was selected. Used to credit visits/values on backup.
 #[derive(Clone)]
@@ -105,9 +179,13 @@ impl MctsTree {
             let nv = &node.nvisit[i];
             let total_n: f32 = nv.iter().sum();
             let sqrt_total = total_n.max(1.0).sqrt();
+            let has_positive_prior = node.prior[i].iter().any(|&p| p > 1e-8);
             let mut best_a = 0usize;
             let mut best_score = f32::NEG_INFINITY;
             for (a, &n_a) in nv.iter().enumerate().take(node.cands[i].len()) {
+                if has_positive_prior && node.prior[i][a] <= 1e-8 {
+                    continue;
+                }
                 let q = if n_a > 0.0 {
                     node.wsum[i][a] / n_a
                 } else {
@@ -220,21 +298,32 @@ impl MctsTree {
         let mut wsum = Vec::with_capacity(n);
         for i in 0..n {
             let k = cands[i].len();
-            // gather policy mass on this snake's candidate moves, renormalize
+            let masked_policy = mask_obvious_immediate_deaths(&board, i, &policy[i * 4..i * 4 + 4]);
             let mut p = vec![0.0f32; k];
             let mut s = 0.0f32;
             for (a, m) in cands[i].iter().enumerate() {
-                let pm = policy[i * 4 + m.index()].max(0.0);
-                p[a] = pm;
-                s += pm;
+                p[a] = masked_policy[m.index()];
+                s += p[a];
             }
             if s > 1e-8 {
                 for x in p.iter_mut() {
                     *x /= s;
                 }
-            } else {
-                for x in p.iter_mut() {
-                    *x = 1.0 / k as f32;
+            } else if k > 0 {
+                let safe_count = cands[i]
+                    .iter()
+                    .filter(|&&m| !obvious_immediate_death(&board, i, m))
+                    .count();
+                if safe_count > 0 {
+                    let u = 1.0 / safe_count as f32;
+                    for (a, x) in p.iter_mut().enumerate() {
+                        if !obvious_immediate_death(&board, i, cands[i][a]) {
+                            *x = u;
+                        }
+                    }
+                } else {
+                    let u = 1.0 / k as f32;
+                    p.fill(u);
                 }
             }
             prior.push(p);
@@ -247,7 +336,13 @@ impl MctsTree {
         node.nvisit = nvisit;
         node.wsum = wsum;
         node.expanded = true;
-        self.backup(value);
+        let mut leaf_value = *value;
+        for (i, v) in leaf_value.iter_mut().enumerate().take(n) {
+            if !board.snakes[i].alive() {
+                *v = -1.0;
+            }
+        }
+        self.backup(&leaf_value);
     }
 
     /// Per-snake root targets: visit-count policy mapped to 4 move slots, and the
@@ -270,6 +365,27 @@ impl MctsTree {
             }
         }
         (policy, value)
+    }
+
+    fn root_debug(&self) -> Vec<Vec<(usize, f32, f32, f32)>> {
+        let root = &self.nodes[0];
+        let mut out = Vec::with_capacity(self.n_snakes);
+        for i in 0..self.n_snakes {
+            let mut row = Vec::new();
+            if root.expanded {
+                for (a, m) in root.cands[i].iter().enumerate() {
+                    let visits = root.nvisit[i][a];
+                    let q = if visits > 0.0 {
+                        root.wsum[i][a] / visits
+                    } else {
+                        0.0
+                    };
+                    row.push((m.index(), root.prior[i][a], visits, q));
+                }
+            }
+            out.push(row);
+        }
+        out
     }
 }
 
@@ -367,6 +483,15 @@ impl MctsForest {
             });
         (policies, values)
     }
+
+    /// Root action diagnostics for the first tree in this forest.
+    /// Each snake row contains `(move_index, prior, visits, q)`.
+    pub fn root_debug_first(&self) -> Vec<Vec<(usize, f32, f32, f32)>> {
+        self.trees
+            .first()
+            .map(|tree| tree.root_debug())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -378,6 +503,47 @@ mod tests {
         let mut b = Board::new(11, 11);
         b.add_snake(&[Point::new(2, 2), Point::new(2, 1)]);
         b.add_snake(&[Point::new(8, 8), Point::new(8, 9)]);
+        b
+    }
+
+    fn dead_leaf_ffa_board() -> Board {
+        let mut b = Board::new(11, 11);
+        // Snake 0 moving Up hits its own body at (5,6), but the game continues
+        // with the other snakes alive. That leaf must be -1 for snake 0 even if
+        // the value net gives a bad estimate for the dead snake.
+        b.add_snake(&[
+            Point::new(5, 5),
+            Point::new(5, 4),
+            Point::new(4, 4),
+            Point::new(4, 5),
+            Point::new(5, 6),
+            Point::new(4, 6),
+        ]);
+        b.add_snake(&[Point::new(9, 9), Point::new(9, 8)]);
+        b.add_snake(&[Point::new(1, 9), Point::new(1, 8)]);
+        b.add_snake(&[Point::new(9, 1), Point::new(9, 2)]);
+        b
+    }
+
+    fn opponent_body_board(tail_at_target: bool) -> Board {
+        let mut b = Board::new(7, 7);
+        b.add_snake(&[Point::new(2, 2), Point::new(2, 1)]);
+        if tail_at_target {
+            b.add_snake(&[
+                Point::new(5, 2),
+                Point::new(5, 1),
+                Point::new(4, 1),
+                Point::new(3, 1),
+                Point::new(3, 2),
+            ]);
+        } else {
+            b.add_snake(&[
+                Point::new(5, 2),
+                Point::new(4, 2),
+                Point::new(3, 2),
+                Point::new(3, 1),
+            ]);
+        }
         b
     }
 
@@ -438,5 +604,92 @@ mod tests {
         // Sanity: still a valid distribution after many sims.
         let p0: f32 = policies[0..4].iter().sum();
         assert!((p0 - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn mcts_masks_obvious_self_death_prior_at_root() {
+        let mut forest = MctsForest::new(&[dead_leaf_ffa_board()], 1.5);
+        let n = forest.n_snakes;
+
+        let pending = forest.select();
+        assert_eq!(pending, vec![0]);
+        let mut root_pol = vec![0.01f32; n * 4];
+        root_pol[Move::Up.index()] = 0.97;
+        let root_val = vec![0.0f32; n];
+        forest.expand_backup(&pending, &root_pol, &root_val);
+
+        let root = &forest.trees[0].nodes[0];
+        let up_idx = root.cands[0]
+            .iter()
+            .position(|&m| m == Move::Up)
+            .expect("Up remains a candidate");
+        assert_eq!(root.prior[0][up_idx], 0.0);
+
+        for _ in 0..16 {
+            let pending = forest.select();
+            if pending.is_empty() {
+                continue;
+            }
+            let pol = vec![0.25f32; pending.len() * n * 4];
+            let val = vec![0.0f32; pending.len() * n];
+            forest.expand_backup(&pending, &pol, &val);
+        }
+        let root = &forest.trees[0].nodes[0];
+        assert_eq!(root.nvisit[0][up_idx], 0.0);
+    }
+
+    #[test]
+    fn mcts_never_selects_masked_death_when_safe_moves_exist() {
+        let mut forest = MctsForest::new(&[dead_leaf_ffa_board()], 1.5);
+        let n = forest.n_snakes;
+
+        let pending = forest.select();
+        assert_eq!(pending, vec![0]);
+        let mut root_pol = vec![0.01f32; n * 4];
+        root_pol[Move::Up.index()] = 0.97;
+        let root_val = vec![0.0f32; n];
+        forest.expand_backup(&pending, &root_pol, &root_val);
+
+        let up_idx = forest.trees[0].nodes[0].cands[0]
+            .iter()
+            .position(|&m| m == Move::Up)
+            .expect("Up remains a candidate");
+        {
+            let root = &mut forest.trees[0].nodes[0];
+            for (a, prior) in root.prior[0].iter().enumerate() {
+                if a != up_idx && *prior > 0.0 {
+                    root.nvisit[0][a] = 1.0;
+                    root.wsum[0][a] = -1.0;
+                }
+            }
+        }
+
+        for _ in 0..64 {
+            let pending = forest.select();
+            if pending.is_empty() {
+                continue;
+            }
+            let pol = vec![0.25f32; pending.len() * n * 4];
+            let val = vec![0.0f32; pending.len() * n];
+            forest.expand_backup(&pending, &pol, &val);
+        }
+
+        let root = &forest.trees[0].nodes[0];
+        assert_eq!(root.prior[0][up_idx], 0.0);
+        assert_eq!(root.nvisit[0][up_idx], 0.0);
+    }
+
+    #[test]
+    fn obvious_immediate_death_distinguishes_opponent_tail() {
+        assert!(obvious_immediate_death(
+            &opponent_body_board(false),
+            0,
+            Move::Right
+        ));
+        assert!(!obvious_immediate_death(
+            &opponent_body_board(true),
+            0,
+            Move::Right
+        ));
     }
 }

@@ -19,11 +19,14 @@ __pycache__/
 
 # Training outputs
 checkpoints/
+!checkpoints/
+checkpoints/*
 runs/
 logs/
 *.pt
 *.pth.tar
 *.onnx
+!checkpoints/latest.pt
 
 # Editor / OS
 .DS_Store
@@ -31,3 +34,11 @@ logs/
 # Track the shared VS Code/Cursor settings (venv interpreter), ignore the rest.
 .vscode/*
 !.vscode/settings.json
+
+.env
+
+# Local Battlesnake CLI scratch output.
+local-vs-lan-game*.json
+local-vs-lan-viewer.log
+local-vs-lan-viewer.pid
+game-seed*.json

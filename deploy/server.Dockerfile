@@ -26,6 +26,6 @@ WORKDIR /app
 COPY --from=build /src/crates/snek-server/target/release/snek-server /app/snek-server
 COPY model.onnx /app/model.onnx
 RUN python -c "import glob, os; p=glob.glob('/usr/local/lib/python*/site-packages/onnxruntime/capi/libonnxruntime.so*')[0]; os.symlink(p, '/usr/local/lib/libonnxruntime.so')"
-ENV SNEK_MODEL=/app/model.onnx SNEK_PORT=8000 ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+ENV SNEK_MODEL=/app/model.onnx SNEK_PORT=8000 SNEK_CPU_ONLY=1 ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 EXPOSE 8000
 CMD ["/app/snek-server"]

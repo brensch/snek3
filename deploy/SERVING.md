@@ -49,8 +49,11 @@ make api-docker            # -> image snek-api  (CPU onnxruntime baked in)
 docker run -p 8000:8000 snek-api
 ```
 
-The image is a Rust binary + a CPU `onnxruntime` + `model.onnx` — no torch, no CUDA.
-Point your Battlesnake at the box's `:8000`.
+CI also builds and pushes `ghcr.io/brensch/snek3-api:latest` and
+`ghcr.io/brensch/snek3-api:cpu` via `.github/workflows/api-image.yml`.
+
+The image is a Rust binary + a CPU `onnxruntime` + `model.onnx` — no torch, no
+CUDA in the runtime image. Point your Battlesnake at the box's `:8000`.
 
 ## Tuning (env vars)
 

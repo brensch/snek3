@@ -7,29 +7,44 @@
 //!   SNEK_MODEL        ONNX model path (default ./model.onnx)
 //!   SNEK_PORT         listen port (default 8000)
 //!   SNEK_THREADS      worker threads (default 2)
-//!   SNEK_SIMS         MCTS simulations per move (default 200)
+//!   SNEK_MAX_SIMS     safety cap on MCTS simulations per move (default 100000)
+//!   SNEK_TIMEOUT_MS   fallback request timeout when JSON lacks game.timeout (default 500)
+//!   SNEK_DEADLINE_MARGIN_MS  response margin reserved from timeout (default 150)
 //!   SNEK_C_PUCT       PUCT exploration constant (default 1.5)
 //!   SNEK_DRAW_VALUE   terminal value of a draw at leaves (default -0.25)
 //!   SNEK_EVAL_CHUNK   max obs rows per ONNX forward (default 4096)
+//!   SNEK_MOVE_LOG_DIR per-game JSONL move log dir; empty disables (default logs/api_moves)
 
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use snek_core::json::parse_move_request;
 use snek_infer::Net;
-use snek_server::{env_or, serve_move, Config, MOVES};
+use snek_server::{env_or, serve_move_until_diagnostics, Config, SearchDecision, MOVES};
 use tiny_http::{Header, Method, Response, Server};
 
 struct App {
     net: Mutex<Net>,
+    model: String,
     cfg: Config,
+    default_timeout_ms: u64,
+    deadline_margin_ms: u64,
+    move_log_dir: Option<PathBuf>,
+    move_log_lock: Mutex<()>,
 }
 
 fn main() {
     let model = std::env::var("SNEK_MODEL").unwrap_or_else(|_| "model.onnx".into());
     let port: u16 = env_or("SNEK_PORT", 8000);
     let threads: usize = env_or("SNEK_THREADS", 2usize).max(1);
+    let default_timeout_ms = env_or("SNEK_TIMEOUT_MS", 500u64);
+    let deadline_margin_ms = env_or("SNEK_DEADLINE_MARGIN_MS", 150u64);
+    let move_log_dir = move_log_dir();
     let cfg = Config {
-        sims: env_or("SNEK_SIMS", 200usize),
+        max_sims: max_sims_from_env(),
         c_puct: env_or("SNEK_C_PUCT", 1.5f32),
         draw_value: env_or("SNEK_DRAW_VALUE", -0.25f32),
         eval_chunk: env_or("SNEK_EVAL_CHUNK", 4096usize),
@@ -38,13 +53,22 @@ fn main() {
     let net =
         Net::load(&model).unwrap_or_else(|e| panic!("failed to load ONNX model '{model}': {e}"));
     eprintln!(
-        "snek-server: model={model} port={port} threads={threads} sims={} c_puct={} draw_value={}",
-        cfg.sims, cfg.c_puct, cfg.draw_value
+        "snek-server: model={model} port={port} threads={threads} max_sims={} timeout_ms={} deadline_margin_ms={} c_puct={} draw_value={}",
+        cfg.max_sims,
+        default_timeout_ms,
+        deadline_margin_ms,
+        cfg.c_puct,
+        cfg.draw_value
     );
 
     let app = Arc::new(App {
         net: Mutex::new(net),
+        model,
         cfg,
+        default_timeout_ms,
+        deadline_margin_ms,
+        move_log_dir,
+        move_log_lock: Mutex::new(()),
     });
 
     let server = Arc::new(Server::http(("0.0.0.0", port)).expect("bind"));
@@ -90,12 +114,213 @@ fn info_json() -> String {
 }
 
 fn handle_move(app: &App, body: &str) -> String {
-    let mv = compute_move(app, body).unwrap_or(0);
+    let mv = compute_move(app, body).unwrap_or_else(|| {
+        log_parse_error(app, body);
+        0
+    });
     format!("{{\"move\":\"{}\"}}", MOVES[mv])
 }
 
 fn compute_move(app: &App, body: &str) -> Option<usize> {
+    let started = Instant::now();
+    let timeout_ms = request_timeout_ms(body).unwrap_or(app.default_timeout_ms);
+    let search_budget_ms = timeout_ms.saturating_sub(app.deadline_margin_ms).max(1);
+    let deadline = started + Duration::from_millis(search_budget_ms);
     let (board, me) = parse_move_request(body).ok()?;
+    let lock_started = Instant::now();
     let mut net = app.net.lock().unwrap();
-    Some(serve_move(&mut net, &app.cfg, &board, me))
+    let lock_wait_ms = lock_started.elapsed().as_secs_f64() * 1000.0;
+    let search_started = Instant::now();
+    let decision = serve_move_until_diagnostics(&mut net, &app.cfg, &board, me, deadline);
+    let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+    log_move(
+        app,
+        body,
+        &decision,
+        timeout_ms,
+        search_budget_ms,
+        lock_wait_ms,
+        search_ms,
+        total_ms,
+    );
+    Some(decision.move_index)
+}
+
+fn request_timeout_ms(body: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let timeout = v.get("game")?.get("timeout")?;
+    timeout
+        .as_u64()
+        .or_else(|| timeout.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn max_sims_from_env() -> usize {
+    std::env::var("SNEK_MAX_SIMS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or_else(|| std::env::var("SNEK_SIMS").ok().and_then(|v| v.parse().ok()))
+        .unwrap_or(100_000usize)
+}
+
+fn move_log_dir() -> Option<PathBuf> {
+    let dir = std::env::var("SNEK_MOVE_LOG_DIR").unwrap_or_else(|_| "logs/api_moves".into());
+    if dir.trim().is_empty() {
+        return None;
+    }
+    let dir = PathBuf::from(dir);
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            eprintln!(
+                "snek-server: could not create move log dir {}: {e}",
+                dir.display()
+            );
+            None
+        }
+    }
+}
+
+fn log_parse_error(app: &App, body: &str) {
+    let request_json = serde_json::from_str::<serde_json::Value>(body).unwrap_or_else(|_| {
+        serde_json::json!({
+            "unparsed_body": body,
+        })
+    });
+    let entry = serde_json::json!({
+        "kind": "snek-api-move",
+        "ok": false,
+        "error": "parse_move_request_failed",
+        "request": request_json,
+    });
+    append_move_log(app, "parse_errors", &entry);
+}
+
+fn log_move(
+    app: &App,
+    body: &str,
+    decision: &SearchDecision,
+    timeout_ms: u64,
+    search_budget_ms: u64,
+    lock_wait_ms: f64,
+    search_ms: f64,
+    total_ms: f64,
+) {
+    let request_json = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) => v,
+        Err(_) => serde_json::json!({"unparsed_body": body}),
+    };
+    let game = request_json
+        .get("game")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let game_id = game
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown_game");
+    let board = request_json
+        .get("board")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let you = request_json
+        .get("you")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let diag = &decision.diagnostics;
+    let root_actions = diag
+        .root_actions
+        .iter()
+        .map(|row| {
+            serde_json::Value::Array(
+                row.iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "move": MOVES[a.move_index],
+                            "move_index": a.move_index,
+                            "prior": a.prior,
+                            "visits": a.visits,
+                            "q": a.q,
+                        })
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let entry = serde_json::json!({
+        "kind": "snek-api-move",
+        "ok": true,
+        "game_id": game_id,
+        "turn": request_json.get("turn").and_then(|v| v.as_u64()),
+        "you_id": you.get("id").and_then(|v| v.as_str()),
+        "you_name": you.get("name").and_then(|v| v.as_str()),
+        "chosen_move": MOVES[decision.move_index],
+        "chosen_move_index": decision.move_index,
+        "model": app.model,
+        "config": {
+            "max_sims": app.cfg.max_sims,
+            "c_puct": app.cfg.c_puct,
+            "draw_value": app.cfg.draw_value,
+            "eval_chunk": app.cfg.eval_chunk,
+            "timeout_ms": timeout_ms,
+            "deadline_margin_ms": app.deadline_margin_ms,
+            "search_budget_ms": search_budget_ms,
+        },
+        "timing": {
+            "lock_wait_ms": lock_wait_ms,
+            "search_ms": search_ms,
+            "total_ms": total_ms,
+        },
+        "search": {
+            "sims_completed": diag.sims_completed,
+            "terminal_only_sims": diag.terminal_only_sims,
+            "eval_rows": diag.eval_rows,
+            "forward_calls": diag.forward_calls,
+            "stopped_reason": diag.stopped_reason,
+            "fallback_reason": diag.fallback_reason,
+            "root_policy": diag.root_policy,
+            "root_values": diag.root_values,
+            "root_actions": root_actions,
+        },
+        "board": board,
+        "you": you,
+        "request": request_json,
+    });
+    append_move_log(app, game_id, &entry);
+}
+
+fn append_move_log(app: &App, game_id: &str, entry: &serde_json::Value) {
+    let Some(dir) = &app.move_log_dir else {
+        return;
+    };
+    let filename = format!("{}.jsonl", safe_log_stem(game_id));
+    let path = dir.join(filename);
+    let _guard = app.move_log_lock.lock().ok();
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut file) => {
+            let _ = writeln!(file, "{}", entry);
+            let _ = file.flush();
+        }
+        Err(e) => {
+            eprintln!(
+                "snek-server: could not append move log {}: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn safe_log_stem(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().max(1));
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown_game".into()
+    } else {
+        out
+    }
 }

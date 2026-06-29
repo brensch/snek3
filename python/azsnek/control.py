@@ -37,6 +37,8 @@ LIVE_PARAMS: dict[str, type] = {
     "count": int, "samples": int, "sims": int, "c_puct": float,
     "lr": float, "train_steps": int, "batch_size": int,
     "exploration_prob": float, "draw_value": float,
+    "max_turns": int, "sample_games": int, "sample_every": int,
+    "keep_games": int, "skip_short_draw_turns": int,
 }
 # Baked into the net / board at startup; cannot change without a fresh run.
 LOCKED_PARAMS = ("board", "num_snakes", "trunk_channels", "trunk_blocks", "arch")
@@ -45,7 +47,7 @@ LOCKED_PARAMS = ("board", "num_snakes", "trunk_channels", "trunk_blocks", "arch"
 NEW_RUN_PARAMS: dict[str, type] = {
     **LIVE_PARAMS,
     "board": int, "num_snakes": int, "trunk_channels": int, "trunk_blocks": int,
-    "generations": int, "max_turns": int, "buffer_size": int, "keep_games": int,
+    "generations": int, "buffer_size": int, "eval_batch_size": int,
 }
 
 
@@ -122,11 +124,21 @@ class RunState:
 
     def request_stop(self) -> None:
         self._stop_run = True
+        try:
+            import snek
+            snek.request_cancel()
+        except Exception:
+            pass
         self.set_status(phase="stopping")
 
     def request_new_run(self, name: str, overrides: dict, resume: bool = False) -> None:
         self._new_run = {"name": name, "overrides": dict(overrides or {}), "resume": bool(resume)}
         if self.run_id:  # interrupt the active run to switch to the requested one
+            try:
+                import snek
+                snek.request_cancel()
+            except Exception:
+                pass
             self.set_status(phase="switching")
 
     def take_new_run(self) -> dict | None:
@@ -137,6 +149,11 @@ class RunState:
     def request_shutdown(self) -> None:
         self._shutdown = True
         self._stop_run = True
+        try:
+            import snek
+            snek.request_cancel()
+        except Exception:
+            pass
 
     def set_paused(self, paused: bool) -> None:
         self._paused = paused
@@ -184,9 +201,10 @@ class RunState:
             snap = dict(self.status)
         self.publish({"type": "status", "status": snap})
 
-    def set_progress(self, phase: str, done: int, total: int, gen: int) -> None:
-        self.set_status(phase=phase, generation=gen,
-                        progress={"done": done, "total": total})
+    def set_progress(self, phase: str, done: int, total: int, gen: int, **extra) -> None:
+        progress = {"done": done, "total": total}
+        progress.update(extra)
+        self.set_status(phase=phase, generation=gen, progress=progress)
 
     def snapshot(self) -> dict:
         with self._lock:

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { api } from "./api.js";
+import ParamRows from "./ParamRows.jsx";
 
 // Live control for the running trainer: status + pause/resume/stop, and an
 // editable grid of the live-tunable params (applied at the next generation).
@@ -21,12 +22,12 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
     };
     return (
       <div className="control">
-        <p className="muted">This is an archived run — it isn't currently training.</p>
+        <p className="muted">This run isn't currently training.</p>
         <div className="control-row">
-          <button disabled={busy} onClick={resume}>Resume this run</button>
+          <button disabled={busy} onClick={resume}>Start this run</button>
           {msg && <span className={msg.ok ? "ok" : "err"}>{msg.text}</span>}
         </div>
-        <p className="muted">Resuming continues from the saved checkpoint and makes it the live run (any currently-live run is checkpointed first).</p>
+        <p className="muted">Starting continues from the saved checkpoint and makes it the live run.</p>
       </div>
     );
   }
@@ -55,11 +56,11 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
     finally { setBusy(false); }
   };
 
-  const paused = status?.paused;
   const running = status?.running;
   const prog = status?.progress;
-  const stateClass = running ? (paused ? "paused" : "running") : "stopped";
-  const stateWord = running ? (paused ? "PAUSED" : "RUNNING") : "STOPPED";
+  const stopping = status?.phase === "stopping" || status?.phase === "switching";
+  const stateClass = running ? "running" : "stopped";
+  const stateWord = running ? "RUNNING" : "STOPPED";
   const determinate = prog && prog.total > 1;
   const pct = determinate ? Math.min(100, Math.round(100 * prog.done / prog.total)) : null;
   const busyPhase = prog && prog.total <= 1;  // training/eval/recording = indeterminate
@@ -67,6 +68,13 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
   const last = status?.last || {};
   const chip = (label, key, fmt = (v) => v) =>
     last[key] != null ? <span className="chip" key={key}><em>{label}</em><b>{fmt(last[key])}</b></span> : null;
+  const fmtNum = (v, digits = 0) => Number(v || 0).toLocaleString(undefined, {
+    maximumFractionDigits: digits,
+  });
+  const hasInflight = prog && (
+    prog.inflight_slots > 0 || prog.inflight_steps > 0 || prog.inflight_samples > 0 ||
+    prog.resumed_completed_samples > 0
+  );
 
   return (
     <div className="control">
@@ -76,12 +84,9 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
           <span className="state-word">{stateWord}</span>
           {status?.generation != null && <span className="state-gen">gen {status.generation}</span>}
           <div className="grow" />
-          {running && (paused
-            ? <button disabled={busy} onClick={() => doControl("resume")}>Resume</button>
-            : <button disabled={busy} onClick={() => doControl("pause")}>Pause</button>)}
-          {running && <button className="danger" disabled={busy}
-            onClick={() => { if (confirm("Stop the run? It will finish the current generation and exit.")) doControl("stop"); }}>
-            Stop
+          {running && <button className="danger" disabled={busy || stopping}
+            onClick={() => doControl("stop")}>
+            {stopping ? "Stopping" : "Stop"}
           </button>}
         </div>
 
@@ -89,6 +94,16 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
           <span className="phase-now">{status?.phase || "—"}</span>
           {determinate && <span className="phase-count">{prog.done.toLocaleString()} / {prog.total.toLocaleString()}</span>}
         </div>
+        {hasInflight && (
+          <div className="hero-phase">
+            <span className="phase-now">resumed in-flight</span>
+            <span className="phase-count">
+              {prog.resumed_completed_samples > 0 && `${fmtNum(prog.resumed_completed_samples)} completed samples · `}
+              {fmtNum(prog.inflight_slots)} slots · {fmtNum(prog.inflight_steps)} steps · {fmtNum(prog.inflight_samples)} pending samples
+              {prog.inflight_turn_max != null && ` · turns avg ${fmtNum(prog.inflight_turn_mean, 1)} max ${fmtNum(prog.inflight_turn_max)}`}
+            </span>
+          </div>
+        )}
         <div className={"hero-bar " + (busyPhase ? "busy" : "")}>
           <i style={determinate ? { width: `${pct}%` } : undefined} />
           {determinate && <span className="bar-pct">{pct}%</span>}
@@ -110,17 +125,14 @@ export default function ControlPanel({ run, status, params, liveKeys, lockedKeys
 
       {msg && <div className="control-row"><span className={msg.ok ? "ok" : "err"}>{msg.text}</span></div>}
 
-      <div className="params">
-        {(liveKeys || []).map((k) => (
-          <label key={k} className="param">
-            <span>{k}</span>
-            <input type="number" step="any"
-              placeholder={params?.[k] ?? ""}
-              value={draft[k] ?? ""}
-              onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))} />
-          </label>
-        ))}
-      </div>
+      <ParamRows
+        keys={liveKeys || []}
+        values={params || {}}
+        placeholders={params || {}}
+        draft={draft}
+        onDraft={(k, v) => setDraft((d) => ({ ...d, [k]: v }))}
+        title="Live training levers"
+      />
       <div className="control-row">
         <button disabled={busy} onClick={applyParams}>Apply params (next gen)</button>
         <span className="muted">locked: {(lockedKeys || []).join(", ")}</span>

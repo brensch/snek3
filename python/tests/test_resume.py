@@ -17,10 +17,9 @@ def _train(runs_dir: Path, run_id: str, generations: int, fresh: bool = False):
         sys.executable, "-m", "azsnek.train",
         "--runs-dir", str(runs_dir), "--run-id", run_id,
         "--generations", str(generations), "--samples", "40", "--count", "4",
-        "--sims", "4", "--blocks", "1", "--filters", "8",
-        "--train-steps", "1", "--batch-size", "16", "--eval-every", "0",
-        "--relative-every", "0", "--league-every", "0", "--record-games", "0",
-        "--sample-games", "0", "--ckpt-dir", str(runs_dir / "ckpt"),
+        "--sims", "4", "--trunk-blocks", "1", "--trunk-channels", "8",
+        "--train-steps", "1", "--batch-size", "16",
+        "--sample-games", "0", "--no-serve", "--ckpt-dir", str(runs_dir / "ckpt"),
     ]
     if fresh:
         cmd.append("--fresh")

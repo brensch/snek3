@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-"""Export the Albatross **proxy** net from a training checkpoint to ONNX.
+"""Export a training checkpoint to ONNX for the Rust Battlesnake API.
 
-The Rust serving binary (`crates/snek-server`) runs the proxy net for two things:
-the per-opponent temperature MLE (policy head) and the heterogeneous-temperature
-best-response search at the leaves (value + policy head). The *response* net is a
-not-yet-used distillation; faithful serving only needs the proxy + the search, so
-this exports the proxy.
-
-The checkpoint (`runs/<id>/state.pt`) is the full training state; we pull
-`net_cfg` (so the architecture matches the weights exactly) and `st["proxy"]`.
+The current AlphaZero trainer stores the policy+value network under ``st["net"]``
+in ``runs/<id>/state.pt``. The Rust API then runs decoupled-PUCT MCTS over that
+ONNX model, using the policy head as priors and the value head at leaves.
 
 Usage:
     PYTHONPATH=python .venv/bin/python scripts/export_model.py \
-        runs/albatross-resp0/state.pt model.onnx
+        runs/<run-id>/state.pt runs/<run-id>/serve.onnx
 """
 
 from __future__ import annotations
@@ -30,8 +25,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("checkpoint", help="path to runs/<id>/state.pt")
     ap.add_argument("out", help="output .onnx path")
-    ap.add_argument("--which", choices=["proxy", "response"], default="proxy",
-                    help="which net to export (default: proxy — what serving uses)")
+    ap.add_argument("--which", default="net",
+                    help="checkpoint key to export (default: net; legacy: proxy/response)")
     args = ap.parse_args()
 
     st = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -45,19 +40,14 @@ def main() -> None:
     cfg = NetConfig(**cfg_dict)
     if cfg.channels != snek.CHANNELS:
         raise SystemExit(f"channel mismatch: net_cfg={cfg.channels} snek={snek.CHANNELS}")
-    if not cfg.temperature_input:
-        # The server always feeds a temperature; a non-conditioned net can't serve
-        # Albatross. Bail loudly rather than export a model the server can't drive.
-        raise SystemExit("net is not temperature-conditioned; not an Albatross proxy")
 
     net = AZNet(cfg)
     net.load_state_dict(st[args.which])
     net.eval()
 
     export_onnx(net, cfg.channels, cfg.width, torch.device("cpu"), args.out)
-    side = 2 * cfg.width - 1
     print(f"exported {args.which} (gen {st.get('gen', '?')}) -> {args.out}  "
-          f"[obs 1x{cfg.channels}x{side}x{side} + temp, board {cfg.width}]")
+          f"[obs 1x{cfg.channels}x{cfg.height}x{cfg.width}, arch={cfg.arch}]")
 
 
 if __name__ == "__main__":

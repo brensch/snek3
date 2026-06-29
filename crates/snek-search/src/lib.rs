@@ -10,6 +10,6 @@ pub mod search;
 pub mod uct;
 
 pub use le::{solve as solve_le, LeSolution};
-pub use mcts::MctsForest;
+pub use mcts::{mask_obvious_immediate_deaths, obvious_immediate_death, MctsForest};
 pub use search::Forest;
 pub use uct::uct_actions;

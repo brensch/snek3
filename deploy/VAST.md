@@ -10,7 +10,8 @@ docker build -t <you>/snek3 -f deploy/Dockerfile .
 docker push <you>/snek3
 ```
 
-CI also builds `ghcr.io/brensch/snek3:latest` from `deploy/Dockerfile`.
+CI also builds `ghcr.io/brensch/snek3:latest` from `deploy/Dockerfile`
+via `.github/workflows/trainer-image.yml`.
 
 ## RunPod/Vast Settings
 

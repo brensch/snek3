@@ -17,9 +17,26 @@ RUNS_DIR    ?= runs
 PORT        ?= 8050
 SERVE_PORT  ?= 8000
 CKPT        ?=
-# Pure-Rust /move API (Albatross-faithful serving): exported model + checkpoint
-MODEL       ?= model.onnx
-CHECKPOINT  ?= runs/albatross-resp0/state.pt
+# Pure-Rust /move API: one canonical live model under checkpoints/.
+API_RUN_ID  ?= $(RUN_ID)
+CHECKPOINT  ?= $(if $(API_RUN_ID),runs/$(API_RUN_ID)/state.pt,checkpoints/latest.pt)
+MODEL       ?= checkpoints/latest.onnx
+API_MAX_SIMS ?= 100000
+API_TIMEOUT_MS ?= 500
+API_DEADLINE_MARGIN_MS ?= 150
+API_THREADS ?= 2
+API_EVAL_CHUNK ?= 4096
+API_MOVE_LOG_DIR ?= logs/api_moves
+BATTLESNAKE ?= $(HOME)/go/bin/battlesnake
+GAME_WIDTH ?= 11
+GAME_HEIGHT ?= 11
+GAME_TIMEOUT_MS ?= 500
+GAME_DELAY_MS ?= 250
+GAME_OUTPUT ?= local-vs-lan-game.json
+GAME_LOCAL_NAME ?= local-8000
+GAME_LOCAL_URL ?= http://127.0.0.1:8000
+GAME_LAN_NAME ?= lan-8080
+GAME_LAN_URL ?= http://192.168.1.22:8080
 
 # Training defaults (all overridable)
 GENERATIONS ?= 100000
@@ -98,14 +115,14 @@ ALB_DRAW_VALUE ?= -0.9  # equilibrium-search terminal value of a draw (negative 
 ALB_GENERATIONS ?= 0    # 0 = run forever until stopped via the dashboard/control API
 
 .DEFAULT_GOAL := help
-.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard serve export-model api-build api api-docker clean clean-all
+.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard serve export-model api-build api api-run rungame api-docker clean clean-all
 
 help: ## Show this help
 	@echo "snek3 targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Vars: GENERATIONS SAMPLES COUNT SIMS C_PUCT EXPLORATION_PROB DRAW_VALUE BOOTSTRAP_VALUE SKIP_SHORT_DRAW_TURNS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS BATCH_SIZE BUFFER_SIZE BOARD NUM_SNAKES TRUNK_CHANNELS TRUNK_BLOCKS MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY KEEP_GAMES RUN_ID FRESH ARGS LR PORT SERVE_PORT CKPT TORCH_INDEX"
+	@echo "Vars: GENERATIONS SAMPLES COUNT SIMS C_PUCT EXPLORATION_PROB DRAW_VALUE BOOTSTRAP_VALUE SKIP_SHORT_DRAW_TURNS EVAL_BATCH_SIZE SEARCH_THREADS TRAIN_STEPS BATCH_SIZE BUFFER_SIZE BOARD NUM_SNAKES TRUNK_CHANNELS TRUNK_BLOCKS MAX_TURNS SAMPLE_GAMES SAMPLE_EVERY KEEP_GAMES RUN_ID FRESH ARGS LR PORT SERVE_PORT CKPT TORCH_INDEX BATTLESNAKE GAME_LOCAL_URL GAME_LAN_URL GAME_OUTPUT"
 
 venv: ## Create .venv and install all dependencies (incl. PyTorch)
 	test -d $(VENV) || python3 -m venv $(VENV)
@@ -151,16 +168,9 @@ train: build ## Train (auto-resumes RUN_ID if it has saved state). Override GENE
 		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) --keep-games $(KEEP_GAMES) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
-server: build ## Start the AlphaZero run (single grid net, N-player FFA) + in-process live dashboard on DASH_PORT. Override RUN_ID, FRESH=1, COUNT/SIMS/SAMPLES...
+server: build ## Start trainer + in-process dashboard on DASH_PORT. Resumes latest run unless RUN_ID is set.
 	$(PY) -m azsnek.train \
-		--serve --serve-port $(DASH_PORT) \
-		--generations $(GENERATIONS) --board $(BOARD) --num-snakes $(NUM_SNAKES) \
-		--samples $(SAMPLES) --count $(COUNT) --sims $(SIMS) --c-puct $(C_PUCT) \
-		--trunk-channels $(TRUNK_CHANNELS) --trunk-blocks $(TRUNK_BLOCKS) \
-		--lr $(LR) --train-steps $(TRAIN_STEPS) --batch-size $(BATCH_SIZE) --buffer-size $(BUFFER_SIZE) \
-		--exploration-prob $(EXPLORATION_PROB) --draw-value $(DRAW_VALUE) --max-turns $(MAX_TURNS) \
-		--sample-games $(SAMPLE_GAMES) --sample-every $(SAMPLE_EVERY) --keep-games $(KEEP_GAMES) \
-		--search-threads $(SEARCH_THREADS) --eval-batch-size $(EVAL_BATCH_SIZE) \
+		--serve --serve-port $(DASH_PORT) --runs-dir $(RUNS_DIR) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(ARGS)
 
 ui: ## Build the React dashboard UI (-> python/dashboard/static)
@@ -173,16 +183,32 @@ serve: build ## Run the Battlesnake server (set CKPT=path and matching FILTERS/B
 	$(if $(CKPT),SNEK_CKPT=$(CKPT) ,)SNEK_FILTERS=$(FILTERS) SNEK_BLOCKS=$(BLOCKS) \
 		$(UVICORN) server.main:app --host 0.0.0.0 --port $(SERVE_PORT)
 
-export-model: build ## Export the Albatross proxy net CHECKPOINT -> MODEL (.onnx) for the Rust API
+export-model: build ## Export the AlphaZero net CHECKPOINT -> MODEL (.onnx) for the Rust API
+	mkdir -p checkpoints
+	$(if $(API_RUN_ID),cp $(CHECKPOINT) checkpoints/latest.pt.tmp && mv checkpoints/latest.pt.tmp checkpoints/latest.pt,)
 	PYTHONPATH=python $(PY) scripts/export_model.py $(CHECKPOINT) $(MODEL)
 
 api-build: ## Compile the pure-Rust /move API server (release)
 	cargo build --release --manifest-path crates/snek-server/Cargo.toml
 
-api: api-build ## Run the Rust /move API locally (needs `make export-model`; uses the venv onnxruntime). Override SERVE_PORT, SNEK_*
+api: api-build ## Run the Rust /move API locally. Run `make export-model` first. Override API_RUN_ID, SERVE_PORT.
 	ORT_DYLIB_PATH="$(shell ls $(VENV)/lib/python*/site-packages/onnxruntime/capi/libonnxruntime.so* 2>/dev/null | head -1)" \
-	SNEK_MODEL=$(MODEL) SNEK_PORT=$(SERVE_PORT) \
+	SNEK_MODEL=$(MODEL) SNEK_PORT=$(SERVE_PORT) SNEK_MAX_SIMS=$(API_MAX_SIMS) \
+	SNEK_TIMEOUT_MS=$(API_TIMEOUT_MS) SNEK_DEADLINE_MARGIN_MS=$(API_DEADLINE_MARGIN_MS) \
+	SNEK_THREADS=$(API_THREADS) SNEK_EVAL_CHUNK=$(API_EVAL_CHUNK) SNEK_MOVE_LOG_DIR=$(API_MOVE_LOG_DIR) \
 	./crates/snek-server/target/release/snek-server
+
+api-run: export-model api ## Export the selected run checkpoint, then start the Rust /move API.
+
+rungame: ## Run a Battlesnake game between local API and LAN API, opening the viewer
+	$(BATTLESNAKE) play \
+		-W $(GAME_WIDTH) -H $(GAME_HEIGHT) \
+		--name $(GAME_LOCAL_NAME) --url $(GAME_LOCAL_URL) \
+		--name $(GAME_LAN_NAME) --url $(GAME_LAN_URL) \
+		--timeout $(GAME_TIMEOUT_MS) \
+		--browser \
+		--delay $(GAME_DELAY_MS) \
+		--output $(GAME_OUTPUT)
 
 api-docker: ## Build the CPU-only Docker image for the Rust API (expects MODEL in repo root)
 	docker build -f deploy/server.Dockerfile -t snek-api .
