@@ -276,7 +276,6 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
 }
 .board-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; flex-wrap: nowrap; white-space: nowrap; }
 .board-meta .type { color: var(--fg); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.board-meta .badge { flex-shrink: 0; }
 .board-meta .turn { margin-left: auto; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .copy-frame {
   flex-shrink: 0;
@@ -360,11 +359,6 @@ input[type="range"] { accent-color: var(--accent); }
 .muted { color: var(--muted); }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
 label.chk { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 5px; }
-.badge { font-size: 12px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--line); }
-.badge.win { color: #34d399; border-color: #10532f; }
-.badge.loss { color: #f87171; }
-.badge.draw { color: #fbbf24; }
-
 /* ---- live control panel ---- */
 .control { display: flex; flex-direction: column; gap: 10px; }
 .control-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

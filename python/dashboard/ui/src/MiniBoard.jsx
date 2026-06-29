@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { drawFrame, eventToBoardCell, resultOf, snakeColor, snakeRole, snakesAtCell } from "./board.js";
+import { drawFrame, eventToBoardCell, snakeColor, snakeRole, snakesAtCell } from "./board.js";
 
 const MOVE_LABELS = ["Up", "Down", "Left", "Right"];
 
@@ -92,7 +92,6 @@ export default function MiniBoard({ game, tick, playing, onPlay, context = {} })
     if (ref.current) drawFrame(ref.current, fr, game.opponent, hover?.snakes ?? []);
   }, [fr, game.opponent, hover]);
 
-  const [r, cls] = resultOf(game.winner);
   const type = game.opponent === "net" ? "net self-play"
     : (game.opponent || "net vs baseline").replace(/-v-/g, " vs ");
   const isPlaying = autoplay && playing && n > 1;
@@ -225,7 +224,6 @@ export default function MiniBoard({ game, tick, playing, onPlay, context = {} })
       </div>
       <div className="board-meta">
         <span className="type">{type}</span>
-        <span className={"badge " + cls}>{r}</span>
         <button
           className="copy-frame"
           type="button"

@@ -114,7 +114,3 @@ export function drawFrame(canvas, fr, opponent = "baseline", hoverSnakes = []) {
     ctx.globalAlpha = 1;
   });
 }
-
-export function resultOf(winner) {
-  return winner === 0 ? ["W", "win"] : winner === 1 ? ["L", "loss"] : winner === -1 ? ["D", "draw"] : ["·", ""];
-}
