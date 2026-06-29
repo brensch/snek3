@@ -27,7 +27,7 @@ function SnakePolicyBlock({ snake, snakeIndex, opponent }) {
           {!snake.alive && <em>dead</em>}
         </span>
         <b>
-          h {snake.health ?? "—"} · v {fmtValue(snake.value)}
+          h {snake.health ?? "—"} · len {snake.body?.length ?? "—"} · v {fmtValue(snake.value)}
         </b>
       </div>
       {policy || playPolicy ? (
