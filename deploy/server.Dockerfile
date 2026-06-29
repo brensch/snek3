@@ -16,6 +16,10 @@
 # ---- build ----
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
+# The root workspace manifest is required because snek-core/snek-search inherit
+# `edition`/`version`/deps via `workspace = true`; without it cargo can't find a
+# workspace root and the build fails.
+COPY Cargo.toml ./Cargo.toml
 COPY crates/ ./crates/
 RUN cargo build --release --manifest-path crates/snek-server/Cargo.toml
 
