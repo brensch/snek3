@@ -71,6 +71,33 @@ CUDA in the runtime image. Point your Battlesnake at the box's `:8000`.
 Latency budget is ~500ms/move. If a CPU box is tight, lower `SNEK_DEPTH` (biggest lever)
 or `SNEK_ITERS`; if you have headroom, raise `SNEK_DEPTH` to 3 for stronger tactics.
 
+## Game viewer
+
+The server ships an embedded web viewer for the games it records (the compressed
+`<game_id>.json.zst` logs under `SNEK_MOVE_LOG_DIR`). It is built from
+`crates/snek-server/viewer/` and bundled into the binary via `rust-embed`
+(`make api-build` and the Docker image build the frontend first; bare
+`cargo build` uses a tracked placeholder).
+
+- **UI:** `GET /app/` — pick a game, scrub/auto-play it, and read the per-turn
+  search: value head, Up/Down/Left/Right policy + priors + visit counts + Q, the
+  played move, sims/forward/eval/depth. Share a deep link with
+  `/app/?game=<id>&turn=<n>`.
+- **API** (namespaced under `/viewer/*`, separate from the Battlesnake routes):
+  - `GET /viewer/games` — list recorded game ids
+  - `GET /viewer/games/{id}` — the decompressed game JSON
+  - `GET /viewer/games/{id}/tree?turn=N[&sims=M]` — replay turn `N` and return
+    the full exploration tree (per-node PUCT decomposition Q + c·P·√ΣN/(1+N)).
+
+Replay is a faithful reproduction: serving search is deterministic, so re-running
+with the turn's recorded `sims_completed` rebuilds the in-game tree node-for-node
+— **provided the loaded model matches the one that recorded the game**. Each game
+stores a SHA-256 of the model; the tree response reports `model_match`, and the UI
+warns when a replay used different weights (e.g. the model was re-exported since).
+For an in-process replay (the same server that recorded the game) this always
+matches. `SNEK_VIEWER_DIR` overrides the embedded assets with an on-disk dir for
+iterating on the frontend without rebuilding the server.
+
 ## Re-exporting after more training
 
 The serving model is a snapshot. After the live run improves, re-run `make export-model`

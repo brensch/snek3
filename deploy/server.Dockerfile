@@ -13,6 +13,17 @@
 # Tunables (env): SNEK_DEPTH SNEK_ITERS SNEK_RESPONSE_TAU SNEK_DRAW_VALUE
 #                 SNEK_THREADS SNEK_PORT
 
+# ---- viewer frontend ----
+# Build the game viewer SPA so the Rust build can embed it (rust-embed reads
+# crates/snek-server/viewer/dist at compile time). Done in its own stage so the
+# Rust toolchain image needs no Node.
+FROM node:20-slim AS viewer
+WORKDIR /viewer
+COPY crates/snek-server/viewer/package.json crates/snek-server/viewer/package-lock.json* ./
+RUN npm install
+COPY crates/snek-server/viewer/ ./
+RUN npm run build
+
 # ---- build ----
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
@@ -21,6 +32,8 @@ WORKDIR /src
 # workspace root and the build fails.
 COPY Cargo.toml ./Cargo.toml
 COPY crates/ ./crates/
+# Overwrite the tracked placeholder dist with the freshly built viewer bundle.
+COPY --from=viewer /viewer/dist/ ./crates/snek-server/viewer/dist/
 RUN cargo build --release --manifest-path crates/snek-server/Cargo.toml
 
 # ---- runtime ----

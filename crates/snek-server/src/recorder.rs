@@ -92,6 +92,7 @@ pub struct SearchInfo {
     pub terminal_only_sims: usize,
     pub eval_rows: usize,
     pub forward_calls: usize,
+    pub max_depth: u32,
     pub stopped_reason: &'static str,
     pub fallback_reason: Option<&'static str>,
     #[serde(serialize_with = "ser_round4_vec")]
@@ -107,13 +108,14 @@ pub struct SearchInfo {
 pub struct MoveRecord {
     pub turn: u32,
     /// Index of our snake within `snakes` this turn.
-    pub you: usize,
-    pub chosen_move: u8,
+    pub you: Option<usize>,
+    pub chosen_move: Option<u8>,
     pub food: Vec<[i8; 2]>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hazards: Vec<[i8; 2]>,
     pub snakes: Vec<SnakeState>,
-    pub search: SearchInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<SearchInfo>,
     /// `[lock_wait_ms, search_ms, total_ms]`, rounded to 2 dp.
     #[serde(serialize_with = "ser_round2_arr")]
     pub timing: [f64; 3],
@@ -302,14 +304,30 @@ fn run(
             .collect();
         for id in stale {
             if let Some(log) = games.remove(&id) {
-                finalize(&dir, &model, &config, id, log, Finish::Incomplete, zstd_level);
+                finalize(
+                    &dir,
+                    &model,
+                    &config,
+                    id,
+                    log,
+                    Finish::Incomplete,
+                    zstd_level,
+                );
             }
         }
     }
     // Channel closed: flush whatever is left as incomplete (synchronously, so we
     // don't race process exit).
     for (id, log) in games.drain() {
-        write_game(&dir, &model, &config, &id, &log, Finish::Incomplete, zstd_level);
+        write_game(
+            &dir,
+            &model,
+            &config,
+            &id,
+            &log,
+            Finish::Incomplete,
+            zstd_level,
+        );
     }
 }
 
@@ -415,8 +433,8 @@ mod tests {
     fn sample_move(turn: u32) -> MoveRecord {
         MoveRecord {
             turn,
-            you: 0,
-            chosen_move: 0,
+            you: Some(0),
+            chosen_move: Some(0),
             food: vec![[6, 10], [0, 6]],
             hazards: vec![],
             snakes: vec![SnakeState {
@@ -425,11 +443,12 @@ mod tests {
                 health: 100 - turn as i16,
                 body: vec![[5, 9], [5, 8]],
             }],
-            search: SearchInfo {
+            search: Some(SearchInfo {
                 sims_completed: 148,
                 terminal_only_sims: 0,
                 eval_rows: 296,
                 forward_calls: 148,
+                max_depth: 6,
                 stopped_reason: "tree_resolved",
                 fallback_reason: None,
                 root_policy: vec![0.42, 0.26, 0.0, 0.30],
@@ -438,7 +457,7 @@ mod tests {
                     ActionDebug(0, 0.11, 63.0, 0.10),
                     ActionDebug(1, 0.31, 39.0, -0.01),
                 ]],
-            },
+            }),
             timing: [0.0, 229.0, 229.1],
         }
     }
@@ -457,7 +476,15 @@ mod tests {
             last_seen: Instant::now(),
         };
         let config = json!({"max_sims": 100000});
-        write_game(&dir, "model.onnx", &config, "game-abc", &log, Finish::Complete, 19);
+        write_game(
+            &dir,
+            "model.onnx",
+            &config,
+            "game-abc",
+            &log,
+            Finish::Complete,
+            19,
+        );
 
         let path = dir.join("game-abc.json.zst");
         let bytes = fs::read(&path).expect("output written");
@@ -490,7 +517,15 @@ mod tests {
             moves: vec![sample_move(0)],
             last_seen: Instant::now(),
         };
-        write_game(&dir, "m", &json!({}), "game-inc", &log, Finish::Incomplete, 3);
+        write_game(
+            &dir,
+            "m",
+            &json!({}),
+            "game-inc",
+            &log,
+            Finish::Incomplete,
+            3,
+        );
         let bytes = fs::read(dir.join("game-inc.json.zst")).unwrap();
         let json = zstd::stream::decode_all(bytes.as_slice()).unwrap();
         let doc: Value = serde_json::from_slice(&json).unwrap();

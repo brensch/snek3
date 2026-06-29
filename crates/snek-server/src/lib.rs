@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use snek_core::{obs_h, obs_w, Board, Move, NUM_CHANNELS};
 use snek_infer::Net;
-use snek_search::MctsForest;
+use snek_search::{MctsForest, TreeSnapshot};
 
 #[derive(Clone, Debug)]
 pub struct RootActionDebug {
@@ -26,6 +26,8 @@ pub struct SearchDiagnostics {
     pub terminal_only_sims: usize,
     pub eval_rows: usize,
     pub forward_calls: usize,
+    /// Max search-tree depth reached (root = 0).
+    pub max_depth: u32,
     pub stopped_reason: &'static str,
     pub fallback_reason: Option<&'static str>,
     pub root_policy: Vec<f32>,
@@ -86,6 +88,7 @@ fn fallback_decision(board: &Board, me: usize, reason: &'static str) -> SearchDe
             terminal_only_sims: 0,
             eval_rows: 0,
             forward_calls: 0,
+            max_depth: 0,
             stopped_reason: reason,
             fallback_reason: Some(reason),
             root_policy: Vec::new(),
@@ -158,6 +161,7 @@ pub fn serve_move_until_diagnostics(
 
     // root_targets: visit-count policy [count*N*4]; count == 1 here.
     let (policies, values) = forest.root_targets();
+    let max_depth = forest.max_depth_first();
     let root_actions = forest
         .root_debug_first()
         .into_iter()
@@ -179,6 +183,7 @@ pub fn serve_move_until_diagnostics(
         decision.diagnostics.terminal_only_sims = terminal_only_sims;
         decision.diagnostics.eval_rows = eval_rows;
         decision.diagnostics.forward_calls = forward_calls;
+        decision.diagnostics.max_depth = max_depth;
         decision.diagnostics.stopped_reason = stopped_reason;
         decision.diagnostics.root_policy = policies;
         decision.diagnostics.root_values = values;
@@ -196,6 +201,7 @@ pub fn serve_move_until_diagnostics(
             terminal_only_sims,
             eval_rows,
             forward_calls,
+            max_depth,
             stopped_reason,
             fallback_reason: None,
             root_policy: policies,
@@ -213,6 +219,119 @@ pub fn serve_move_until(
     deadline: Instant,
 ) -> usize {
     serve_move_until_diagnostics(net, cfg, board, me, deadline).move_index
+}
+
+/// A faithful replay of a recorded move plus the full exploration tree.
+#[derive(Clone, Debug)]
+pub struct ReplayResult {
+    pub decision: SearchDecision,
+    pub tree: Option<TreeSnapshot>,
+}
+
+/// Re-run the search for a recorded position bounded by an *exact* simulation
+/// count rather than a wall-clock deadline. Because serving search is fully
+/// deterministic (strict-argmax DUCT, no noise/temperature), running the same
+/// `n_iters` the live move managed reproduces that move's tree node-for-node —
+/// this is what the viewer's tree explorer renders. Returns the decision, the
+/// same diagnostics the live move recorded, and the captured tree.
+pub fn serve_move_replay(
+    net: &mut Net,
+    cfg: &Config,
+    board: &Board,
+    me: usize,
+    n_iters: usize,
+) -> ReplayResult {
+    if board.is_terminal() || !board.snakes[me].alive() {
+        return ReplayResult {
+            decision: fallback_decision(board, me, "terminal_or_dead"),
+            tree: None,
+        };
+    }
+    let (c, h, w) = (NUM_CHANNELS, obs_h(board), obs_w(board));
+    let n_snakes = board.snakes.len();
+    let mut forest =
+        MctsForest::new_with_draw_value(std::slice::from_ref(board), cfg.c_puct, cfg.draw_value);
+    let obs_size = forest.obs_size();
+    let mut sims_completed = 0usize;
+    let mut terminal_only_sims = 0usize;
+    let mut eval_rows = 0usize;
+    let mut forward_calls = 0usize;
+
+    for _ in 0..n_iters {
+        let pending = forest.select();
+        if pending.is_empty() {
+            terminal_only_sims += 1;
+            sims_completed += 1;
+            continue;
+        }
+        let rows = pending.len() * n_snakes;
+        eval_rows += rows;
+        let mut obs = vec![0.0f32; rows * obs_size];
+        forest.write_pending_obs(&pending, &mut obs);
+
+        let mut pol = vec![0.0f32; rows * 4];
+        let mut val = vec![0.0f32; rows];
+        let mut s = 0;
+        while s < rows {
+            let e = (s + cfg.eval_chunk).min(rows);
+            forward_calls += 1;
+            match net.forward(&obs[s * obs_size..e * obs_size], e - s, c, h, w) {
+                Ok((p, v)) => {
+                    pol[s * 4..e * 4].copy_from_slice(&p);
+                    val[s..e].copy_from_slice(&v);
+                }
+                Err(_) => {
+                    return ReplayResult {
+                        decision: fallback_decision(board, me, "net_forward_error"),
+                        tree: None,
+                    }
+                }
+            }
+            s = e;
+        }
+        forest.expand_backup(&pending, &pol, &val);
+        sims_completed += 1;
+    }
+
+    let (policies, values) = forest.root_targets();
+    let root_actions = forest
+        .root_debug_first()
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|(move_index, prior, visits, q)| RootActionDebug {
+                    move_index,
+                    prior,
+                    visits,
+                    q,
+                })
+                .collect()
+        })
+        .collect::<Vec<_>>();
+    let max_depth = forest.max_depth_first();
+    let tree = forest.tree_snapshot_first();
+    let move_index = choose_root_action(
+        &policies[me * 4..me * 4 + 4],
+        root_actions.get(me).map(Vec::as_slice).unwrap_or(&[]),
+    );
+    ReplayResult {
+        decision: SearchDecision {
+            move_index,
+            diagnostics: SearchDiagnostics {
+                sims_completed,
+                terminal_only_sims,
+                eval_rows,
+                forward_calls,
+                max_depth,
+                stopped_reason: "replay_n_iters",
+                fallback_reason: None,
+                root_policy: policies,
+                root_values: values,
+                root_actions,
+            },
+        },
+        tree,
+    }
 }
 
 fn choose_root_action(policy_slots: &[f32], actions: &[RootActionDebug]) -> usize {

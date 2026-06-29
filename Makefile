@@ -189,7 +189,10 @@ export-model: build ## Export the AlphaZero net CHECKPOINT -> MODEL (.onnx) for 
 	$(if $(API_RUN_ID),cp $(CHECKPOINT) checkpoints/latest.pt.tmp && mv checkpoints/latest.pt.tmp checkpoints/latest.pt,)
 	PYTHONPATH=python $(PY) scripts/export_model.py $(CHECKPOINT) $(MODEL)
 
-api-build: ## Compile the pure-Rust /move API server (release)
+viewer-build: ## Build the embedded game viewer frontend (crates/snek-server/viewer/dist)
+	cd crates/snek-server/viewer && npm install && npm run build
+
+api-build: viewer-build ## Compile the pure-Rust /move API server (release), embedding the viewer
 	cargo build --release --manifest-path crates/snek-server/Cargo.toml
 
 api: api-build ## Run the Rust /move API locally. Run `make export-model` first. Override API_RUN_ID, SERVE_PORT.

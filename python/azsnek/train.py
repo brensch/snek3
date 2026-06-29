@@ -347,13 +347,22 @@ def summarize_completed_games(games: list[dict]) -> dict:
     short_draws = sum(1 for g in games if g.get("short_draw"))
     terminal_draws = max(0, draws - overruns)
     max_turn = int(turns.max())
-    bucket = 10
+    # Fixed bin *count* (not width): 10 bins evenly spread across the observed
+    # [min, max] game-length range, so the histogram always has the same number
+    # of bars and zooms to wherever the games actually are. Empty bins are kept
+    # so the count stays fixed. Falls back to fewer bins only when the integer
+    # range is too small to give each bin its own value.
+    lo = int(turns.min())
+    hi = max_turn
+    NBINS = 10
+    nbins = NBINS if hi - lo >= NBINS else max(1, hi - lo)
+    edges = [int(round(lo + i * (hi - lo) / nbins)) for i in range(nbins + 1)]
     hist = []
-    for start in range(0, max_turn + bucket, bucket):
-        end = start + bucket - 1
-        count = int(((turns >= start) & (turns <= end)).sum())
-        if count:
-            hist.append({"min": start, "max": end, "count": count})
+    for i in range(nbins):
+        b_lo, b_hi = edges[i], edges[i + 1]
+        last = i == nbins - 1
+        count = int(((turns >= b_lo) & ((turns <= b_hi) if last else (turns < b_hi))).sum())
+        hist.append({"min": b_lo, "max": b_hi if last else b_hi - 1, "count": count})
     return {
         "completed_games": len(games),
         "decisive_games": decisive_games,
@@ -922,6 +931,30 @@ def train_one_run(args, state, device, logger):
             "win_rate": None,
             "sample_games": len(sampled_games),
             "completed_games": int(selfplay_summary.get("completed_games", 0)),
+            # Effective parameters that produced this gen. lr is read from the
+            # optimizer because the live-reload block updates param_groups in
+            # place (not args.lr). value_weight/recency mirror the
+            # train_on_samples call defaults above.
+            "params": {
+                "sims": int(args.sims),
+                "count": int(args.count),
+                "target_samples": int(args.samples),
+                "lr": float(opt.param_groups[0]["lr"]),
+                "c_puct": float(args.c_puct),
+                "train_steps": int(args.train_steps),
+                "batch_size": int(args.batch_size),
+                "buffer_size": int(args.buffer_size),
+                "max_turns": int(args.max_turns),
+                "exploration_prob": float(args.exploration_prob),
+                "draw_value": float(args.draw_value),
+                "bootstrap_value": bool(args.bootstrap_value),
+                "skip_short_draw_turns": int(args.skip_short_draw_turns),
+                "sample_games": int(args.sample_games),
+                "sample_every": int(args.sample_every),
+                "keep_games": int(args.keep_games),
+                "value_weight": 1.0,
+                "recency": 1.0,
+            },
         }
         if gen_stats:
             metric.update(

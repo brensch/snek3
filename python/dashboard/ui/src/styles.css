@@ -72,20 +72,22 @@ main.stacked { display: flex; flex-direction: column; gap: 16px; padding: 16px; 
 .summary-stats b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
 .summary-stats em { display: block; color: var(--muted); font-size: 11px; font-style: normal; }
 .length-hist {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(28px, 1fr));
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: flex-end;   /* right aligned */
   align-items: end;
-  gap: 6px;
+  gap: 8px;                    /* deterministic spacing between bins */
   min-height: 72px;
   overflow: hidden;
   padding-bottom: 2px;
-  justify-self: stretch;
+  justify-self: stretch;       /* container spans the card so flex-end hugs the right edge */
 }
 .hist-bin {
   display: grid;
   grid-template-rows: 46px 14px 14px;
   justify-items: center;
-  min-width: 0;
+  width: max-content;          /* just enough width for this row's range label */
+  flex: 0 0 auto;
   color: var(--muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;

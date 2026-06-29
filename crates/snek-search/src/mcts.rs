@@ -387,6 +387,184 @@ impl MctsTree {
         }
         out
     }
+
+    /// Max tree depth (root = 0). Cheap: one pass over the arena, which is built
+    /// root-first so every child has a higher id than its parent.
+    fn max_depth(&self) -> u32 {
+        let mut depth = vec![0u32; self.nodes.len()];
+        let mut max = 0u32;
+        for (id, node) in self.nodes.iter().enumerate() {
+            for &(_, cid) in &node.children {
+                depth[cid] = depth[id] + 1;
+                max = max.max(depth[cid]);
+            }
+        }
+        max
+    }
+
+    /// Full snapshot of the search tree for inspection (the viewer's tree
+    /// explorer). Walks every node, decoding per-snake action stats, child edges,
+    /// and each node's board so a frontend can render and drill into any line.
+    fn snapshot(&self) -> TreeSnapshot {
+        // Depth via the parent map implied by children edges; the arena is built
+        // root-first so a single forward pass assigns every node its depth.
+        let mut depth = vec![0u32; self.nodes.len()];
+        for (id, node) in self.nodes.iter().enumerate() {
+            for &(_, cid) in &node.children {
+                depth[cid] = depth[id] + 1;
+            }
+        }
+
+        let nodes = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(id, node)| {
+                let actions = (0..self.n_snakes)
+                    .map(|i| {
+                        node.cands
+                            .get(i)
+                            .map(|cands| {
+                                cands
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(a, m)| {
+                                        let visits = node.nvisit[i][a];
+                                        let q = if visits > 0.0 {
+                                            node.wsum[i][a] / visits
+                                        } else {
+                                            0.0
+                                        };
+                                        ActionStat {
+                                            move_index: m.index(),
+                                            prior: node.prior[i][a],
+                                            visits,
+                                            q,
+                                        }
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<Vec<ActionStat>>>();
+
+                // Decode each child's joint index back into per-snake action
+                // slots (same mixed-radix layout `select` builds them with), then
+                // map those slots to move indices for display. Only expanded nodes
+                // carry candidate layouts; leaves have none and also no children.
+                let children = if node.expanded {
+                    let mut strides = [1u32; MAX_SNAKES];
+                    for i in (0..self.n_snakes).rev() {
+                        strides[i] = if i + 1 < self.n_snakes {
+                            strides[i + 1] * node.cands[i + 1].len() as u32
+                        } else {
+                            1
+                        };
+                    }
+                    node.children
+                        .iter()
+                        .map(|&(joint, cid)| {
+                            let moves = (0..self.n_snakes)
+                                .map(|i| {
+                                    let slot = ((joint / strides[i]) as usize)
+                                        % node.cands[i].len().max(1);
+                                    node.cands[i].get(slot).map(|m| m.index()).unwrap_or(0)
+                                })
+                                .collect();
+                            ChildEdge { child: cid, moves }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                let total_visits = node.nvisit.first().map(|v| v.iter().sum()).unwrap_or(0.0);
+                let snakes = node
+                    .board
+                    .snakes
+                    .iter()
+                    .map(|s| NodeSnake {
+                        alive: s.alive(),
+                        health: s.health,
+                        body: s.body.iter().map(|p| [p.x, p.y]).collect(),
+                    })
+                    .collect();
+
+                TreeNodeSnapshot {
+                    id,
+                    depth: depth[id],
+                    terminal: node.terminal,
+                    expanded: node.expanded,
+                    total_visits,
+                    term_value: if node.terminal {
+                        node.term_value[..self.n_snakes].to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                    actions,
+                    children,
+                    snakes,
+                }
+            })
+            .collect();
+
+        TreeSnapshot {
+            n_snakes: self.n_snakes,
+            nodes,
+        }
+    }
+}
+
+/// Per-action search stats for one snake at one node: the prior, accumulated
+/// visit count, and mean backed-up value (Q).
+#[derive(Clone, Debug)]
+pub struct ActionStat {
+    pub move_index: usize,
+    pub prior: f32,
+    pub visits: f32,
+    pub q: f32,
+}
+
+/// An edge from a node to one explored child, labelled with the per-snake move
+/// that produced it.
+#[derive(Clone, Debug)]
+pub struct ChildEdge {
+    pub child: usize,
+    /// Per-snake move index taken to reach `child`.
+    pub moves: Vec<usize>,
+}
+
+/// One snake's body on a snapshot node, head first as `[x, y]` pairs.
+#[derive(Clone, Debug)]
+pub struct NodeSnake {
+    pub alive: bool,
+    pub health: i16,
+    pub body: Vec<[i8; 2]>,
+}
+
+/// One node of a [`TreeSnapshot`].
+#[derive(Clone, Debug)]
+pub struct TreeNodeSnapshot {
+    pub id: usize,
+    pub depth: u32,
+    pub terminal: bool,
+    pub expanded: bool,
+    /// Sims that passed through this node.
+    pub total_visits: f32,
+    /// Terminal value per snake (empty unless `terminal`).
+    pub term_value: Vec<f32>,
+    /// Per-snake action stats: `actions[snake][candidate]`.
+    pub actions: Vec<Vec<ActionStat>>,
+    pub children: Vec<ChildEdge>,
+    /// Board at this node, for rendering.
+    pub snakes: Vec<NodeSnake>,
+}
+
+/// A full search-tree snapshot for inspection. Node 0 is the root.
+#[derive(Clone, Debug)]
+pub struct TreeSnapshot {
+    pub n_snakes: usize,
+    pub nodes: Vec<TreeNodeSnapshot>,
 }
 
 /// A batch of independent MCTS trees, one per game, driven in lockstep.
@@ -492,6 +670,18 @@ impl MctsForest {
             .map(|tree| tree.root_debug())
             .unwrap_or_default()
     }
+
+    /// Full tree snapshot for the first tree in this forest (the viewer uses this
+    /// to render and explore the exploration tree of a replayed move).
+    pub fn tree_snapshot_first(&self) -> Option<TreeSnapshot> {
+        self.trees.first().map(|tree| tree.snapshot())
+    }
+
+    /// Max search depth reached in the first tree (root = 0). Cheap enough to
+    /// record on every served move.
+    pub fn max_depth_first(&self) -> u32 {
+        self.trees.first().map(|tree| tree.max_depth()).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -580,6 +770,53 @@ mod tests {
         }
         // With 64 sims the tree must have grown well past the root.
         assert!(forest.trees[0].nodes.len() > 10);
+    }
+
+    /// The tree snapshot must walk every node without panicking — including the
+    /// unexpanded leaves that carry no candidate layout (a past regression) — and
+    /// report a sane depth and child topology.
+    #[test]
+    fn tree_snapshot_covers_leaves_and_depth() {
+        let mut forest = MctsForest::new(&[two_snake_board()], 1.5);
+        let n = forest.n_snakes;
+        let obs = forest.obs_size();
+        for _ in 0..48 {
+            let pending = forest.select();
+            if pending.is_empty() {
+                continue;
+            }
+            let mut buf = vec![0.0f32; pending.len() * n * obs];
+            forest.write_pending_obs(&pending, &mut buf);
+            let pol = vec![0.25f32; pending.len() * n * 4];
+            let val = vec![0.0f32; pending.len() * n];
+            forest.expand_backup(&pending, &pol, &val);
+        }
+
+        let snap = forest.tree_snapshot_first().expect("snapshot");
+        assert_eq!(snap.n_snakes, n);
+        assert_eq!(snap.nodes.len(), forest.trees[0].nodes.len());
+        assert_eq!(snap.nodes[0].id, 0);
+        assert_eq!(snap.nodes[0].depth, 0);
+
+        // Unexpanded nodes (freshly created leaves, terminals) carry no candidate
+        // layout — the snapshot must not try to decode child joints for them
+        // (a past panic indexed their empty candidate list). Every child move
+        // must still decode into the legal 0..4 range.
+        for nd in &snap.nodes {
+            if !nd.expanded {
+                assert!(nd.children.is_empty(), "unexpanded node has no children");
+                assert!(nd.actions.iter().all(|row| row.is_empty()));
+            }
+            for c in &nd.children {
+                assert_eq!(c.moves.len(), n);
+                assert!(c.moves.iter().all(|&m| m < 4));
+            }
+        }
+
+        let reported = forest.max_depth_first();
+        let computed = snap.nodes.iter().map(|nd| nd.depth).max().unwrap_or(0);
+        assert_eq!(reported, computed);
+        assert!(reported >= 1, "tree should be deeper than the root");
     }
 
     /// A move that leads straight to a losing terminal should attract fewer
