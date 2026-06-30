@@ -1,0 +1,69 @@
+syntax = "proto3";
+package snek;
+
+enum Phase {
+  IDLE = 0;
+  PLAYING = 1;
+  TRAINING = 2;
+  CHECKPOINT = 3;
+  STOPPING = 4;
+  STOPPED = 5;
+}
+
+message StatsFrame {
+  uint64 t_unix_ms = 1;
+  uint32 generation = 2;
+  Phase phase = 3;
+  double inferences_per_sec = 4;
+  double games_per_sec = 5;
+  uint64 completed_games_total = 6;
+  uint32 samples_collected = 7;
+  uint32 samples_target = 8;
+  double gpu_busy_pct = 9;
+  uint32 batch_avg_rows = 10;
+  double policy_loss = 11;
+  double value_loss = 12;
+  double target_entropy = 13;
+  double gpu_rows_per_sec = 14;
+}
+
+message Point {
+  uint32 x = 1;
+  uint32 y = 2;
+}
+
+message Snake {
+  bool alive = 1;
+  uint32 health = 2;
+  repeated Point body = 3;
+}
+
+message GameSnapshot {
+  uint32 id = 1;
+  uint32 turn = 2;
+  uint32 board_w = 3;
+  uint32 board_h = 4;
+  repeated Snake snakes = 5;
+  repeated Point food = 6;
+}
+
+message GamesSnapshot {
+  uint64 t_unix_ms = 1;
+  repeated GameSnapshot games = 2;
+}
+
+message GenerationSummary {
+  uint32 generation = 1;
+  double policy_loss = 2;
+  double value_loss = 3;
+  double win_rate = 4;
+  uint32 completed_games = 5;
+  double seconds = 6;
+}
+
+message RunState {
+  Phase phase = 1;
+  uint32 generation = 2;
+  string run_id = 3;
+  bool running = 4;
+}

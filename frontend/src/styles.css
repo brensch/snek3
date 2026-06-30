@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .btn {
+    @apply rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 hover:border-sky-500 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-danger {
+    @apply rounded border border-red-900 bg-red-950 px-3 py-2 text-sm text-red-100 hover:border-red-500 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .input {
+    @apply rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-sm text-slate-100;
+  }
+
+  .panel {
+    @apply rounded border border-slate-800 bg-slate-900 p-4;
+  }
+
+  .section-title {
+    @apply text-xs font-semibold uppercase tracking-wide text-slate-400;
+  }
+}

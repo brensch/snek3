@@ -1,8 +1,9 @@
 # Rust (root workspace and the detached crates/snek-py workspace each have one)
 target/
 
-# Node (dashboard UI build deps; the built static/ output IS committed)
+# Node
 node_modules/
+frontend/dist/
 
 # Python
 .venv/

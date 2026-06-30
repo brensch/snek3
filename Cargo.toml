@@ -3,8 +3,8 @@ resolver = "2"
 members = [
     "crates/snek-core",
     "crates/snek-search",
-    # "crates/snek-py" is added in Phase 2 once maturin/PyO3 are set up; it
-    # requires Python linkage that would otherwise break plain `cargo test`.
+    # Libtorch crates are standalone so plain `cargo test` does not require
+    # libtorch/CUDA loader setup.
 ]
 
 [workspace.package]
