@@ -96,6 +96,28 @@ pub fn mask_obvious_immediate_deaths(board: &Board, snake_idx: usize, probs: &[f
     out
 }
 
+/// The single forced move index for snake `me`, if it has exactly one legal
+/// candidate (reversing-onto-neck and off-board moves dropped — the same move
+/// set the tree branches over). When a snake is forced, search cannot change its
+/// answer, so a caller that only needs `me`'s move can skip the search entirely.
+/// Returns `None` if the board is terminal, `me` is dead, or `me` has 0 or ≥2
+/// candidates.
+pub fn forced_move(board: &Board, me: usize) -> Option<usize> {
+    if board.is_terminal() {
+        return None;
+    }
+    let s = board.snakes.get(me)?;
+    if !s.alive() {
+        return None;
+    }
+    let cands = candidates(board, me);
+    if cands.len() == 1 {
+        Some(cands[0].index())
+    } else {
+        None
+    }
+}
+
 /// One edge taken during a descent: the node and, per snake, which candidate
 /// index was selected. Used to credit visits/values on backup.
 #[derive(Clone)]
@@ -145,6 +167,13 @@ impl MctsNode {
     }
 }
 
+/// One leaf collected during a batched (virtual-loss) selection round, with the
+/// path taken to reach it so the real backup can undo the virtual loss.
+struct PendingLeaf {
+    leaf: usize,
+    path: Vec<Edge>,
+}
+
 struct MctsTree {
     nodes: Vec<MctsNode>,
     n_snakes: usize,
@@ -154,6 +183,12 @@ struct MctsTree {
     pending_path: Vec<Edge>,
     /// Node id of the in-flight leaf to evaluate (None if terminal/no-op).
     pending_leaf: Option<usize>,
+    /// Leaves collected this batched round (used only by the batched serving
+    /// path; the single-leaf self-play path leaves this empty).
+    batch: Vec<PendingLeaf>,
+    /// Unexpanded leaves already collected this round, so a second descent that
+    /// lands on the same leaf doesn't double-expand it.
+    inflight: std::collections::HashSet<usize>,
 }
 
 impl MctsTree {
@@ -166,7 +201,210 @@ impl MctsTree {
             draw_value,
             pending_path: Vec::new(),
             pending_leaf: None,
+            batch: Vec::new(),
+            inflight: std::collections::HashSet::new(),
         }
+    }
+
+    /// Mixed-radix strides for a node's candidate layout (agent 0 most
+    /// significant), matching the joint-index convention used everywhere else.
+    fn node_strides(&self, id: usize) -> [u32; MAX_SNAKES] {
+        let node = &self.nodes[id];
+        let mut strides = [1u32; MAX_SNAKES];
+        for i in (0..self.n_snakes).rev() {
+            strides[i] = if i + 1 < self.n_snakes {
+                strides[i + 1] * node.cands[i + 1].len() as u32
+            } else {
+                1
+            };
+        }
+        strides
+    }
+
+    /// Add (`+vloss` visits, `-vloss` value) along `path` so concurrent descents
+    /// in the same round are steered toward *different* leaves (virtual loss).
+    fn apply_virtual_loss(&mut self, path: &[Edge], vloss: f32) {
+        for edge in path {
+            let node = &mut self.nodes[edge.node];
+            for i in 0..self.n_snakes {
+                let a = edge.action_idx[i];
+                node.nvisit[i][a] += vloss;
+                node.wsum[i][a] -= vloss;
+            }
+        }
+    }
+
+    /// Undo the virtual loss on `path` (used when a descent collides with an
+    /// already-collected leaf and is abandoned).
+    fn remove_virtual_loss(&mut self, path: &[Edge], vloss: f32) {
+        for edge in path {
+            let node = &mut self.nodes[edge.node];
+            for i in 0..self.n_snakes {
+                let a = edge.action_idx[i];
+                node.nvisit[i][a] -= vloss;
+                node.wsum[i][a] += vloss;
+            }
+        }
+    }
+
+    /// Real backup along `path`: remove the virtual loss applied during selection
+    /// and credit the true `value`, leaving stats exactly as a sequential visit
+    /// would.
+    fn backup_path(&mut self, path: &[Edge], value: &[f32; MAX_SNAKES], vloss: f32) {
+        for edge in path {
+            let node = &mut self.nodes[edge.node];
+            for (i, &v) in value.iter().enumerate().take(self.n_snakes) {
+                let a = edge.action_idx[i];
+                node.nvisit[i][a] += 1.0 - vloss;
+                node.wsum[i][a] += v + vloss;
+            }
+        }
+    }
+
+    /// Batched selection with virtual loss: descend up to `max_leaves` times,
+    /// collecting distinct unexpanded leaves for one batched net eval. Terminal
+    /// leaves reached en route are backed up immediately. Returns the collected
+    /// leaf node ids (their boards/paths are held in `self.batch` for
+    /// `write`/`expand_backup`). A descent that lands on an already-collected
+    /// leaf ends the round (its virtual loss is rolled back).
+    fn select_batch(&mut self, max_leaves: usize, vloss: f32) -> Vec<usize> {
+        self.batch.clear();
+        self.inflight.clear();
+        let n = self.n_snakes;
+        let mut leaves = Vec::new();
+        'round: for _ in 0..max_leaves {
+            let mut path: Vec<Edge> = Vec::new();
+            let mut id = 0usize;
+            loop {
+                if self.nodes[id].terminal {
+                    let v = self.nodes[id].term_value;
+                    self.backup_path(&path, &v, vloss);
+                    break;
+                }
+                if !self.nodes[id].expanded {
+                    if self.inflight.contains(&id) {
+                        // Collision (e.g. forced line virtual loss can't separate):
+                        // abandon this descent and stop collecting more.
+                        self.remove_virtual_loss(&path, vloss);
+                        break 'round;
+                    }
+                    self.inflight.insert(id);
+                    leaves.push(id);
+                    self.batch.push(PendingLeaf { leaf: id, path });
+                    break;
+                }
+                let strides = self.node_strides(id);
+                let (joint, action_idx) = self.select_joint(id, &strides);
+                path.push(Edge {
+                    node: id,
+                    action_idx,
+                });
+                self.apply_virtual_loss(&path[path.len() - 1..], vloss);
+                match self.nodes[id].child(joint) {
+                    Some(cid) => id = cid,
+                    None => {
+                        let mut mv = [DUMMY_MOVE; MAX_SNAKES];
+                        {
+                            let node = &self.nodes[id];
+                            for i in 0..n {
+                                mv[i] = node.cands[i][action_idx[i]];
+                            }
+                        }
+                        let mut child_board = self.nodes[id].board.clone();
+                        child_board.step(&mv[..n]);
+                        let cid = self.nodes.len();
+                        let child = MctsNode::leaf(child_board, self.draw_value);
+                        let is_terminal = child.terminal;
+                        let term_value = child.term_value;
+                        self.nodes.push(child);
+                        self.nodes[id].children.push((joint, cid));
+                        if is_terminal {
+                            self.backup_path(&path, &term_value, vloss);
+                        } else {
+                            self.inflight.insert(cid);
+                            leaves.push(cid);
+                            self.batch.push(PendingLeaf { leaf: cid, path });
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        leaves
+    }
+
+    /// Expand every leaf collected by [`select_batch`] with its priors and back
+    /// up its value (virtual loss removed). `policies` is `[batch, n_snakes, 4]`
+    /// and `values` is `[batch, n_snakes]`, aligned with the returned leaf order.
+    fn expand_backup_batch(&mut self, policies: &[f32], values: &[f32], vloss: f32) {
+        let n = self.n_snakes;
+        let batch = std::mem::take(&mut self.batch);
+        for (pos, pending) in batch.into_iter().enumerate() {
+            let id = pending.leaf;
+            let pol = &policies[pos * n * 4..(pos + 1) * n * 4];
+            self.expand_leaf(id, pol);
+            let mut leaf_value = [0.0f32; MAX_SNAKES];
+            for i in 0..n {
+                leaf_value[i] = if self.nodes[id].board.snakes[i].alive() {
+                    values[pos * n + i]
+                } else {
+                    -1.0
+                };
+            }
+            self.backup_path(&pending.path, &leaf_value, vloss);
+        }
+        self.inflight.clear();
+    }
+
+    /// Set candidates/priors on an unexpanded leaf (death-masked, normalized) —
+    /// the expansion half of `expand_backup`, factored out for the batched path.
+    fn expand_leaf(&mut self, id: usize, policy: &[f32]) {
+        let n = self.n_snakes;
+        let board = self.nodes[id].board.clone();
+        let cands: Vec<Vec<Move>> = (0..n).map(|i| candidates(&board, i)).collect();
+        let mut prior = Vec::with_capacity(n);
+        let mut nvisit = Vec::with_capacity(n);
+        let mut wsum = Vec::with_capacity(n);
+        for i in 0..n {
+            let k = cands[i].len();
+            let masked_policy = mask_obvious_immediate_deaths(&board, i, &policy[i * 4..i * 4 + 4]);
+            let mut p = vec![0.0f32; k];
+            let mut s = 0.0f32;
+            for (a, m) in cands[i].iter().enumerate() {
+                p[a] = masked_policy[m.index()];
+                s += p[a];
+            }
+            if s > 1e-8 {
+                for x in p.iter_mut() {
+                    *x /= s;
+                }
+            } else if k > 0 {
+                let safe_count = cands[i]
+                    .iter()
+                    .filter(|&&m| !obvious_immediate_death(&board, i, m))
+                    .count();
+                if safe_count > 0 {
+                    let u = 1.0 / safe_count as f32;
+                    for (a, x) in p.iter_mut().enumerate() {
+                        if !obvious_immediate_death(&board, i, cands[i][a]) {
+                            *x = u;
+                        }
+                    }
+                } else {
+                    let u = 1.0 / k as f32;
+                    p.fill(u);
+                }
+            }
+            prior.push(p);
+            nvisit.push(vec![0.0f32; k]);
+            wsum.push(vec![0.0f32; k]);
+        }
+        let node = &mut self.nodes[id];
+        node.cands = cands;
+        node.prior = prior;
+        node.nvisit = nvisit;
+        node.wsum = wsum;
+        node.expanded = true;
     }
 
     /// DUCT-PUCT: per snake, argmax over its candidates of
@@ -291,54 +529,10 @@ impl MctsTree {
             None => return,
         };
         let n = self.n_snakes;
-        let board = self.nodes[id].board.clone();
-        let cands: Vec<Vec<Move>> = (0..n).map(|i| candidates(&board, i)).collect();
-        let mut prior = Vec::with_capacity(n);
-        let mut nvisit = Vec::with_capacity(n);
-        let mut wsum = Vec::with_capacity(n);
-        for i in 0..n {
-            let k = cands[i].len();
-            let masked_policy = mask_obvious_immediate_deaths(&board, i, &policy[i * 4..i * 4 + 4]);
-            let mut p = vec![0.0f32; k];
-            let mut s = 0.0f32;
-            for (a, m) in cands[i].iter().enumerate() {
-                p[a] = masked_policy[m.index()];
-                s += p[a];
-            }
-            if s > 1e-8 {
-                for x in p.iter_mut() {
-                    *x /= s;
-                }
-            } else if k > 0 {
-                let safe_count = cands[i]
-                    .iter()
-                    .filter(|&&m| !obvious_immediate_death(&board, i, m))
-                    .count();
-                if safe_count > 0 {
-                    let u = 1.0 / safe_count as f32;
-                    for (a, x) in p.iter_mut().enumerate() {
-                        if !obvious_immediate_death(&board, i, cands[i][a]) {
-                            *x = u;
-                        }
-                    }
-                } else {
-                    let u = 1.0 / k as f32;
-                    p.fill(u);
-                }
-            }
-            prior.push(p);
-            nvisit.push(vec![0.0f32; k]);
-            wsum.push(vec![0.0f32; k]);
-        }
-        let node = &mut self.nodes[id];
-        node.cands = cands;
-        node.prior = prior;
-        node.nvisit = nvisit;
-        node.wsum = wsum;
-        node.expanded = true;
+        self.expand_leaf(id, policy);
         let mut leaf_value = *value;
         for (i, v) in leaf_value.iter_mut().enumerate().take(n) {
-            if !board.snakes[i].alive() {
+            if !self.nodes[id].board.snakes[i].alive() {
                 *v = -1.0;
             }
         }
@@ -570,6 +764,10 @@ pub struct TreeSnapshot {
 /// A batch of independent MCTS trees, one per game, driven in lockstep.
 pub struct MctsForest {
     trees: Vec<MctsTree>,
+    /// Trees excluded from further selection (their root policy is already exact
+    /// — see [`MctsForest::freeze_forced_roots`]). Frozen trees drop out of the
+    /// eval batch, so self-play stops spending sims on already-decided games.
+    frozen: Vec<bool>,
     pub n_snakes: usize,
     pub channels: usize,
     pub height: usize,
@@ -593,6 +791,7 @@ impl MctsForest {
                 .iter()
                 .map(|b| MctsTree::new_with_draw_value(b.clone(), c_puct, draw_value))
                 .collect(),
+            frozen: vec![false; boards.len()],
             n_snakes,
             channels: NUM_CHANNELS,
             height,
@@ -606,12 +805,53 @@ impl MctsForest {
 
     /// Run one selection step across all trees. Returns the list of tree indices
     /// whose pending leaf needs a network evaluation (terminal leaves were
-    /// already backed up). The caller then evaluates exactly those.
+    /// already backed up). Frozen trees ([`freeze_forced_roots`]) are skipped.
+    /// The caller then evaluates exactly the returned trees.
     pub fn select(&mut self) -> Vec<usize> {
-        self.trees.par_iter_mut().for_each(|t| t.select());
+        self.trees
+            .par_iter_mut()
+            .zip(self.frozen.par_iter())
+            .for_each(|(t, &fz)| {
+                if fz {
+                    t.pending_leaf = None;
+                } else {
+                    t.select();
+                }
+            });
         (0..self.trees.len())
-            .filter(|&i| self.trees[i].pending_leaf.is_some())
+            .filter(|&i| !self.frozen[i] && self.trees[i].pending_leaf.is_some())
             .collect()
+    }
+
+    /// Freeze every still-active tree whose root decision is already exact *no
+    /// matter how many more sims run*: all alive snakes have ≤1 legal candidate,
+    /// so each snake's root visit policy is one-hot on its single move. Call this
+    /// once the roots have been expanded and credited at least one visit (so the
+    /// one-hot is materialized in the visit counts). Frozen trees are then skipped
+    /// by [`select`], dropping them from the eval batch. Returns the number newly
+    /// frozen. (Terminal-root trees already produce no leaves, so are left alone.)
+    pub fn freeze_forced_roots(&mut self) -> usize {
+        let mut newly = 0;
+        for i in 0..self.trees.len() {
+            if self.frozen[i] {
+                continue;
+            }
+            let root = &self.trees[i].nodes[0];
+            if !root.expanded {
+                continue;
+            }
+            let board = &root.board;
+            let all_forced = (0..self.n_snakes).all(|s| {
+                s >= board.snakes.len()
+                    || !board.snakes[s].alive()
+                    || candidates(board, s).len() <= 1
+            });
+            if all_forced {
+                self.frozen[i] = true;
+                newly += 1;
+            }
+        }
+        newly
     }
 
     /// Write observations for the `pending` trees (from [`select`]) into `out`,
@@ -642,6 +882,47 @@ impl MctsForest {
             let mut val = [0.0f32; MAX_SNAKES];
             val[..n].copy_from_slice(&values[pos * n..(pos + 1) * n]);
             self.trees[ti].expand_backup(pol, &val);
+        }
+    }
+
+    /// Batched virtual-loss selection on the **first tree only** (the serving
+    /// case is a single board). Collects up to `max_leaves` distinct leaves for
+    /// one batched net forward; terminal leaves are backed up immediately.
+    /// Returns the number of leaves collected (0 once the tree can't produce a
+    /// fresh leaf — e.g. fully terminal). Pair with [`write_batch_obs_first`] and
+    /// [`expand_backup_batch_first`].
+    pub fn select_batch_first(&mut self, max_leaves: usize, vloss: f32) -> usize {
+        match self.trees.first_mut() {
+            Some(tree) => tree.select_batch(max_leaves, vloss).len(),
+            None => 0,
+        }
+    }
+
+    /// Write observations for the first tree's collected batch into `out`, laid
+    /// out `[leaf, agent]` (agent innermost), `batch_len * n_snakes * obs_size`
+    /// floats.
+    pub fn write_batch_obs_first(&self, out: &mut [f32]) {
+        let obs = self.obs_size();
+        let chunk = self.n_snakes * obs;
+        let Some(tree) = self.trees.first() else {
+            return;
+        };
+        out.par_chunks_mut(chunk)
+            .zip(tree.batch.par_iter())
+            .for_each(|(buf, pending)| {
+                let board = &tree.nodes[pending.leaf].board;
+                for agent in 0..self.n_snakes {
+                    let base = agent * obs;
+                    encode_into(board, agent, &mut buf[base..base + obs]);
+                }
+            });
+    }
+
+    /// Expand+back up the first tree's batch (removing virtual loss). `policies`
+    /// is `[batch, n_snakes, 4]`, `values` is `[batch, n_snakes]`.
+    pub fn expand_backup_batch_first(&mut self, policies: &[f32], values: &[f32], vloss: f32) {
+        if let Some(tree) = self.trees.first_mut() {
+            tree.expand_backup_batch(policies, values, vloss);
         }
     }
 
@@ -681,6 +962,33 @@ impl MctsForest {
     /// record on every served move.
     pub fn max_depth_first(&self) -> u32 {
         self.trees.first().map(|tree| tree.max_depth()).unwrap_or(0)
+    }
+
+    /// `(best_visits, second_visits)` over snake `me`'s root candidate visit
+    /// counts in the first tree, restricted to unmasked (positive-prior)
+    /// candidates — the only ones `choose_root_action` can pick. Deadline-bound
+    /// serving uses this to stop once the leader is mathematically uncatchable in
+    /// the remaining budget. `None` until the root is expanded.
+    pub fn root_visit_gap_first(&self, me: usize) -> Option<(f32, f32)> {
+        let tree = self.trees.first()?;
+        let root = &tree.nodes[0];
+        if !root.expanded || me >= self.n_snakes {
+            return None;
+        }
+        let has_prior = root.prior[me].iter().any(|&p| p > 1e-8);
+        let (mut best, mut second) = (0.0f32, 0.0f32);
+        for (a, &nv) in root.nvisit[me].iter().enumerate() {
+            if has_prior && root.prior[me][a] <= 1e-8 {
+                continue;
+            }
+            if nv > best {
+                second = best;
+                best = nv;
+            } else if nv > second {
+                second = nv;
+            }
+        }
+        Some((best, second))
     }
 }
 
@@ -914,6 +1222,176 @@ mod tests {
         let root = &forest.trees[0].nodes[0];
         assert_eq!(root.prior[0][up_idx], 0.0);
         assert_eq!(root.nvisit[0][up_idx], 0.0);
+    }
+
+    /// Batched virtual-loss selection must grow the tree, leave no virtual-loss
+    /// residue (all visit counts non-negative and root visits integral), and
+    /// produce a valid policy — i.e. behave like the single-leaf path at the root.
+    #[test]
+    fn mcts_batched_selection_is_consistent() {
+        let mut forest = MctsForest::new(&[two_snake_board()], 1.5);
+        let n = forest.n_snakes;
+        let obs = forest.obs_size();
+        for _ in 0..32 {
+            let k = forest.select_batch_first(8, 1.0);
+            if k == 0 {
+                continue;
+            }
+            let mut buf = vec![0.0f32; k * n * obs];
+            forest.write_batch_obs_first(&mut buf);
+            let pol = vec![0.25f32; k * n * 4];
+            let val = vec![0.0f32; k * n];
+            forest.expand_backup_batch_first(&pol, &val, 1.0);
+        }
+        let (policies, values) = forest.root_targets();
+        for i in 0..n {
+            let p = &policies[i * 4..i * 4 + 4];
+            let sum: f32 = p.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-3, "snake {i} policy sums to {sum}");
+            assert!(p.iter().all(|&x| x >= 0.0 && x.is_finite()));
+        }
+        assert!(values.iter().all(|v| v.is_finite()));
+        // No virtual-loss residue: every node's visit counts are non-negative and
+        // each root action's visit count is (near-)integral after backups.
+        for node in &forest.trees[0].nodes {
+            for row in &node.nvisit {
+                for &nv in row {
+                    assert!(nv >= -1e-4, "negative visit residue {nv}");
+                    assert!((nv - nv.round()).abs() < 1e-3, "non-integral visits {nv}");
+                }
+            }
+        }
+        assert!(
+            forest.trees[0].nodes.len() > 10,
+            "tree must grow past the root"
+        );
+    }
+
+    /// Cost: a snake with a single legal move is detected as forced, so serving
+    /// can skip the search entirely (zero sims, zero net forwards). A snake with
+    /// real choices is not forced.
+    #[test]
+    fn forced_move_skips_search_only_when_truly_forced() {
+        let mut b = Board::new(11, 11);
+        // Snake 0 in the corner, neck above: Up=neck, Down/Left off-board, only
+        // Right is legal -> forced.
+        b.add_snake(&[Point::new(0, 0), Point::new(0, 1)]);
+        // Snake 1 in open space: Down/Left/Right all legal -> not forced.
+        b.add_snake(&[Point::new(5, 5), Point::new(5, 6)]);
+        assert_eq!(forced_move(&b, 0), Some(Move::Right.index()));
+        assert_eq!(forced_move(&b, 1), None);
+    }
+
+    /// Cost: each batched round is one net forward, so collecting up to `k` leaves
+    /// per round means far fewer forwards than the single-leaf path (1 leaf = 1
+    /// forward). Verify a round really batches ~k leaves and that overall we
+    /// evaluate strictly more leaves than we spend forward passes.
+    #[test]
+    fn batched_selection_amortizes_forward_passes() {
+        let k = 16;
+        let mut forest = MctsForest::new(&[two_snake_board()], 1.5);
+        let n = forest.n_snakes;
+        let obs = forest.obs_size();
+        let (mut rounds, mut leaves, mut max_round) = (0usize, 0usize, 0usize);
+        for _ in 0..20 {
+            let got = forest.select_batch_first(k, 1.0); // == one net forward
+            if got == 0 {
+                break;
+            }
+            rounds += 1;
+            leaves += got;
+            max_round = max_round.max(got);
+            let mut buf = vec![0.0f32; got * n * obs];
+            forest.write_batch_obs_first(&mut buf);
+            let pol = vec![0.25f32; got * n * 4];
+            let val = vec![0.0f32; got * n];
+            forest.expand_backup_batch_first(&pol, &val, 1.0);
+        }
+        // Single-leaf serving would need one forward *per leaf*; batching needs one
+        // forward *per round*, so leaves > rounds proves the amortization.
+        assert!(
+            leaves > rounds,
+            "batching must evaluate >1 leaf per forward (leaves={leaves}, rounds={rounds})"
+        );
+        // And an open board should fill close to a full batch in a round.
+        assert!(
+            max_round >= k / 2,
+            "a round should batch ~k leaves, got at most {max_round}"
+        );
+    }
+
+    /// The early-stop signal (`root_visit_gap_first`) reports the leading and
+    /// runner-up root visit counts for the served snake, ordered best >= second —
+    /// the quantity the serving loop compares against the remaining budget.
+    #[test]
+    fn root_visit_gap_orders_leader_and_runner_up() {
+        let mut forest = MctsForest::new(&[two_snake_board()], 1.5);
+        let n = forest.n_snakes;
+        for _ in 0..128 {
+            let pending = forest.select();
+            if pending.is_empty() {
+                continue;
+            }
+            // Bias snake 0's prior hard toward one move so a clear leader emerges.
+            let mut pol = vec![0.25f32; pending.len() * n * 4];
+            for leaf in 0..pending.len() {
+                let base = leaf * n * 4;
+                pol[base..base + 4].copy_from_slice(&[0.9, 0.0333, 0.0333, 0.0334]);
+            }
+            let val = vec![0.0f32; pending.len() * n];
+            forest.expand_backup(&pending, &pol, &val);
+        }
+        let (best, second) = forest.root_visit_gap_first(0).expect("root expanded");
+        assert!(best >= second, "best {best} should be >= second {second}");
+        assert!(best > 0.0, "leader must have visits");
+    }
+
+    /// Cost (self-play Tier 1): a game where every alive snake has one legal move
+    /// is frozen after the root is credited — it drops out of selection (no more
+    /// sims spent) while its recorded policy stays an exact one-hot. A normal game
+    /// keeps searching.
+    #[test]
+    fn freeze_forced_roots_drops_decided_games_with_exact_policy() {
+        // game 0: both snakes cornered with a single legal move -> fully forced.
+        let mut forced = Board::new(11, 11);
+        forced.add_snake(&[Point::new(0, 0), Point::new(0, 1)]); // only Right
+        forced.add_snake(&[Point::new(10, 10), Point::new(10, 9)]); // only Left
+                                                                    // game 1: open board -> not forced.
+        let mut forest = MctsForest::new(&[forced, two_snake_board()], 1.5);
+        let n = forest.n_snakes;
+
+        let mut frozen_count = 0;
+        for sim in 0..8 {
+            let pending = forest.select();
+            if !pending.is_empty() {
+                let pol = vec![0.25f32; pending.len() * n * 4];
+                let val = vec![0.0f32; pending.len() * n];
+                forest.expand_backup(&pending, &pol, &val);
+            }
+            if sim == 1 {
+                frozen_count = forest.freeze_forced_roots();
+            }
+        }
+        assert_eq!(frozen_count, 1, "only the fully-forced game freezes");
+
+        // Cost: the frozen game is no longer selected (dropped from the batch).
+        for _ in 0..4 {
+            assert!(
+                !forest.select().contains(&0),
+                "frozen game 0 must not be selected again"
+            );
+        }
+        // Correctness: its target is the exact one-hot (Right for snake 0, Left
+        // for snake 1), identical to what a full search would produce.
+        let (policies, _) = forest.root_targets();
+        assert!(
+            (policies[Move::Right.index()] - 1.0).abs() < 1e-6,
+            "snake0 -> Right"
+        );
+        assert!(
+            (policies[4 + Move::Left.index()] - 1.0).abs() < 1e-6,
+            "snake1 -> Left"
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ edition = "2021"
 [dependencies]
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "cuda", "ndarray"] }
 ndarray = "0.16"
+rand = "0.8"
 
 [profile.release]
 opt-level = 3

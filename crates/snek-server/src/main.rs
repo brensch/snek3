@@ -22,6 +22,7 @@
 //!   SNEK_GAME_IDLE_SECS  finalize a silent game as incomplete after this many seconds (default 300)
 //!   SNEK_LOG_ZSTD_LEVEL  zstd level for game logs, compressed at game end (default 19)
 
+mod orchestrator;
 mod recorder;
 mod viewer;
 
@@ -58,6 +59,15 @@ struct App {
     model_sha: String,
 }
 
+#[derive(Clone)]
+struct AppSettings {
+    cfg: Config,
+    default_timeout_ms: u64,
+    deadline_margin_ms: u64,
+    idle_timeout: Duration,
+    zstd_level: i32,
+}
+
 /// Hex SHA-256 of the model file, or `"unknown"` if it can't be read.
 fn model_hash(path: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -79,72 +89,48 @@ fn main() {
     let model = std::env::var("SNEK_MODEL").unwrap_or_else(|_| "model.onnx".into());
     let port: u16 = env_or("SNEK_PORT", 8000);
     let threads: usize = env_or("SNEK_THREADS", 2usize).max(1);
-    let default_timeout_ms = env_or("SNEK_TIMEOUT_MS", 500u64);
-    let deadline_margin_ms = env_or("SNEK_DEADLINE_MARGIN_MS", 150u64);
     let log_dir = move_log_dir();
-    let idle_timeout = Duration::from_secs(env_or("SNEK_GAME_IDLE_SECS", 300u64));
-    let zstd_level: i32 = env_or("SNEK_LOG_ZSTD_LEVEL", 19i32);
-    let cfg = Config {
-        max_sims: max_sims_from_env(),
-        c_puct: env_or("SNEK_C_PUCT", 1.5f32),
-        draw_value: env_or("SNEK_DRAW_VALUE", -0.25f32),
-        eval_chunk: env_or("SNEK_EVAL_CHUNK", 4096usize),
+    let settings = AppSettings {
+        cfg: Config {
+            max_sims: max_sims_from_env(),
+            c_puct: env_or("SNEK_C_PUCT", 1.5f32),
+            draw_value: env_or("SNEK_DRAW_VALUE", -0.25f32),
+            eval_chunk: env_or("SNEK_EVAL_CHUNK", 4096usize),
+            leaves_per_sim: env_or("SNEK_LEAVES_PER_SIM", 8usize).max(1),
+            virtual_loss: env_or("SNEK_VIRTUAL_LOSS", 1.0f32),
+        },
+        default_timeout_ms: env_or("SNEK_TIMEOUT_MS", 500u64),
+        deadline_margin_ms: env_or("SNEK_DEADLINE_MARGIN_MS", 150u64),
+        idle_timeout: Duration::from_secs(env_or("SNEK_GAME_IDLE_SECS", 300u64)),
+        zstd_level: env_or("SNEK_LOG_ZSTD_LEVEL", 19i32),
     };
 
-    let net =
-        Net::load(&model).unwrap_or_else(|e| panic!("failed to load ONNX model '{model}': {e}"));
-    // Content hash of the loaded weights, recorded with each game so the viewer
-    // can tell whether a replay used the same model the game was played with
-    // (the weights file, e.g. `latest.onnx`, can be overwritten by training).
-    let model_sha = model_hash(&model);
+    let app = build_app(model.clone(), log_dir.clone(), &settings);
     eprintln!(
         "snek-server: model={model} sha={} port={port} threads={threads} max_sims={} timeout_ms={} deadline_margin_ms={} c_puct={} draw_value={}",
-        short_sha(&model_sha),
-        cfg.max_sims,
-        default_timeout_ms,
-        deadline_margin_ms,
-        cfg.c_puct,
-        cfg.draw_value
+        short_sha(&app.model_sha),
+        settings.cfg.max_sims,
+        settings.default_timeout_ms,
+        settings.deadline_margin_ms,
+        settings.cfg.c_puct,
+        settings.cfg.draw_value
     );
-
-    let recorder_cfg = serde_json::json!({
-        "max_sims": cfg.max_sims,
-        "c_puct": cfg.c_puct,
-        "draw_value": cfg.draw_value,
-        "eval_chunk": cfg.eval_chunk,
-        "default_timeout_ms": default_timeout_ms,
-        "deadline_margin_ms": deadline_margin_ms,
-        "model_sha": model_sha,
-    });
-    let recorder = Recorder::spawn(
-        log_dir.clone(),
-        model,
-        recorder_cfg,
-        idle_timeout,
-        zstd_level,
-    );
-    if recorder.is_some() {
+    if app.recorder.is_some() {
         eprintln!(
             "snek-server: recording games to {} (idle_timeout={}s, zstd={})",
             log_dir
                 .as_ref()
                 .map(|d| d.display().to_string())
                 .unwrap_or_default(),
-            idle_timeout.as_secs(),
-            zstd_level
+            settings.idle_timeout.as_secs(),
+            settings.zstd_level
         );
     }
 
-    let app = Arc::new(App {
-        net: Mutex::new(net),
-        cfg,
-        default_timeout_ms,
-        deadline_margin_ms,
-        log_dir,
-        parse_err_lock: Mutex::new(()),
-        recorder,
-        model_sha,
-    });
+    if let Some(arena) = orchestrator::ArenaConfig::from_env(&model, log_dir.clone(), &settings) {
+        let arena_settings = settings.clone();
+        std::thread::spawn(move || orchestrator::run(arena, arena_settings));
+    }
 
     let server = Arc::new(Server::http(("0.0.0.0", port)).expect("bind"));
     let mut handles = Vec::new();
@@ -156,6 +142,41 @@ fn main() {
     for h in handles {
         let _ = h.join();
     }
+}
+
+fn build_app(model: String, log_dir: Option<PathBuf>, settings: &AppSettings) -> Arc<App> {
+    let net =
+        Net::load(&model).unwrap_or_else(|e| panic!("failed to load ONNX model '{model}': {e}"));
+    // Content hash of the loaded weights, recorded with each game so the viewer
+    // can tell whether a replay used the same model the game was played with
+    // (the weights file, e.g. `latest.onnx`, can be overwritten by training).
+    let model_sha = model_hash(&model);
+    let recorder_cfg = serde_json::json!({
+        "max_sims": settings.cfg.max_sims,
+        "c_puct": settings.cfg.c_puct,
+        "draw_value": settings.cfg.draw_value,
+        "eval_chunk": settings.cfg.eval_chunk,
+        "default_timeout_ms": settings.default_timeout_ms,
+        "deadline_margin_ms": settings.deadline_margin_ms,
+        "model_sha": model_sha,
+    });
+    let recorder = Recorder::spawn(
+        log_dir.clone(),
+        model,
+        recorder_cfg,
+        settings.idle_timeout,
+        settings.zstd_level,
+    );
+    Arc::new(App {
+        net: Mutex::new(net),
+        cfg: settings.cfg.clone(),
+        default_timeout_ms: settings.default_timeout_ms,
+        deadline_margin_ms: settings.deadline_margin_ms,
+        log_dir,
+        parse_err_lock: Mutex::new(()),
+        recorder,
+        model_sha,
+    })
 }
 
 fn worker(server: &Server, app: &App) {

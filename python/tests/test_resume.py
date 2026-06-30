@@ -12,6 +12,10 @@ def _gens(run_dir: Path):
     return [json.loads(line)["gen"] for line in lines if line.strip()]
 
 
+def _model_snapshots(run_dir: Path):
+    return sorted(p.name for p in (run_dir / "models").glob("gen_*.pt"))
+
+
 def _train(runs_dir: Path, run_id: str, generations: int, fresh: bool = False):
     cmd = [
         sys.executable, "-m", "azsnek.train",
@@ -31,11 +35,21 @@ def test_rerunning_same_run_id_auto_resumes(tmp_path):
     run_dir = tmp_path / "r"
     assert _gens(run_dir) == [0, 1]
     assert run_dir.joinpath("state.pt").exists(), "full training state is saved"
+    assert _model_snapshots(run_dir) == ["gen_0000.pt", "gen_0001.pt"]
+    last_metric = json.loads((run_dir / "metrics.jsonl").read_text().splitlines()[-1])
+    assert last_metric["model_snapshot"] == "models/gen_0001.pt"
 
     # Same run-id, no flags: must auto-resume and continue, not restart from 0.
     _train(tmp_path, "r", generations=4)
     assert _gens(run_dir) == [0, 1, 2, 3]
+    assert _model_snapshots(run_dir) == [
+        "gen_0000.pt",
+        "gen_0001.pt",
+        "gen_0002.pt",
+        "gen_0003.pt",
+    ]
 
     # --fresh wipes prior progress and restarts numbering.
     _train(tmp_path, "r", generations=2, fresh=True)
     assert _gens(run_dir) == [0, 1]
+    assert _model_snapshots(run_dir) == ["gen_0000.pt", "gen_0001.pt"]

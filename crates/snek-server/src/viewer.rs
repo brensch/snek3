@@ -19,6 +19,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use snek_core::json::parse_move_request;
 use snek_infer::Net;
 use snek_search::{ActionStat, ChildEdge, NodeSnake, TreeNodeSnapshot, TreeSnapshot};
@@ -101,6 +102,13 @@ fn read_game(dir: &Path, id: &str) -> Result<Value, String> {
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let json = zstd::stream::decode_all(bytes.as_slice()).map_err(|e| format!("decode: {e}"))?;
     serde_json::from_slice(&json).map_err(|e| format!("parse: {e}"))
+}
+
+fn model_hash(path: &str) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    Some(format!("{:x}", h.finalize()))
 }
 
 /// Rebuild a Battlesnake `/move` request JSON for one recorded turn, so we can
@@ -349,6 +357,7 @@ fn handle_tree(
         .and_then(|c| c.get("model_sha"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let recorded_model_path = doc.get("model").and_then(Value::as_str);
 
     let recorded_sims = mv
         .get("search")
@@ -371,11 +380,43 @@ fn handle_tree(
         Err(e) => return ViewerResponse::err(500, &format!("rebuild board: {e}")),
     };
 
-    // Recover from a poisoned lock: `Net::forward` is stateless across calls, so
-    // a panic on another request must not wedge live `/move` serving.
-    let mut net = net.lock().unwrap_or_else(|p| p.into_inner());
-    let result = serve_move_replay(&mut net, cfg, &board, me, n_iters);
-    drop(net);
+    let mut replay_model_sha = server_model_sha.to_string();
+    let result = if recorded_model_sha.as_deref() == Some(server_model_sha) {
+        // Recover from a poisoned lock: `Net::forward` is stateless across calls,
+        // so a panic on another request must not wedge live `/move` serving.
+        let mut net = net.lock().unwrap_or_else(|p| p.into_inner());
+        let result = serve_move_replay(&mut net, cfg, &board, me, n_iters);
+        drop(net);
+        result
+    } else if let (Some(path), Some(recorded_sha)) =
+        (recorded_model_path, recorded_model_sha.as_deref())
+    {
+        match model_hash(path).filter(|sha| sha == recorded_sha) {
+            Some(sha) => match Net::load(path) {
+                Ok(mut replay_net) => {
+                    replay_model_sha = sha;
+                    serve_move_replay(&mut replay_net, cfg, &board, me, n_iters)
+                }
+                Err(_) => {
+                    let mut net = net.lock().unwrap_or_else(|p| p.into_inner());
+                    let result = serve_move_replay(&mut net, cfg, &board, me, n_iters);
+                    drop(net);
+                    result
+                }
+            },
+            None => {
+                let mut net = net.lock().unwrap_or_else(|p| p.into_inner());
+                let result = serve_move_replay(&mut net, cfg, &board, me, n_iters);
+                drop(net);
+                result
+            }
+        }
+    } else {
+        let mut net = net.lock().unwrap_or_else(|p| p.into_inner());
+        let result = serve_move_replay(&mut net, cfg, &board, me, n_iters);
+        drop(net);
+        result
+    };
 
     let diag = &result.decision.diagnostics;
     let resp = TreeResponse {
@@ -390,9 +431,9 @@ fn handle_tree(
         eval_rows: diag.eval_rows,
         root_policy: diag.root_policy.clone(),
         root_values: diag.root_values.clone(),
-        model_match: recorded_model_sha.as_deref() == Some(server_model_sha),
+        model_match: recorded_model_sha.as_deref() == Some(replay_model_sha.as_str()),
         recorded_model_sha,
-        server_model_sha: server_model_sha.to_string(),
+        server_model_sha: replay_model_sha,
         tree: result.tree.as_ref().map(TreeOut::from),
     };
     ViewerResponse::ok(serde_json::to_string(&resp).unwrap())

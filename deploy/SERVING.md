@@ -1,38 +1,31 @@
-# Serving the Battlesnake `/move` API (Albatross-faithful, pure Rust)
+# Serving the Battlesnake `/move` API (pure Rust)
 
 This is the production play path: a small Rust binary (`crates/snek-server`) that
-runs the **most Albatross-faithful** serving procedure on CPU, with no PyTorch and
-no Python in the request loop.
+runs the **same MCTS as self-play** on CPU, with no PyTorch and no Python in the
+request loop — so what we serve matches what we trained.
 
 ## What it does on every `/move`
 
-1. **Models the opponent online (temperature MLE).** It accumulates, per opponent
-   and per candidate temperature on a log grid (`geomspace(0.25, 20, 24)`, the same
-   `TAU_GRID` as training), the log-likelihood of that opponent's actual moves under
-   the proxy net's policy head. A weak/predictable opponent scores a low `tau`. Only
-   the newest move is scored each turn (the LL is additive), so it stays cheap as the
-   game lengthens. Opponents are tracked by snake **id**, so other snakes dying (which
-   shifts board indices) doesn't corrupt the estimate.
-2. **Best-responds (heterogeneous-temperature equilibrium search).** It runs the
-   fixed-depth logit-equilibrium search with **our** snake pinned at a high rational
-   temperature (`SNEK_RESPONSE_TAU`) and each opponent pinned at its estimated `tau`.
-   Leaves are evaluated by the proxy net in one batched ONNX forward, conditioned on
-   the opponents' rationality regime. The equilibrium that comes back is our
-   exploitative best response; we play its argmax.
+Run **decoupled-PUCT MCTS** over the policy+value net (one ONNX): the policy head
+supplies per-snake priors, the value head evaluates leaves (no rollouts), and the
+root visit counts decide the move (most-visited, death-masked). It is stateless
+per move — board + our index only, no opponent modelling, no temperature.
 
-This mirrors the earlier Albatross-style training design — opponent tau
-estimation plus hetero-tau response policy — reimplemented over
-`snek-infer`/ONNX. The **proxy** net is what serves (it does both the MLE and the
-leaf eval); the *response* net is a not-yet-used distillation, so faithful serving
-needs only the proxy + the search.
+Efficiency shortcuts baked into the search:
 
-> First move(s) of a game have no opponent history yet, so each opponent starts at the
-> grid's geometric-mean `tau` (~2.24) and the estimate sharpens as the game proceeds.
+- **Forced move:** if our snake has a single legal move, return it immediately —
+  zero sims, zero net forwards.
+- **Leaf batching (virtual loss):** collect up to `SNEK_LEAVES_PER_SIM` distinct
+  leaves per round and evaluate them in one forward, amortizing the ONNX-runtime
+  call overhead on CPU.
+- **Deadline-bound + early stop:** search until the request deadline (timeout −
+  margin) or until the leading root move can no longer be overtaken in the
+  remaining budget, then play it. `SNEK_MAX_SIMS` is only a safety cap.
 
 ## Quick start (local)
 
 ```sh
-make export-model          # runs/albatross-resp0/state.pt -> model.onnx (proxy net)
+make export-model          # checkpoints/latest.pt -> model.onnx (policy+value net)
 make api                   # builds + runs on :8000 using the venv's onnxruntime
 # in another shell:
 curl localhost:8000/
@@ -62,14 +55,18 @@ CUDA in the runtime image. Point your Battlesnake at the box's `:8000`.
 | `SNEK_MODEL` | `model.onnx` | proxy ONNX path |
 | `SNEK_PORT` | `8000` | listen port |
 | `SNEK_THREADS` | `2` | request worker threads (inference is mutexed) |
-| `SNEK_DEPTH` | `2` | search plies. Leaf count ≈ (legal^N)^depth; depth 3 is the practical ceiling |
-| `SNEK_ITERS` | `120` | SFP iterations per node (equilibrium quality) |
-| `SNEK_RESPONSE_TAU` | `12.0` | our rationality (higher = sharper best response) |
-| `SNEK_DRAW_VALUE` | `-0.9` | leaf value of a draw (negative discourages mutual-suicide draws) |
+| `SNEK_MAX_SIMS` | `100000` | safety cap on sims/move (serving is deadline-bound first) |
+| `SNEK_LEAVES_PER_SIM` | `8` | leaves batched per selection round (virtual loss); 1 disables batching |
+| `SNEK_VIRTUAL_LOSS` | `1.0` | virtual-loss magnitude steering batched descents apart |
+| `SNEK_C_PUCT` | `1.5` | PUCT exploration constant (match training) |
+| `SNEK_TIMEOUT_MS` | `500` | fallback per-move deadline when the request JSON omits `game.timeout` |
+| `SNEK_DEADLINE_MARGIN_MS` | `150` | response margin reserved from the timeout |
+| `SNEK_DRAW_VALUE` | `-0.25` | leaf value of a draw (match training) |
 | `SNEK_EVAL_CHUNK` | `4096` | max obs rows per ONNX forward |
 
-Latency budget is ~500ms/move. If a CPU box is tight, lower `SNEK_DEPTH` (biggest lever)
-or `SNEK_ITERS`; if you have headroom, raise `SNEK_DEPTH` to 3 for stronger tactics.
+Latency budget is the request `game.timeout` (default ~500ms/move). On a tight CPU
+box, raise `SNEK_LEAVES_PER_SIM` for more sims per forward; the search auto-stops
+early once the leading move can't be overtaken.
 
 ## Game viewer
 

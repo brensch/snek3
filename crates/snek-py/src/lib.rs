@@ -21,7 +21,7 @@ use snek_core::{encode_into, obs_side, standard_start, Board, Move, NUM_CHANNELS
 use snek_infer::Net;
 #[cfg(test)]
 use snek_search::obvious_immediate_death;
-use snek_search::{mask_obvious_immediate_deaths, uct_actions, Forest, MctsForest};
+use snek_search::{mask_obvious_immediate_deaths, MctsForest};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -32,8 +32,21 @@ static SELFPLAY_PROGRESS_DONE: AtomicUsize = AtomicUsize::new(0);
 static SELFPLAY_PROGRESS_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static SELFPLAY_PROGRESS_COMPLETED_GAMES: AtomicUsize = AtomicUsize::new(0);
 static SELFPLAY_PROGRESS_INFERENCES: AtomicUsize = AtomicUsize::new(0);
+static SELFPLAY_PROGRESS_BATCH_MAX_ROWS: AtomicUsize = AtomicUsize::new(0);
+static SELFPLAY_PROGRESS_GPU_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+static SELFPLAY_PROGRESS_GPU_ROWS: AtomicUsize = AtomicUsize::new(0);
+static SELFPLAY_PROGRESS_GPU_LAST_ROWS: AtomicUsize = AtomicUsize::new(0);
+static SELFPLAY_PROGRESS_GPU_FORWARD_US: AtomicU64 = AtomicU64::new(0);
+static SELFPLAY_PROGRESS_GPU_IDLE_US: AtomicU64 = AtomicU64::new(0);
+static SELFPLAY_PROGRESS_CPU_RECV_US: AtomicU64 = AtomicU64::new(0);
+static SELFPLAY_PROGRESS_CPU_MCTS_US: AtomicU64 = AtomicU64::new(0);
+static SELFPLAY_PROGRESS_CPU_RECORD_PLAY_US: AtomicU64 = AtomicU64::new(0);
 static NEXT_SELFPLAY_STATE_ID: AtomicU64 = AtomicU64::new(1);
 static SELFPLAY_STATES: OnceLock<Mutex<HashMap<u64, SelfPlayState>>> = OnceLock::new();
+
+fn duration_us(d: std::time::Duration) -> u64 {
+    d.as_micros().min(u128::from(u64::MAX)) as u64
+}
 
 fn selfplay_states() -> &'static Mutex<HashMap<u64, SelfPlayState>> {
     SELFPLAY_STATES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -62,8 +75,6 @@ struct GameBatch {
     height: i8,
     num_snakes: usize,
     rng: Xoshiro256PlusPlus,
-    /// Transient search forest between `prepare_search` and `backup_search`.
-    forest: Option<Forest>,
     /// Transient MCTS forest, driven by mcts_select / mcts_expand_backup.
     mcts: Option<MctsForest>,
 }
@@ -86,7 +97,6 @@ impl GameBatch {
             height,
             num_snakes,
             rng,
-            forest: None,
             mcts: None,
         })
     }
@@ -107,7 +117,6 @@ impl GameBatch {
                 height,
                 num_snakes,
                 rng: Xoshiro256PlusPlus::seed_from_u64(0),
-                forest: None,
                 mcts: None,
             },
             me,
@@ -206,31 +215,6 @@ impl GameBatch {
             .into_pyarray_bound(py)
     }
 
-    /// Pure-CPU UCT (decoupled-UCB + Voronoi heuristic) action per snake, shape
-    /// `[count, num_snakes]`, dtype uint8. A strong fixed (non-net) opponent that
-    /// runs on idle CPU cores (parallel across games) concurrently with GPU net
-    /// inference. `iters` UCB simulations per game; higher `c_uct` explores more.
-    #[pyo3(signature = (iters=256, c_uct=1.4, seed=0))]
-    fn heuristic_actions<'py>(
-        &self,
-        py: Python<'py>,
-        iters: usize,
-        c_uct: f32,
-        seed: u64,
-    ) -> Bound<'py, PyArray2<u8>> {
-        let n = self.num_snakes;
-        let acts = py.allow_threads(|| uct_actions(&self.boards, iters, c_uct, seed));
-        let mut flat = vec![0u8; self.boards.len() * n];
-        for (g, mv) in acts.iter().enumerate() {
-            for s in 0..n {
-                flat[g * n + s] = mv[s] as u8;
-            }
-        }
-        Array::from_shape_vec((self.boards.len(), n), flat)
-            .unwrap()
-            .into_pyarray_bound(py)
-    }
-
     /// Per-snake alive mask, shape `[count, num_snakes]`, dtype uint8.
     fn alive<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<u8>> {
         let n = self.num_snakes;
@@ -288,146 +272,6 @@ impl GameBatch {
             .map(|b| b.winner().map(|i| i as i8).unwrap_or(-1))
             .collect();
         flat.into_pyarray_bound(py)
-    }
-
-    /// Phase 1 of a search step: build a fixed-`depth` equilibrium tree for the
-    /// current state of every game and return the leaf observations the network
-    /// must evaluate, shape `[num_evals, channels, height, width]`, float32.
-    /// `num_evals` is `(non-terminal leaves across all games) * num_snakes`.
-    /// Pair each `backup_search` with exactly one `prepare_search`. `draw_value`
-    /// is the per-agent terminal value for a draw (0 = neutral; negative
-    /// discourages the degenerate mutual-suicide draw equilibrium).
-    #[pyo3(signature = (depth, draw_value=0.0))]
-    fn prepare_search<'py>(
-        &mut self,
-        py: Python<'py>,
-        depth: u32,
-        draw_value: f32,
-    ) -> Bound<'py, PyArray4<f32>> {
-        let forest = Forest::build(&self.boards, depth, draw_value);
-        let m = forest.eval_count();
-        let obs_size = forest.obs_size();
-        let (c, h, w) = (forest.channels, forest.height, forest.width);
-        let mut flat = vec![0.0f32; m * obs_size];
-        forest.write_observations(&mut flat);
-        self.forest = Some(forest);
-        Array::from_shape_vec((m, c, h, w), flat)
-            .expect("shape matches length")
-            .into_pyarray_bound(py)
-    }
-
-    /// Phase 2 of a search step: back up the per-leaf `values` (length
-    /// `num_evals`, the rows returned by `prepare_search`) through every tree,
-    /// solving a Logit Equilibrium at temperature `tau` (`iters` SFP steps) at
-    /// each node. Returns root equilibrium policies, shape
-    /// `[count, num_snakes, 4]`, float32. Terminal-root games yield all zeros.
-    #[pyo3(signature = (values, tau=6.0, iters=200))]
-    fn backup_search<'py>(
-        &mut self,
-        py: Python<'py>,
-        values: PyReadonlyArray1<f32>,
-        tau: f32,
-        iters: usize,
-    ) -> PyResult<Bound<'py, PyArray3<f32>>> {
-        let mut forest = self
-            .forest
-            .take()
-            .ok_or_else(|| PyValueError::new_err("call prepare_search before backup_search"))?;
-        let v = values
-            .as_slice()
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        if v.len() != forest.eval_count() {
-            return Err(PyValueError::new_err(format!(
-                "values length {} != expected {}",
-                v.len(),
-                forest.eval_count()
-            )));
-        }
-        let tau_vec = vec![tau; self.num_snakes];
-        let (policy, _values) = forest.backup(v, &tau_vec, iters);
-        Array::from_shape_vec((self.boards.len(), self.num_snakes, 4), policy)
-            .map(|a| a.into_pyarray_bound(py))
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    }
-
-    /// Like `backup_search`, but also returns the per-agent root equilibrium
-    /// value (the bootstrapped value of the current state, used as a TD target).
-    /// Returns `(policies [count, N, 4], root_values [count, N])`, both float32.
-    #[pyo3(signature = (values, tau=6.0, iters=200))]
-    fn backup_search_values<'py>(
-        &mut self,
-        py: Python<'py>,
-        values: PyReadonlyArray1<f32>,
-        tau: f32,
-        iters: usize,
-    ) -> PyResult<(Bound<'py, PyArray3<f32>>, Bound<'py, PyArray2<f32>>)> {
-        let mut forest = self
-            .forest
-            .take()
-            .ok_or_else(|| PyValueError::new_err("call prepare_search before backup_search"))?;
-        let v = values
-            .as_slice()
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        if v.len() != forest.eval_count() {
-            return Err(PyValueError::new_err(format!(
-                "values length {} != expected {}",
-                v.len(),
-                forest.eval_count()
-            )));
-        }
-        let tau_vec = vec![tau; self.num_snakes];
-        let (policy, root_vals) = forest.backup(v, &tau_vec, iters);
-        let pol = Array::from_shape_vec((self.boards.len(), self.num_snakes, 4), policy)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?
-            .into_pyarray_bound(py);
-        let vals = Array::from_shape_vec((self.boards.len(), self.num_snakes), root_vals)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?
-            .into_pyarray_bound(py);
-        Ok((pol, vals))
-    }
-
-    /// Heterogeneous-temperature backup: per-agent `tau` (length `num_snakes`)
-    /// instead of one shared value. This computes an SBRLE-style equilibrium
-    /// where a rational agent (high tau) best-responds to weaker agents (low
-    /// tau) -- the core of Albatross's exploit-weak-opponents behaviour.
-    /// Returns `(policies [count, N, 4], root_values [count, N])`, both float32.
-    #[pyo3(signature = (values, tau, iters=200))]
-    fn backup_search_hetero<'py>(
-        &mut self,
-        py: Python<'py>,
-        values: PyReadonlyArray1<f32>,
-        tau: Vec<f32>,
-        iters: usize,
-    ) -> PyResult<(Bound<'py, PyArray3<f32>>, Bound<'py, PyArray2<f32>>)> {
-        let mut forest = self
-            .forest
-            .take()
-            .ok_or_else(|| PyValueError::new_err("call prepare_search before backup_search"))?;
-        let v = values
-            .as_slice()
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        if v.len() != forest.eval_count() {
-            return Err(PyValueError::new_err(format!(
-                "values length {} != expected {}",
-                v.len(),
-                forest.eval_count()
-            )));
-        }
-        if tau.len() != self.num_snakes {
-            return Err(PyValueError::new_err(format!(
-                "tau length {} != num_snakes {}",
-                tau.len(),
-                self.num_snakes
-            )));
-        }
-        let (policy, root_vals) = forest.backup(v, &tau, iters);
-        let pol = Array::from_shape_vec((self.boards.len(), self.num_snakes, 4), policy)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?
-            .into_pyarray_bound(py);
-        let vals = Array::from_shape_vec((self.boards.len(), self.num_snakes), root_vals)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?
-            .into_pyarray_bound(py);
-        Ok((pol, vals))
     }
 
     /// Begin a batched AlphaZero MCTS over the current boards. Drive it with
@@ -620,6 +464,39 @@ fn selfplay_progress(py: Python<'_>) -> PyResult<PyObject> {
         "inferences",
         SELFPLAY_PROGRESS_INFERENCES.load(Ordering::Relaxed),
     )?;
+    d.set_item(
+        "batch_max_rows",
+        SELFPLAY_PROGRESS_BATCH_MAX_ROWS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "gpu_requests",
+        SELFPLAY_PROGRESS_GPU_REQUESTS.load(Ordering::Relaxed),
+    )?;
+    d.set_item("gpu_rows", SELFPLAY_PROGRESS_GPU_ROWS.load(Ordering::Relaxed))?;
+    d.set_item(
+        "gpu_last_rows",
+        SELFPLAY_PROGRESS_GPU_LAST_ROWS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "gpu_forward_seconds",
+        SELFPLAY_PROGRESS_GPU_FORWARD_US.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+    )?;
+    d.set_item(
+        "gpu_idle_seconds",
+        SELFPLAY_PROGRESS_GPU_IDLE_US.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+    )?;
+    d.set_item(
+        "cpu_recv_wait_seconds",
+        SELFPLAY_PROGRESS_CPU_RECV_US.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+    )?;
+    d.set_item(
+        "cpu_mcts_seconds",
+        SELFPLAY_PROGRESS_CPU_MCTS_US.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+    )?;
+    d.set_item(
+        "cpu_record_play_seconds",
+        SELFPLAY_PROGRESS_CPU_RECORD_PLAY_US.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+    )?;
     Ok(d.into())
 }
 
@@ -652,6 +529,11 @@ fn selfplay_state_info_dict(py: Python<'_>, state: &SelfPlayState) -> PyResult<P
     d.set_item("board", state.board)?;
     d.set_item("num_snakes", state.num_snakes)?;
     d.set_item("count", state.count)?;
+    d.set_item(
+        "gpu_batch_games",
+        state.boards.iter().map(Vec::len).max().unwrap_or(0),
+    )?;
+    d.set_item("shards", state.boards.len())?;
     d.set_item("buffers", state.boards.len())?;
     d.set_item("slots", state.boards.iter().map(Vec::len).sum::<usize>())?;
     d.set_item("nonempty_slots", nonempty_slots)?;
@@ -689,13 +571,22 @@ fn check_cancelled() -> Result<(), String> {
 
 /// Create an in-process continuous self-play state and return its handle.
 #[pyfunction]
-#[pyo3(signature = (board=11, num_snakes=4, count=512, seed=0))]
-fn create_selfplay_state(board: i8, num_snakes: usize, count: usize, seed: u64) -> PyResult<u64> {
+#[pyo3(signature = (board=11, num_snakes=4, count=512, seed=0, gpu_batch_games=128))]
+fn create_selfplay_state(
+    board: i8,
+    num_snakes: usize,
+    count: usize,
+    seed: u64,
+    gpu_batch_games: usize,
+) -> PyResult<u64> {
     if count == 0 {
         return Err(PyValueError::new_err("count must be > 0"));
     }
+    if gpu_batch_games == 0 {
+        return Err(PyValueError::new_err("gpu_batch_games must be > 0"));
+    }
     let id = NEXT_SELFPLAY_STATE_ID.fetch_add(1, Ordering::SeqCst);
-    let state = new_selfplay_state(board, num_snakes, count, seed);
+    let state = new_selfplay_state(board, num_snakes, count, gpu_batch_games, seed);
     selfplay_states()
         .lock()
         .map_err(|_| PyValueError::new_err("self-play state lock poisoned"))?
@@ -778,10 +669,6 @@ fn sample_move_with_play_policy(
         }
     }
     (Move::from_index(3), p)
-}
-
-fn sample_move(probs: &[f32], explore: f32, rng: &mut Xoshiro256PlusPlus) -> Move {
-    sample_move_with_play_policy(probs, explore, rng).0
 }
 
 /// Per-game pending step records (flattened, step-major) until the game ends.
@@ -1155,17 +1042,42 @@ fn load_selfplay_state_from_path(path: &str) -> Result<SelfPlayState, String> {
     }
 }
 
-fn new_selfplay_state(board: i8, num_snakes: usize, count: usize, seed: u64) -> SelfPlayState {
+fn shard_sizes(count: usize, gpu_batch_games: usize) -> Vec<usize> {
+    let mut remaining = count;
+    let mut out = Vec::new();
+    while remaining > 0 {
+        let n = remaining.min(gpu_batch_games);
+        out.push(n);
+        remaining -= n;
+    }
+    out
+}
+
+fn new_selfplay_state(
+    board: i8,
+    num_snakes: usize,
+    count: usize,
+    gpu_batch_games: usize,
+    seed: u64,
+) -> SelfPlayState {
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    let boards: Vec<Vec<Board>> = (0..2)
-        .map(|_| {
-            (0..count)
+    let sizes = shard_sizes(count, gpu_batch_games);
+    let boards: Vec<Vec<Board>> = sizes
+        .iter()
+        .map(|&shard_count| {
+            (0..shard_count)
                 .map(|_| standard_start(board, board, num_snakes, &mut rng))
                 .collect()
         })
         .collect();
-    let slots: Vec<Vec<Slot>> = (0..2).map(|_| vec![Slot::default(); count]).collect();
-    let turns: Vec<Vec<u32>> = (0..2).map(|_| vec![0u32; count]).collect();
+    let slots: Vec<Vec<Slot>> = sizes
+        .iter()
+        .map(|&shard_count| vec![Slot::default(); shard_count])
+        .collect();
+    let turns: Vec<Vec<u32>> = sizes
+        .iter()
+        .map(|&shard_count| vec![0u32; shard_count])
+        .collect();
     SelfPlayState {
         board,
         num_snakes,
@@ -1189,8 +1101,16 @@ fn compatible_selfplay_state(
     board: i8,
     num_snakes: usize,
     count: usize,
+    gpu_batch_games: usize,
 ) -> bool {
-    state.board == board && state.num_snakes == num_snakes && state.count == count
+    state.board == board
+        && state.num_snakes == num_snakes
+        && state.count == count
+        && state
+            .boards
+            .iter()
+            .map(Vec::len)
+            .eq(shard_sizes(count, gpu_batch_games))
 }
 
 #[derive(Clone)]
@@ -1390,7 +1310,7 @@ fn select_write(
 /// target = root visit counts; value target = undiscounted game outcome.
 #[pyfunction]
 #[pyo3(signature = (onnx_path, board=11, num_snakes=2, count=1024, sims=32, c_puct=1.5,
-    samples_per_gen=30000, seed=0, exploration_prob=0.25, max_turns=0, eval_chunk=16384,
+    samples_per_gen=30000, seed=0, exploration_prob=0.25, max_turns=0, gpu_batch_games=128,
     draw_value=0.0, skip_short_draw_turns=0, record_games=0, bootstrap_value=false,
     state_id=None, state_path=None))]
 #[allow(clippy::too_many_arguments)]
@@ -1406,7 +1326,7 @@ fn generate_selfplay<'py>(
     seed: u64,
     exploration_prob: f32,
     max_turns: i64,
-    eval_chunk: usize,
+    gpu_batch_games: usize,
     draw_value: f32,
     skip_short_draw_turns: usize,
     record_games: usize,
@@ -1420,9 +1340,22 @@ fn generate_selfplay<'py>(
     Bound<'py, PyDict>,
 )> {
     clear_cancel();
+    if gpu_batch_games == 0 {
+        return Err(PyValueError::new_err("gpu_batch_games must be > 0"));
+    }
     SELFPLAY_PROGRESS_ACTIVE.store(true, Ordering::Relaxed);
     SELFPLAY_PROGRESS_TOTAL.store(samples_per_gen, Ordering::Relaxed);
     SELFPLAY_PROGRESS_INFERENCES.store(0, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_BATCH_MAX_ROWS
+        .store(gpu_batch_games.min(count) * num_snakes, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_GPU_REQUESTS.store(0, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_GPU_ROWS.store(0, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_GPU_LAST_ROWS.store(0, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_GPU_FORWARD_US.store(0, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_GPU_IDLE_US.store(0, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_CPU_RECV_US.store(0, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_CPU_MCTS_US.store(0, Ordering::Relaxed);
+    SELFPLAY_PROGRESS_CPU_RECORD_PLAY_US.store(0, Ordering::Relaxed);
     let c = NUM_CHANNELS;
     let h = obs_side(board as usize);
     let w = obs_side(board as usize);
@@ -1430,8 +1363,8 @@ fn generate_selfplay<'py>(
     let n = num_snakes;
 
     // --- GPU worker thread: owns the ort Net, infers batches off a channel ---
-    type Req = Option<(u8, Vec<f32>, usize)>; // (buffer id, obs flat, m); None = stop
-    type Res = (u8, Vec<f32>, Vec<f32>); // (buffer id, policy probs, values)
+    type Req = Option<(usize, Vec<f32>, usize)>; // (shard id, obs flat, m); None = stop
+    type Res = (usize, Vec<f32>, Vec<f32>); // (shard id, policy probs, values)
     let (tx_req, rx_req) = std::sync::mpsc::channel::<Req>();
     let (tx_res, rx_res) = std::sync::mpsc::channel::<Res>();
     let onnx = onnx_path.to_string();
@@ -1445,40 +1378,27 @@ fn generate_selfplay<'py>(
         loop {
             let wt = Instant::now();
             let msg = rx_req.recv();
-            t_idle += wt.elapsed();
+            let idle = wt.elapsed();
+            t_idle += idle;
+            SELFPLAY_PROGRESS_GPU_IDLE_US.fetch_add(duration_us(idle), Ordering::Relaxed);
             let (id, obs, m) = match msg {
                 Ok(Some(x)) => x,
                 _ => break,
             };
             evals += m;
+            SELFPLAY_PROGRESS_GPU_REQUESTS.fetch_add(1, Ordering::Relaxed);
+            SELFPLAY_PROGRESS_GPU_ROWS.fetch_add(m, Ordering::Relaxed);
+            SELFPLAY_PROGRESS_GPU_LAST_ROWS.store(m, Ordering::Relaxed);
             inference_progress_gpu.store(evals, Ordering::Relaxed);
             SELFPLAY_PROGRESS_INFERENCES.store(evals, Ordering::Relaxed);
             let f = Instant::now();
-            let mut pol = vec![0.0f32; m * 4];
-            let mut val = vec![0.0f32; m];
-            let mut s = 0;
-            while s < m {
-                let e = (s + eval_chunk).min(m);
-                let (p, v) = net
-                    .forward(&obs[s * obs_size..e * obs_size], e - s, c, h, w)
-                    .map_err(|er| er.to_string())?;
-                pol[s * 4..e * 4].copy_from_slice(&p);
-                val[s..e].copy_from_slice(&v);
-                s = e;
-            }
-            t_fwd += f.elapsed();
+            let (pol, val) = net.forward(&obs, m, c, h, w).map_err(|er| er.to_string())?;
+            let forward = f.elapsed();
+            t_fwd += forward;
+            SELFPLAY_PROGRESS_GPU_FORWARD_US.fetch_add(duration_us(forward), Ordering::Relaxed);
             if tx_res.send((id, pol, val)).is_err() {
                 break;
             }
-        }
-        if std::env::var("SNEK_PIPELINE_TIMING").is_ok() {
-            let tot = (t_fwd + t_idle).as_secs_f64().max(1e-9);
-            eprintln!(
-                "[gpu] forward={:.2}s idle={:.2}s busy={:.0}%",
-                t_fwd.as_secs_f64(),
-                t_idle.as_secs_f64(),
-                100.0 * t_fwd.as_secs_f64() / tot
-            );
         }
         Ok((t_fwd.as_secs_f64(), t_idle.as_secs_f64(), evals))
     });
@@ -1488,11 +1408,11 @@ fn generate_selfplay<'py>(
             .lock()
             .map_err(|_| PyValueError::new_err("self-play state lock poisoned"))?;
         match states.remove(&id) {
-            Some(st) if compatible_selfplay_state(&st, board, n, count) => st,
-            _ => new_selfplay_state(board, n, count, seed),
+            Some(st) if compatible_selfplay_state(&st, board, n, count, gpu_batch_games) => st,
+            _ => new_selfplay_state(board, n, count, gpu_batch_games, seed),
         }
     } else {
-        new_selfplay_state(board, n, count, seed)
+        new_selfplay_state(board, n, count, gpu_batch_games, seed)
     };
     let mut boards = state.boards;
     let mut slots = state.slots;
@@ -1513,13 +1433,11 @@ fn generate_selfplay<'py>(
 
     // Run the pipeline. On any error we drop the channels, which stops the GPU thread.
     use std::time::{Duration, Instant};
-    let (mut t_recv, mut t_mcts, mut t_rp) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
     // `run` is a `move` closure so it OWNS the !Sync Receiver (and a cloned
     // Sender); we keep the original `tx_req` to stop the GPU thread afterwards.
     // It returns the accumulated outputs since boards/rng/channels aren't needed
     // after the loop. This lets us run it under `py.allow_threads`.
     let tx_req_c = tx_req.clone();
-    let inference_progress_c = Arc::clone(&inference_progress);
     type SpOut = (
         Vec<f32>,
         Vec<f32>,
@@ -1532,6 +1450,9 @@ fn generate_selfplay<'py>(
         usize,
         Vec<usize>,
         SelfPlayState,
+        f64,
+        f64,
+        f64,
     );
     let run = move || -> Result<SpOut, String> {
         macro_rules! check_cancelled_or_persist {
@@ -1566,54 +1487,69 @@ fn generate_selfplay<'py>(
                 }
             };
         }
-        let progress_started = Instant::now();
-        let progress_interval = ((samples_per_gen + 9) / 10).max(1);
-        let mut next_progress = progress_interval;
+        let (mut t_recv, mut t_mcts, mut t_rp) =
+            (Duration::ZERO, Duration::ZERO, Duration::ZERO);
         while collected < samples_per_gen {
             check_cancelled_or_persist!();
-            let mut forests = [
-                MctsForest::new_with_draw_value(&boards[0], c_puct, draw_value),
-                MctsForest::new_with_draw_value(&boards[1], c_puct, draw_value),
-            ];
-            let mut pend: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
-            let mut sims_done = [0usize, 0usize];
+            let shard_count = boards.len();
+            let mut forests: Vec<MctsForest> = boards
+                .iter()
+                .map(|buf| MctsForest::new_with_draw_value(buf, c_puct, draw_value))
+                .collect();
+            let mut pend: Vec<Vec<usize>> = vec![Vec::new(); shard_count];
+            let mut sims_done = vec![0usize; shard_count];
+            let mut active_shards = 0usize;
 
-            // prime: submit buffer 0, prepare + queue buffer 1
-            let (o0, m0) = select_write(&mut forests[0], &mut pend[0], n, obs_size);
-            tx_req_c
-                .send(Some((0, o0, m0)))
-                .map_err(|_| "gpu gone".to_string())?;
-            let (o1, m1) = select_write(&mut forests[1], &mut pend[1], n, obs_size);
-            let mut queued: Option<(u8, Vec<f32>, usize)> = Some((1, o1, m1));
+            for sid in 0..shard_count {
+                let (obs, m) = select_write(&mut forests[sid], &mut pend[sid], n, obs_size);
+                tx_req_c
+                    .send(Some((sid, obs, m)))
+                    .map_err(|_| "gpu gone".to_string())?;
+                active_shards += 1;
+            }
 
-            // Pipeline: always one batch on the GPU + one queued; CPU does the other's backup+select.
-            while sims_done[0] < sims || sims_done[1] < sims {
+            while active_shards > 0 {
                 check_cancelled_or_persist!();
                 let w = Instant::now();
-                let (id, pol, val) = rx_res.recv().map_err(|_| "gpu gone".to_string())?;
-                t_recv += w.elapsed();
-                if let Some(q) = queued.take() {
-                    tx_req_c.send(Some(q)).map_err(|_| "gpu gone".to_string())?;
-                }
+                let (sid, pol, val) = rx_res.recv().map_err(|_| "gpu gone".to_string())?;
+                let recv_wait = w.elapsed();
+                t_recv += recv_wait;
+                SELFPLAY_PROGRESS_CPU_RECV_US
+                    .fetch_add(duration_us(recv_wait), Ordering::Relaxed);
                 let m0 = Instant::now();
-                let bi = id as usize;
-                forests[bi].expand_backup(&pend[bi], &pol, &val);
-                sims_done[bi] += 1;
-                if sims_done[bi] < sims {
-                    let (o, m) = select_write(&mut forests[bi], &mut pend[bi], n, obs_size);
-                    queued = Some((bi as u8, o, m));
+                forests[sid].expand_backup(&pend[sid], &pol, &val);
+                sims_done[sid] += 1;
+                // Tier-1 cost cut: once roots are expanded and have a credited
+                // visit (the 2nd backup), freeze games whose every alive snake has
+                // a single legal move — their root policy is already an exact
+                // one-hot, so they drop out of the eval batch instead of burning
+                // the remaining sims. Targets are unchanged (zero quality cost).
+                if sims_done[sid] == 2 {
+                    forests[sid].freeze_forced_roots();
                 }
-                t_mcts += m0.elapsed();
+                if sims_done[sid] < sims {
+                    let (obs, m) = select_write(&mut forests[sid], &mut pend[sid], n, obs_size);
+                    tx_req_c
+                        .send(Some((sid, obs, m)))
+                        .map_err(|_| "gpu gone".to_string())?;
+                } else {
+                    active_shards -= 1;
+                }
+                let mcts_elapsed = m0.elapsed();
+                t_mcts += mcts_elapsed;
+                SELFPLAY_PROGRESS_CPU_MCTS_US
+                    .fetch_add(duration_us(mcts_elapsed), Ordering::Relaxed);
             }
 
             // Both buffers: read root policy, record, play a move, finalize finished games.
             let rp0 = Instant::now();
-            for b in 0..2 {
-                let (root_pol, root_val) = forests[b].root_targets();
-                let bds = &mut boards[b];
-                let slt = &mut slots[b];
-                let trn = &mut turns[b];
-                for g in 0..count {
+            for sid in 0..shard_count {
+                let (root_pol, root_val) = forests[sid].root_targets();
+                let bds = &mut boards[sid];
+                let slt = &mut slots[sid];
+                let trn = &mut turns[sid];
+                let shard_games = bds.len();
+                for g in 0..shard_games {
                     if g % 64 == 0 {
                         check_cancelled_or_persist!();
                     }
@@ -1638,7 +1574,7 @@ fn generate_selfplay<'py>(
                     slot.value.extend_from_slice(val_slice);
                     slot.steps += 1;
                 }
-                for g in 0..count {
+                for g in 0..shard_games {
                     if g % 64 == 0 {
                         check_cancelled_or_persist!();
                     }
@@ -1658,7 +1594,7 @@ fn generate_selfplay<'py>(
                     bds[g].step_and_spawn(&actions, &mut rng);
                     trn[g] += 1;
                 }
-                for g in 0..count {
+                for g in 0..shard_games {
                     if g % 64 == 0 {
                         check_cancelled_or_persist!();
                     }
@@ -1745,20 +1681,6 @@ fn generate_selfplay<'py>(
                     SELFPLAY_PROGRESS_DONE.store(collected.min(samples_per_gen), Ordering::Relaxed);
                     SELFPLAY_PROGRESS_COMPLETED_GAMES
                         .store(completed_samples.len() + 1, Ordering::Relaxed);
-                    while collected >= next_progress {
-                        let elapsed = progress_started.elapsed().as_secs_f64().max(1e-9);
-                        let inf = inference_progress_c.load(Ordering::Relaxed);
-                        eprintln!(
-                            "PLAYING    | samples={:>7}/{:<7} completed_games={:<5} samples_per_sec={:>6.0} inference_per_sec={:>8.0} elapsed={:>6.1}s",
-                            collected.min(samples_per_gen),
-                            samples_per_gen,
-                            completed_samples.len() + 1,
-                            collected as f64 / elapsed,
-                            inf as f64 / elapsed,
-                            elapsed,
-                        );
-                        next_progress += progress_interval;
-                    }
                     completed_samples.push(GameSamples {
                         turns: trn[g],
                         obs: game_obs,
@@ -1787,15 +1709,10 @@ fn generate_selfplay<'py>(
                     trn[g] = 0;
                 }
             }
-            t_rp += rp0.elapsed();
-        }
-        if std::env::var("SNEK_PIPELINE_TIMING").is_ok() {
-            eprintln!(
-                "[cpu] recv_wait={:.2}s mcts={:.2}s record/play={:.2}s",
-                t_recv.as_secs_f64(),
-                t_mcts.as_secs_f64(),
-                t_rp.as_secs_f64()
-            );
+            let rp_elapsed = rp0.elapsed();
+            t_rp += rp_elapsed;
+            SELFPLAY_PROGRESS_CPU_RECORD_PLAY_US
+                .fetch_add(duration_us(rp_elapsed), Ordering::Relaxed);
         }
         let (out_obs, out_pol, out_z, balanced_collected, selected_length_buckets) =
             balanced_sample_output(&mut completed_samples, samples_per_gen, obs_size, &mut rng);
@@ -1826,6 +1743,9 @@ fn generate_selfplay<'py>(
                 completed_games_json: Vec::new(),
                 recorded_game_candidates: 0,
             },
+            t_recv.as_secs_f64(),
+            t_mcts.as_secs_f64(),
+            t_rp.as_secs_f64(),
         ))
     };
     // Release the GIL for the whole CPU self-play loop (pure Rust; the GPU net
@@ -1848,6 +1768,9 @@ fn generate_selfplay<'py>(
         recorded_game_candidates,
         selected_length_buckets,
         next_state,
+        cpu_recv_wait_seconds,
+        cpu_mcts_seconds,
+        cpu_record_play_seconds,
     ) = run_res.map_err(PyValueError::new_err)?;
     if let Some(path) = state_path.as_deref() {
         save_selfplay_state_to_path(path, &next_state).map_err(PyValueError::new_err)?;
@@ -1882,9 +1805,19 @@ fn generate_selfplay<'py>(
     stats.set_item("gpu_forward_seconds", gpu_forward_seconds)?;
     stats.set_item("gpu_idle_seconds", gpu_idle_seconds)?;
     stats.set_item("gpu_busy_pct", 100.0 * gpu_forward_seconds / gpu_total)?;
-    stats.set_item("cpu_recv_wait_seconds", t_recv.as_secs_f64())?;
-    stats.set_item("cpu_mcts_seconds", t_mcts.as_secs_f64())?;
-    stats.set_item("cpu_record_play_seconds", t_rp.as_secs_f64())?;
+    let gpu_request_count = SELFPLAY_PROGRESS_GPU_REQUESTS.load(Ordering::Relaxed);
+    let gpu_rows = SELFPLAY_PROGRESS_GPU_ROWS.load(Ordering::Relaxed);
+    let batch_max_rows = SELFPLAY_PROGRESS_BATCH_MAX_ROWS.load(Ordering::Relaxed);
+    stats.set_item("gpu_request_count", gpu_request_count)?;
+    stats.set_item("gpu_rows", gpu_rows)?;
+    stats.set_item(
+        "gpu_request_rows_avg",
+        gpu_rows as f64 / gpu_request_count.max(1) as f64,
+    )?;
+    stats.set_item("gpu_request_rows_max", batch_max_rows)?;
+    stats.set_item("cpu_recv_wait_seconds", cpu_recv_wait_seconds)?;
+    stats.set_item("cpu_mcts_seconds", cpu_mcts_seconds)?;
+    stats.set_item("cpu_record_play_seconds", cpu_record_play_seconds)?;
     stats.set_item("skipped_short_draw_games", skipped_short_draw_games)?;
     stats.set_item("skipped_short_draw_samples", skipped_short_draw_samples)?;
     stats.set_item("draw_value", draw_value)?;
@@ -2037,7 +1970,7 @@ mod tests {
 
     #[test]
     fn selfplay_state_round_trips_full_inflight_slots() {
-        let mut state = new_selfplay_state(11, 2, 3, 12345);
+        let mut state = new_selfplay_state(11, 2, 3, 2, 12345);
         state.boards[0][1].turn = 17;
         state.boards[0][1].food.push(Point::new(4, 5));
         state.boards[0][1].hazards.push(Point::new(6, 7));
@@ -2078,7 +2011,7 @@ mod tests {
 
     #[test]
     fn selfplay_state_loads_v1_snapshots_without_completed_samples() {
-        let state = new_selfplay_state(11, 4, 2, 123);
+        let state = new_selfplay_state(11, 4, 2, 1, 123);
         let v1 = SerSelfPlayStateV1 {
             version: 1,
             board: state.board,
@@ -2114,223 +2047,6 @@ mod tests {
     }
 }
 
-/// Fast Albatross PROXY self-play on the ORT GPU path (no torch, no Python loop).
-///
-/// Each move: build the fixed-depth equilibrium `Forest`, evaluate every leaf
-/// once with the temperature-conditioned ONNX net (ORT), then logit-equilibrium
-/// backup at the per-generation `tau` -> LE root policy + LE root value. Records
-/// (obs, LE policy, LE root value, tau) per alive agent each step. Optionally a
-/// fraction of games use the CPU UCT agent as snake 1's opponent (overlapping the
-/// idle CPU). Returns (obs [K,C,H,W], pol [K,4], z [K], temp [K], stats).
-#[pyfunction]
-#[pyo3(signature = (onnx_path, board=11, num_snakes=2, count=512, depth=2, iters=120,
-    samples_per_gen=30000, seed=0, exploration_prob=0.15, max_turns=200,
-    tau_min=0.5, tau_max=10.0, eval_chunk=2048, uct_opp_frac=0.0, uct_iters=200,
-    draw_value=-1.0))]
-#[allow(clippy::too_many_arguments)]
-fn generate_selfplay_le<'py>(
-    py: Python<'py>,
-    onnx_path: &str,
-    board: i8,
-    num_snakes: usize,
-    count: usize,
-    depth: u32,
-    iters: usize,
-    samples_per_gen: usize,
-    seed: u64,
-    exploration_prob: f32,
-    max_turns: i64,
-    tau_min: f32,
-    tau_max: f32,
-    eval_chunk: usize,
-    uct_opp_frac: f64,
-    uct_iters: usize,
-    draw_value: f32,
-) -> PyResult<(
-    Bound<'py, PyArray4<f32>>,
-    Bound<'py, PyArray2<f32>>,
-    Bound<'py, PyArray1<f32>>,
-    Bound<'py, PyArray1<f32>>,
-    Bound<'py, PyDict>,
-)> {
-    use std::time::Instant;
-    let c = NUM_CHANNELS;
-    let oh = obs_side(board as usize);
-    let ow = obs_side(board as usize);
-    let obs_size = c * oh * ow;
-    let n = num_snakes;
-    let onnx = onnx_path.to_string();
-
-    type Out = (
-        Vec<f32>,
-        Vec<f32>,
-        Vec<f32>,
-        Vec<f32>,
-        usize,
-        usize,
-        u64,
-        usize,
-        f64,
-    );
-    let res: Result<Out, String> = py.allow_threads(move || {
-        let mut net = Net::load(&onnx).map_err(|e| e.to_string())?;
-        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-        let mut boards: Vec<Board> = (0..count)
-            .map(|_| standard_start(board, board, n, &mut rng))
-            .collect();
-        let mut turns = vec![0u32; count];
-        let uct_game: Vec<bool> = (0..count)
-            .map(|_| rng.gen::<f64>() < uct_opp_frac)
-            .collect();
-        let tau = rng.gen::<f32>() * (tau_max - tau_min) + tau_min; // per-generation temperature
-        let tau_vec = vec![tau; n];
-
-        let mut out_obs: Vec<f32> = Vec::new();
-        let mut out_pol: Vec<f32> = Vec::new();
-        let mut out_z: Vec<f32> = Vec::new();
-        let mut out_temp: Vec<f32> = Vec::new();
-        let (mut collected, mut games, mut draws, mut turns_total) = (0usize, 0usize, 0usize, 0u64);
-        let (mut inf_count, mut t_fwd) = (0usize, 0.0f64);
-        let mut actions: Vec<Move> = vec![Move::Up; n];
-
-        while collected < samples_per_gen {
-            let mut forest = Forest::build(&boards, depth, draw_value);
-            let ec = forest.eval_count();
-            if ec == 0 {
-                for g in 0..count {
-                    boards[g] = standard_start(board, board, n, &mut rng);
-                    turns[g] = 0;
-                }
-                continue;
-            }
-            let mut leaf_obs = vec![0.0f32; ec * obs_size];
-            forest.write_observations(&mut leaf_obs);
-            let mut values = vec![0.0f32; ec];
-            let mut s = 0usize;
-            while s < ec {
-                let e = (s + eval_chunk).min(ec);
-                let temp_chunk = vec![tau; e - s];
-                let f = Instant::now();
-                let (_pol, val) = net
-                    .forward_temp(
-                        &leaf_obs[s * obs_size..e * obs_size],
-                        Some(&temp_chunk),
-                        e - s,
-                        c,
-                        oh,
-                        ow,
-                    )
-                    .map_err(|er| er.to_string())?;
-                t_fwd += f.elapsed().as_secs_f64();
-                inf_count += e - s;
-                values[s..e].copy_from_slice(&val);
-                s = e;
-            }
-            let (root_pol, root_val) = forest.backup(&values, &tau_vec, iters);
-
-            // Record current-state targets for every alive agent.
-            for g in 0..count {
-                let bd = &boards[g];
-                for sk in 0..n {
-                    if !bd.snakes[sk].alive() {
-                        continue;
-                    }
-                    let base = out_obs.len();
-                    out_obs.resize(base + obs_size, 0.0);
-                    encode_into(bd, sk, &mut out_obs[base..base + obs_size]);
-                    let pi = (g * n + sk) * 4;
-                    out_pol.extend_from_slice(&root_pol[pi..pi + 4]);
-                    out_z.push(root_val[g * n + sk]);
-                    out_temp.push(tau);
-                    collected += 1;
-                }
-            }
-
-            // Batched UCT opponent moves (CPU, parallel across the chosen games).
-            let mut uct_move: Vec<Option<Move>> = vec![None; count];
-            if uct_opp_frac > 0.0 && n >= 2 {
-                let idx: Vec<usize> = (0..count)
-                    .filter(|&g| uct_game[g] && boards[g].snakes[1].alive())
-                    .collect();
-                if !idx.is_empty() {
-                    let ub: Vec<Board> = idx.iter().map(|&g| boards[g].clone()).collect();
-                    let um = uct_actions(&ub, uct_iters, 1.4, seed ^ turns_total ^ 0x5DEECE66D);
-                    for (k, &g) in idx.iter().enumerate() {
-                        uct_move[g] = Some(um[k][1]);
-                    }
-                }
-            }
-
-            // Play a move in every game.
-            for g in 0..count {
-                for sk in 0..n {
-                    let base = (g * n + sk) * 4;
-                    let play_base =
-                        mask_obvious_immediate_deaths(&boards[g], sk, &root_pol[base..base + 4]);
-                    actions[sk] = sample_move(&play_base, exploration_prob, &mut rng);
-                }
-                if let Some(m) = uct_move[g] {
-                    actions[1] = m;
-                }
-                boards[g].step_and_spawn(&actions, &mut rng);
-                turns[g] += 1;
-                turns_total += 1;
-            }
-
-            // Finalize finished / overrun games.
-            for g in 0..count {
-                let overrun = max_turns > 0 && turns[g] as i64 >= max_turns;
-                if boards[g].is_terminal() || overrun {
-                    games += 1;
-                    if boards[g].winner().is_none() {
-                        draws += 1;
-                    }
-                    boards[g] = standard_start(board, board, n, &mut rng);
-                    turns[g] = 0;
-                }
-            }
-        }
-        Ok((
-            out_obs,
-            out_pol,
-            out_z,
-            out_temp,
-            games,
-            draws,
-            turns_total,
-            inf_count,
-            t_fwd,
-        ))
-    });
-
-    let (out_obs, out_pol, out_z, out_temp, games, draws, turns_total, inf_count, t_fwd) =
-        res.map_err(PyValueError::new_err)?;
-    let k = out_z.len();
-    let obs_arr = Array::from_shape_vec((k, c, oh, ow), out_obs)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?
-        .into_pyarray_bound(py);
-    let pol_arr = Array::from_shape_vec((k, 4), out_pol)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?
-        .into_pyarray_bound(py);
-    let z_arr = PyArray1::from_vec_bound(py, out_z);
-    let temp_arr = PyArray1::from_vec_bound(py, out_temp);
-    let stats = PyDict::new_bound(py);
-    stats.set_item("games", games)?;
-    stats.set_item("draws", draws)?;
-    stats.set_item("turns", turns_total)?;
-    stats.set_item("inference_count", inf_count)?;
-    stats.set_item("inference_seconds", t_fwd)?;
-    stats.set_item(
-        "inference_per_sec",
-        if t_fwd > 0.0 {
-            inf_count as f64 / t_fwd
-        } else {
-            0.0
-        },
-    )?;
-    Ok((obs_arr, pol_arr, z_arr, temp_arr, stats))
-}
-
 #[pymodule]
 fn snek(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CHANNELS", NUM_CHANNELS)?;
@@ -2346,6 +2062,5 @@ fn snek(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_selfplay_state, m)?)?;
     m.add_function(wrap_pyfunction!(selfplay_state_info, m)?)?;
     m.add_function(wrap_pyfunction!(generate_selfplay, m)?)?;
-    m.add_function(wrap_pyfunction!(generate_selfplay_le, m)?)?;
     Ok(())
 }

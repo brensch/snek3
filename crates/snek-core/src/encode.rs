@@ -178,6 +178,12 @@ mod tests {
         assert!(out[plane(8) + oi].abs() < 1e-6); // equal length -> 0
 
         // mask (13) marks every cell.
-        assert_eq!(out[plane(13)..plane(14)].iter().filter(|&&v| v != 0.0).count(), 121);
+        assert_eq!(
+            out[plane(13)..plane(14)]
+                .iter()
+                .filter(|&&v| v != 0.0)
+                .count(),
+            121
+        );
     }
 }

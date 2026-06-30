@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 # boundary, with the coercion applied to incoming JSON values.
 # AlphaZero live-tunable knobs (applied at the next generation boundary).
 LIVE_PARAMS: dict[str, type] = {
-    "count": int, "samples": int, "sims": int, "c_puct": float,
+    "count": int, "gpu_batch_games": int, "samples": int, "sims": int, "c_puct": float,
     "lr": float, "train_steps": int, "batch_size": int, "recency": float,
     "exploration_prob": float, "draw_value": float,
     "max_turns": int, "sample_games": int, "sample_every": int,

@@ -1,13 +1,10 @@
-"""Bridge between the Rust fixed-depth equilibrium search and the PyTorch net.
+"""Bridge between the Rust batched MCTS forest and the PyTorch net.
 
-A single search step is three calls:
-  1. `batch.prepare_search(depth)` -> leaf observations `[M, C, H, W]`
-  2. chunked batched net forward passes -> per-leaf values `[M]`
-  3. `batch.backup_search(values, tau, iters)` -> root policies `[count, N, 4]`
-
-Only the value head is needed at the leaves; the equilibrium backup turns those
-into a policy. This is the whole anti-"simulation starvation" trick: one network
-forward pass per search, no per-node evaluation.
+`mcts_search` drives a decoupled-PUCT tree (`batch.mcts_*`): each simulation
+selects leaves across all games, the net evaluates them in one batched forward
+(both heads — policy for priors, value for the leaf estimate), and the visit
+counts become the improved policy target. `sample_actions` / `greedy_actions`
+turn a `[count, num_snakes, 4]` policy into per-snake moves.
 """
 
 from __future__ import annotations
@@ -31,129 +28,6 @@ def perf_reset():
 
 def perf_snapshot() -> dict:
     return dict(_PERF)
-
-
-@torch.no_grad()
-def run_search(
-    batch,
-    net: AZNet,
-    device: torch.device,
-    depth: int = 2,
-    tau: float = 6.0,
-    iters: int = 200,
-    eval_batch_size: int = 8192,
-    return_root_values: bool = False,
-    temp=None,
-    draw_value: float = 0.0,
-):
-    """Run one equilibrium search over every game in `batch`.
-
-    Returns root policies `[count, num_snakes, 4]`. If `return_root_values` is
-    set, returns `(policies, root_values)` where `root_values` is `[count,
-    num_snakes]` — the per-agent equilibrium value of the current state.
-
-    `temp` conditions a temperature-aware (proxy) value net at the leaves; it may
-    be a scalar (all agents) or a per-agent array of length `num_snakes`. Leaf
-    observations are laid out `[eval_id, agent]` with agent innermost.
-    `draw_value` is the terminal value of a draw (negative discourages the
-    degenerate mutual-suicide draw equilibrium).
-    """
-    _t = time.perf_counter()
-    obs = batch.prepare_search(depth, draw_value)  # [M, C, H, W] float32
-    _PERF["search_s"] += time.perf_counter() - _t
-    if obs.shape[0] == 0:
-        # Every root already terminal; backup still needs a (length-0) value array.
-        values = np.zeros((0,), dtype=np.float32)
-        if return_root_values:
-            return batch.backup_search_values(values, tau, iters)
-        return batch.backup_search(values, tau, iters)
-
-    net.eval()
-    use_temp = getattr(net.cfg, "temperature_input", False) and temp is not None
-    temp_all = None
-    if use_temp:
-        n = int(batch.num_snakes)
-        temp_arr = np.asarray(temp, dtype=np.float32).reshape(-1)
-        if temp_arr.size == 1:
-            temp_all = np.full(obs.shape[0], float(temp_arr[0]), dtype=np.float32)
-        else:  # per-agent, tiled over leaves ([eval, agent], agent innermost)
-            temp_all = np.tile(temp_arr, obs.shape[0] // n)
-    if eval_batch_size <= 0:
-        eval_batch_size = obs.shape[0]
-    values = np.empty((obs.shape[0],), dtype=np.float32)
-    _t = time.perf_counter()
-    for start in range(0, obs.shape[0], eval_batch_size):
-        end = min(start + eval_batch_size, obs.shape[0])
-        obs_t = torch.from_numpy(obs[start:end]).to(device, non_blocking=True)
-        temp_t = (
-            torch.from_numpy(temp_all[start:end]).to(device, non_blocking=True)
-            if use_temp else None
-        )
-        with net_autocast(device):
-            _, value = net(obs_t, temp_t)  # value: [M] in [-1, 1]
-        values[start:end] = value.detach().to("cpu", dtype=torch.float32).numpy()
-        del obs_t, value
-    _PERF["fwd_s"] += time.perf_counter() - _t
-    _PERF["infer"] += int(obs.shape[0])
-    _t = time.perf_counter()
-    out = batch.backup_search_values(values, tau, iters) if return_root_values else batch.backup_search(values, tau, iters)
-    _PERF["search_s"] += time.perf_counter() - _t
-    return out
-
-
-@torch.no_grad()
-def run_search_hetero(
-    batch,
-    net: AZNet,
-    device: torch.device,
-    depth: int,
-    tau_per_agent,
-    iters: int = 200,
-    eval_batch_size: int = 8192,
-    temp=None,
-    draw_value: float = 0.0,
-):
-    """Heterogeneous-temperature equilibrium search: per-agent `tau_per_agent`
-    (length num_snakes) instead of one shared value, for SBRLE-style play where a
-    rational agent (high tau) best-responds to weaker agents (low tau). Leaf
-    values come from `net` (optionally temperature-conditioned via `temp`, a
-    scalar applied to all leaves). Returns `(policies [count, N, 4],
-    root_values [count, N])`.
-    """
-    tau_list = [float(t) for t in tau_per_agent]
-    _t = time.perf_counter()
-    obs = batch.prepare_search(depth, draw_value)  # [M, C, H, W] float32
-    _PERF["search_s"] += time.perf_counter() - _t
-    if obs.shape[0] == 0:
-        values = np.zeros((0,), dtype=np.float32)
-        return batch.backup_search_hetero(values, tau_list, iters)
-
-    net.eval()
-    use_temp = getattr(net.cfg, "temperature_input", False) and temp is not None
-    temp_all = (
-        np.full(obs.shape[0], float(temp), dtype=np.float32) if use_temp else None
-    )
-    if eval_batch_size <= 0:
-        eval_batch_size = obs.shape[0]
-    values = np.empty((obs.shape[0],), dtype=np.float32)
-    _t = time.perf_counter()
-    for start in range(0, obs.shape[0], eval_batch_size):
-        end = min(start + eval_batch_size, obs.shape[0])
-        obs_t = torch.from_numpy(obs[start:end]).to(device, non_blocking=True)
-        temp_t = (
-            torch.from_numpy(temp_all[start:end]).to(device, non_blocking=True)
-            if use_temp else None
-        )
-        with net_autocast(device):
-            _, value = net(obs_t, temp_t)
-        values[start:end] = value.detach().to("cpu", dtype=torch.float32).numpy()
-        del obs_t, value
-    _PERF["fwd_s"] += time.perf_counter() - _t
-    _PERF["infer"] += int(obs.shape[0])
-    _t = time.perf_counter()
-    out = batch.backup_search_hetero(values, tau_list, iters)
-    _PERF["search_s"] += time.perf_counter() - _t
-    return out
 
 
 @torch.no_grad()

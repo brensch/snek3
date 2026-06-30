@@ -50,10 +50,7 @@ def record_games(
     `{opponent, winner, num_turns, frames: [snapshot, ...]}`.
 
     Uses the same MCTS (both policy and value heads) as self-play, so recorded
-    replays reflect the net's real playing strength. The old equilibrium
-    `run_search` here used the value head only, discarding the policy head where
-    most of an MCTS-trained net's strength lives -- which made recorded games
-    (esp. vs the baseline) look far weaker than the agent actually plays.
+    replays reflect the net's real playing strength.
     """
     batch = snek.GameBatch(board, board, 2, count=n_games, seed=seed)
     frames: list[list[dict]] = [[] for _ in range(n_games)]

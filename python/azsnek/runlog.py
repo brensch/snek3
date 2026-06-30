@@ -6,6 +6,7 @@ A run directory looks like:
         meta.json              run config (board, net size, hyperparams)
         metrics.jsonl          one JSON object per generation (appended live)
         status.json            latest summary (overwritten each generation)
+        models/gen_XXXX.pt     model snapshots per generation
         ckpt/latest.pt         serving weights from the latest eval
         ckpt/best.pt           serving weights from the best eval
         games/gen_XXXX.json    recorded replays at that generation
@@ -28,6 +29,8 @@ class RunWriter:
         self.dir = self.root / self.run_id
         self.games_dir = self.dir / "games"
         self.games_dir.mkdir(parents=True, exist_ok=True)
+        self.models_dir = self.dir / "models"
+        self.models_dir.mkdir(parents=True, exist_ok=True)
         # Out-of-band "real games": faithful (proxy ONNX + serve search) eval vs
         # the fixed pool, written here directly by the Rust `snek-eval` binary.
         self.eval_dir = self.dir / "eval"
@@ -57,8 +60,18 @@ class RunWriter:
             p.unlink(missing_ok=True)
         for g in self.games_dir.glob("gen_*.json"):
             g.unlink(missing_ok=True)
+        for m in self.models_dir.glob("gen_*.pt"):
+            m.unlink(missing_ok=True)
         for e in self.eval_dir.glob("gen_*.json"):
             e.unlink(missing_ok=True)
+
+    def save_model(self, gen: int, save_fn) -> Path:
+        """Atomically persist a per-generation model snapshot."""
+        path = self.models_dir / f"gen_{gen:04d}.pt"
+        tmp = path.with_suffix(".pt.tmp")
+        save_fn(tmp)
+        tmp.replace(path)
+        return path
 
     def write_json(self, name: str, obj) -> None:
         path = self.dir / name

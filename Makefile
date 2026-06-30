@@ -27,6 +27,14 @@ API_DEADLINE_MARGIN_MS ?= 150
 API_THREADS ?= 2
 API_EVAL_CHUNK ?= 4096
 API_MOVE_LOG_DIR ?= logs/api_moves
+ARENA_GAMES ?= 0
+ARENA_MODELS ?=
+ARENA_NAMES ?=
+ARENA_SNAKES ?= 2
+ARENA_TIMEOUT_MS ?= 100
+ARENA_DEADLINE_MARGIN_MS ?= 10
+ARENA_MAX_TURNS ?= 500
+ARENA_SEED ?= 1
 BATTLESNAKE ?= $(HOME)/go/bin/battlesnake
 GAME_WIDTH ?= 11
 GAME_HEIGHT ?= 11
@@ -61,7 +69,7 @@ DEPTH       ?= 2
 TAU         ?= 30
 ITERS       ?= 120
 EVAL_BATCH_SIZE ?= 8192
-SEARCH_THREADS ?= $(shell nproc 2>/dev/null || python3 -c 'import os; print(os.cpu_count() or 1)')
+SEARCH_THREADS ?= 0     # 0 = auto: reserve 2 cores for the GPU inference thread (see train.py)
 TRAIN_STEPS ?= 256
 ADAPTIVE_TRAIN_STEPS ?= 256
 BATCH_SIZE  ?= 2048
@@ -116,7 +124,7 @@ ALB_DRAW_VALUE ?= -0.9  # equilibrium-search terminal value of a draw (negative 
 ALB_GENERATIONS ?= 0    # 0 = run forever until stopped via the dashboard/control API
 
 .DEFAULT_GOAL := help
-.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard serve export-model api-build api api-run rungame api-docker clean clean-all
+.PHONY: help venv build test test-rust test-py bench lint fmt train ui dashboard export-model api-build api api-run arena rungame api-docker clean clean-all
 
 help: ## Show this help
 	@echo "snek3 targets:"
@@ -148,7 +156,7 @@ bench: ## Benchmark rules-engine step throughput
 
 lint: ## Lint Python (import-error, no-member) and Rust (clippy)
 	$(PY) -m pylint --disable=all --enable=import-error,no-member \
-		python/azsnek python/server python/dashboard python/tests
+		python/azsnek python/dashboard python/tests
 	cargo clippy --workspace --all-targets
 
 fmt: ## Format Rust code
@@ -181,10 +189,6 @@ ui: ## Build the React dashboard UI (-> python/dashboard/static)
 dashboard: ## Serve the live training dashboard on PORT (default 8050)
 	SNEK_RUNS_DIR=$(RUNS_DIR) $(UVICORN) dashboard.app:app --host 127.0.0.1 --port $(PORT)
 
-serve: build ## Run the Battlesnake server (set CKPT=path and matching FILTERS/BLOCKS)
-	$(if $(CKPT),SNEK_CKPT=$(CKPT) ,)SNEK_FILTERS=$(FILTERS) SNEK_BLOCKS=$(BLOCKS) \
-		$(UVICORN) server.main:app --host 0.0.0.0 --port $(SERVE_PORT)
-
 export-model: build ## Export the AlphaZero net CHECKPOINT -> MODEL (.onnx) for the Rust API
 	mkdir -p checkpoints
 	$(if $(API_RUN_ID),cp $(CHECKPOINT) checkpoints/latest.pt.tmp && mv checkpoints/latest.pt.tmp checkpoints/latest.pt,)
@@ -205,7 +209,19 @@ api: api-build ## Run the Rust /move API locally. Run `make export-model` first.
 
 api-run: export-model api ## Export the selected run checkpoint, then start the Rust /move API.
 
+arena: api-build ## Run in-process real-server games, record them, and serve the viewer at /app.
+	ORT_DYLIB_PATH="$(shell ls $(VENV)/lib/python*/site-packages/onnxruntime/capi/libonnxruntime.so* 2>/dev/null | head -1)" \
+	SNEK_MODEL=$(MODEL) SNEK_PORT=$(SERVE_PORT) SNEK_MAX_SIMS=$(API_MAX_SIMS) \
+	SNEK_TIMEOUT_MS=$(ARENA_TIMEOUT_MS) SNEK_DEADLINE_MARGIN_MS=$(ARENA_DEADLINE_MARGIN_MS) \
+	SNEK_THREADS=$(API_THREADS) SNEK_EVAL_CHUNK=$(API_EVAL_CHUNK) SNEK_MOVE_LOG_DIR=$(API_MOVE_LOG_DIR) \
+	SNEK_ARENA_GAMES=$(ARENA_GAMES) SNEK_ARENA_MODELS="$(ARENA_MODELS)" SNEK_ARENA_NAMES="$(ARENA_NAMES)" \
+	SNEK_ARENA_SNAKES=$(ARENA_SNAKES) SNEK_ARENA_TIMEOUT_MS=$(ARENA_TIMEOUT_MS) \
+	SNEK_ARENA_DEADLINE_MARGIN_MS=$(ARENA_DEADLINE_MARGIN_MS) SNEK_ARENA_MAX_TURNS=$(ARENA_MAX_TURNS) \
+	SNEK_ARENA_SEED=$(ARENA_SEED) SNEK_ARENA_BOARD=$(GAME_WIDTH) \
+	./crates/snek-server/target/release/snek-server
+
 rungame: ## Run a Battlesnake game between local API and LAN API, opening the viewer
+	-google-chrome about:blank >/dev/null 2>&1 &
 	$(BATTLESNAKE) play \
 		-W $(GAME_WIDTH) -H $(GAME_HEIGHT) \
 		--name $(GAME_LOCAL_NAME) --url $(GAME_LOCAL_URL) \

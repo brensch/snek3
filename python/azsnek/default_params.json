@@ -4,6 +4,7 @@
   "num_snakes": 4,
   "samples": 12000,
   "count": 512,
+  "gpu_batch_games": 128,
   "eval_batch_size": 8192,
   "search_threads": 0,
   "lr": 0.001,

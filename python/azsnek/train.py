@@ -195,6 +195,44 @@ def log_phase(logger: logging.Logger, phase: str, message: str) -> None:
     logger.info("%s | %s", label, message)
 
 
+def _float_progress(progress: dict, key: str) -> float:
+    try:
+        return float(progress.get(key, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _selfplay_progress_line(gen: int, progress: dict, target_samples: int, started_at: float) -> str:
+    done = int(progress.get("done", 0))
+    total = int(progress.get("total", target_samples) or target_samples)
+    inferences = int(progress.get("inferences", 0))
+    completed_games = int(progress.get("completed_games", 0))
+    gpu_requests = int(progress.get("gpu_requests", 0))
+    gpu_rows = int(progress.get("gpu_rows", 0))
+    gpu_last_rows = int(progress.get("gpu_last_rows", 0))
+    batch_max_rows = int(progress.get("batch_max_rows", 0))
+    batch_avg = gpu_rows / max(gpu_requests, 1)
+    batch_fill = 100.0 * batch_avg / batch_max_rows if batch_max_rows > 0 else 0.0
+    gpu_forward = _float_progress(progress, "gpu_forward_seconds")
+    gpu_idle = _float_progress(progress, "gpu_idle_seconds")
+    gpu_busy = 100.0 * gpu_forward / max(gpu_forward + gpu_idle, 1e-9)
+    cpu_recv = _float_progress(progress, "cpu_recv_wait_seconds")
+    cpu_mcts = _float_progress(progress, "cpu_mcts_seconds")
+    cpu_record = _float_progress(progress, "cpu_record_play_seconds")
+    elapsed = max(time.time() - started_at, 1e-9)
+    return (
+        f"gen={gen} samples={min(done, total):,}/{total:,} "
+        f"completed_games={completed_games} "
+        f"samples_per_sec={done / elapsed:.0f} "
+        f"inference_per_sec={inferences / elapsed:.0f} "
+        f"batch_avg={batch_avg:.0f}/{batch_max_rows} "
+        f"batch_last={gpu_last_rows} fill={batch_fill:.0f}% "
+        f"gpu_busy={gpu_busy:.0f}% gpu_idle={gpu_idle:.1f}s "
+        f"cpu_wait_gpu={cpu_recv:.1f}s cpu_mcts={cpu_mcts:.1f}s cpu_record={cpu_record:.1f}s "
+        f"elapsed={elapsed:.1f}s"
+    )
+
+
 def _selfplay_inflight_progress(info: dict | None) -> dict:
     if not info:
         return {}
@@ -209,6 +247,10 @@ def _selfplay_inflight_progress(info: dict | None) -> dict:
     }
 
 
+def _expected_selfplay_shards(count: int, gpu_batch_games: int) -> int:
+    return max(1, (max(1, int(count)) + max(1, int(gpu_batch_games)) - 1) // max(1, int(gpu_batch_games)))
+
+
 def start_selfplay_progress_monitor(
     logger,
     state,
@@ -220,11 +262,14 @@ def start_selfplay_progress_monitor(
     """Poll Rust self-play progress while generate_selfplay runs without the GIL."""
     stop = threading.Event()
     interval = max(1, (int(target_samples) + 9) // 10)
+    log_interval = max(1.0, float(os.environ.get("SNEK_PROGRESS_LOG_SECS", "30")))
     inflight_progress = _selfplay_inflight_progress(inflight_info)
 
     def run() -> None:
         next_mark = interval
         last_done = -1
+        last_logged_done = -1
+        next_log_at = time.time() + log_interval
         while not stop.wait(0.5):
             try:
                 progress = snek.selfplay_progress()
@@ -235,19 +280,18 @@ def start_selfplay_progress_monitor(
             if state is not None and done != last_done:
                 state.set_progress("self-play", min(done, total), total, gen, **inflight_progress)
                 last_done = done
-            while done >= next_mark and next_mark <= total:
-                elapsed = max(time.time() - started_at, 1e-9)
-                inferences = int(progress.get("inferences", 0))
-                completed_games = int(progress.get("completed_games", 0))
+            now = time.time()
+            threshold_due = done >= next_mark and next_mark <= total and done != last_logged_done
+            time_due = now >= next_log_at
+            if threshold_due or time_due:
                 log_phase(
                     logger,
                     "PLAYING",
-                    f"gen={gen} samples={min(done, total):,}/{total:,} "
-                    f"completed_games={completed_games} "
-                    f"samples_per_sec={done / elapsed:.0f} "
-                    f"inference_per_sec={inferences / elapsed:.0f} "
-                    f"elapsed={elapsed:.1f}s",
+                    _selfplay_progress_line(gen, progress, target_samples, started_at),
                 )
+                last_logged_done = done
+                next_log_at = now + log_interval
+            while done >= next_mark and next_mark <= total:
                 next_mark += interval
 
     thread = threading.Thread(target=run, name="selfplay-progress", daemon=True)
@@ -444,6 +488,12 @@ def main():
     ap.add_argument("--samples", type=int, default=defaults["samples"])
     ap.add_argument("--count", type=int, default=defaults["count"])
     ap.add_argument(
+        "--gpu-batch-games",
+        type=int,
+        default=defaults["gpu_batch_games"],
+        help="self-play game slots per GPU inference shard; rows = gpu_batch_games * num_snakes",
+    )
+    ap.add_argument(
         "--eval-batch-size",
         type=int,
         default=defaults["eval_batch_size"],
@@ -453,7 +503,9 @@ def main():
         "--search-threads",
         type=int,
         default=defaults["search_threads"],
-        help="Rayon threads for Rust search/encoding (default: all visible CPUs; 0 leaves Rayon default)",
+        help="Rayon threads for Rust MCTS/encoding. 0 (auto) reserves 2 cores for "
+        "the GPU inference thread; a positive value sets it explicitly; a negative "
+        "value opts back into Rayon's default of all visible CPUs (oversubscribes).",
     )
     ap.add_argument("--lr", type=float, default=defaults["lr"])
     ap.add_argument("--train-steps", type=int, default=defaults["train_steps"], help="SGD steps per generation")
@@ -548,7 +600,20 @@ def _args_for_pending(base, pending):
 
 
 def train_one_run(args, state, device, logger):
-    if args.search_threads:
+    # Self-play is GPU-forward-bound, and a `net.forward()` is not pure GPU: the
+    # inference worker thread also does the host<->device copies, ORT kernel
+    # launch/sync, and the policy softmax. If Rayon's MCTS threads occupy every
+    # logical CPU (its default), that worker can't get a core promptly and the
+    # GPU goes idle *between* launches -- throughput drops ~20% and sm_util falls
+    # from ~93% to ~80% even though `gpu_busy` still reads ~100% (the channel is
+    # never starved). Measured on a 16-core box: 16 hot MCTS threads -> ~45k
+    # rows/s; reserving 2 cores -> ~54-56k. So when search_threads is left at the
+    # 0 "auto" default, reserve cores for the inference thread instead of letting
+    # Rayon grab them all. Pass a negative value to opt back into Rayon's default.
+    if args.search_threads == 0:
+        cpus = os.cpu_count() or 1
+        args.search_threads = max(1, cpus - 2)
+    if args.search_threads > 0:
         os.environ["RAYON_NUM_THREADS"] = str(args.search_threads)
         configured = snek.set_search_threads(args.search_threads)
         status = "configured" if configured else "already initialized"
@@ -651,6 +716,22 @@ def train_one_run(args, state, device, logger):
             )
         )
 
+    def save_model_snapshot(gen: int) -> Path:
+        return run.save_model(
+            gen,
+            lambda p: torch.save(
+                {
+                    "gen": gen,
+                    "run_id": run.run_id,
+                    "net_cfg": asdict(cfg),
+                    "net": net.state_dict(),
+                    "board": sp.board,
+                    "num_snakes": sp.num_snakes,
+                },
+                p,
+            ),
+        )
+
     run.write_status(
         {"generation": start_gen - 1, "running": True, "total_generations": args.generations}
     )
@@ -709,6 +790,7 @@ def train_one_run(args, state, device, logger):
                 board=sp.board,
                 num_snakes=sp.num_snakes,
                 count=args.count,
+                gpu_batch_games=args.gpu_batch_games,
                 seed=10_000 + start_gen,
             )
     else:
@@ -716,6 +798,7 @@ def train_one_run(args, state, device, logger):
             board=sp.board,
             num_snakes=sp.num_snakes,
             count=args.count,
+            gpu_batch_games=args.gpu_batch_games,
             seed=10_000 + start_gen,
         )
     gen_iter = (
@@ -731,6 +814,7 @@ def train_one_run(args, state, device, logger):
                 break
             p = state.params_snapshot()
             args.count = p.get("count", args.count)
+            args.gpu_batch_games = p.get("gpu_batch_games", args.gpu_batch_games)
             args.samples = p.get("samples", args.samples)
             args.sims = p.get("sims", args.sims)
             args.c_puct = p.get("c_puct", args.c_puct)
@@ -757,16 +841,28 @@ def train_one_run(args, state, device, logger):
                 and int(selfplay_state_info.get("board", sp.board)) == sp.board
                 and int(selfplay_state_info.get("num_snakes", sp.num_snakes)) == sp.num_snakes
                 and int(selfplay_state_info.get("count", args.count)) == args.count
+                and int(selfplay_state_info.get("gpu_batch_games", args.gpu_batch_games)) == args.gpu_batch_games
+                and int(selfplay_state_info.get("shards", _expected_selfplay_shards(args.count, args.gpu_batch_games))) == _expected_selfplay_shards(args.count, args.gpu_batch_games)
                 else None
             )
             state.set_status(generation=gen, phase="self-play", running=True)
         else:
             active_selfplay_state_info = selfplay_state_info
+        expected_shards = _expected_selfplay_shards(args.count, args.gpu_batch_games)
+        if expected_shards < 2:
+            log_phase(
+                logger,
+                "WARN",
+                f"gen={gen} count={args.count} gpu_batch_games={args.gpu_batch_games} "
+                "creates one self-play shard; GPU will idle between CPU prepare steps. "
+                "Use count > gpu_batch_games, e.g. count=512 gpu_batch_games=128.",
+            )
         # ---- GENERATE: Rust MCTS + ONNX/CUDA inference (no Python round-trips) ----
         log_phase(
             logger,
             "PLAYING",
-            f"gen={gen} count={args.count} sims={args.sims} target_samples={args.samples}",
+            f"gen={gen} count={args.count} gpu_batch_games={args.gpu_batch_games} "
+            f"shards={expected_shards} sims={args.sims} target_samples={args.samples}",
         )
         t0 = time.time()
         export_onnx(net, cfg.channels, sp.board, device, onnx_path)
@@ -798,6 +894,7 @@ def train_one_run(args, state, device, logger):
                 count=args.count, sims=args.sims, c_puct=args.c_puct,
                 samples_per_gen=args.samples, seed=1000 + gen,
                 exploration_prob=args.exploration_prob, max_turns=args.max_turns,
+                gpu_batch_games=args.gpu_batch_games,
                 draw_value=args.draw_value, skip_short_draw_turns=args.skip_short_draw_turns,
                 record_games=rust_sample_games, bootstrap_value=args.bootstrap_value,
                 state_id=selfplay_state_id, state_path=str(selfplay_state_path),
@@ -940,6 +1037,7 @@ def train_one_run(args, state, device, logger):
             "params": {
                 "sims": int(args.sims),
                 "count": int(args.count),
+                "gpu_batch_games": int(args.gpu_batch_games),
                 "target_samples": int(args.samples),
                 "lr": float(opt.param_groups[0]["lr"]),
                 "c_puct": float(args.c_puct),
@@ -966,6 +1064,10 @@ def train_one_run(args, state, device, logger):
                 gpu_busy_pct=round(float(gen_stats.get("gpu_busy_pct", 0.0)), 1),
                 gpu_forward_seconds=round(float(gen_stats.get("gpu_forward_seconds", 0.0)), 2),
                 gpu_idle_seconds=round(float(gen_stats.get("gpu_idle_seconds", 0.0)), 2),
+                gpu_request_count=int(gen_stats.get("gpu_request_count", 0)),
+                gpu_rows=int(gen_stats.get("gpu_rows", 0)),
+                gpu_request_rows_avg=round(float(gen_stats.get("gpu_request_rows_avg", 0.0)), 1),
+                gpu_request_rows_max=int(gen_stats.get("gpu_request_rows_max", 0)),
                 cpu_recv_wait_seconds=round(float(gen_stats.get("cpu_recv_wait_seconds", 0.0)), 2),
                 cpu_mcts_seconds=round(float(gen_stats.get("cpu_mcts_seconds", 0.0)), 2),
                 cpu_record_play_seconds=round(float(gen_stats.get("cpu_record_play_seconds", 0.0)), 2),
@@ -991,11 +1093,13 @@ def train_one_run(args, state, device, logger):
             run.save_games(gen, sampled_games, summary=selfplay_summary)
             run.prune_games(keep=args.keep_games)
 
-        log_phase(logger, "SAVING", f"gen={gen} checkpoint=state metrics=status")
+        log_phase(logger, "SAVING", f"gen={gen} checkpoint=state model_snapshot metrics=status")
         t_phase = time.time()
         save_state(gen)  # full resumable state, every generation (atomic write)
+        model_snapshot_path = save_model_snapshot(gen)
         publish_serving_checkpoint(net, cfg.channels, sp.board, device, run.state_path, ckpt_dir)
         metric["save_seconds"] = round(time.time() - t_phase, 1)
+        metric["model_snapshot"] = str(model_snapshot_path.relative_to(run.dir))
         run.append_metric(metric)
         metrics_history.append(metric)
         run.write_status(

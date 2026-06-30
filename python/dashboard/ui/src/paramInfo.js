@@ -3,9 +3,17 @@ export const PARAM_INFO = {
     name: "parallel game slots",
     summary: "How many self-play games are advanced in parallel while collecting a generation.",
     details:
-      "This is not a target for finished games. The generator keeps this many game slots active and stops the generation once enough training samples have been selected. Games that finish before the cutoff can contribute samples; games still running at the cutoff are not used for final-outcome training in that generation.",
+      "This is not a target for finished games. The generator keeps this many game slots active, split into GPU-sized shards, and stops the generation once enough training samples have been selected. Games that finish before the cutoff can contribute samples; games still running at the cutoff are not used for final-outcome training in that generation.",
     faster:
-      "Lowering this usually does not reduce work as directly as lowering samples or sims, and can hurt GPU batching if it drops utilization.",
+      "Lowering this usually does not reduce work as directly as lowering samples or sims, and can reduce completed-game throughput.",
+  },
+  gpu_batch_games: {
+    name: "GPU shard games",
+    summary: "How many concurrent game leaves feed one self-play GPU inference request.",
+    details:
+      "The actual neural-net rows are this value times the snake count. For 4-player games, 128 shard games produces about 512 inference rows, which is the measured sweet spot for the current model.",
+    faster:
+      "Tune this for inference throughput separately from count; keep count high enough for many games to finish.",
   },
   samples: {
     name: "samples per generation",

@@ -1,25 +1,23 @@
 # snek3 — AlphaZero-style Battlesnake bot
 
-A Battlesnake agent built on AlphaZero ideas, adapted for **simultaneous moves**
-using the *search* machinery from [Albatross](https://arxiv.org/abs/2402.03136):
-fixed-depth, full-width search with a per-node **Logit Equilibrium** solve
-(Stochastic Fictitious Play) instead of deep MCTS rollouts. This cures the
-"simulation starvation" of simultaneous-move MCTS — the whole tree's leaves are
-evaluated in a single batched neural-net forward pass per search.
+A Battlesnake agent built on AlphaZero, adapted for **simultaneous moves**:
+**decoupled-PUCT MCTS** over a single policy+value network (no rollouts — the
+value head evaluates leaves), with per-snake decoupled action selection so it
+scales to N-player free-for-all. The same search runs in self-play training and
+in the pure-Rust `/move` server, so what we serve is what we trained.
 
-We **assume (near-)perfect play**: the equilibrium solver runs at a high fixed
-temperature (≈Nash). No bounded-rationality / opponent-temperature modeling, so
-there is a single network and no two-stage training.
+We **assume (near-)perfect play**: a single network, no bounded-rationality /
+opponent-temperature modeling, no two-stage training.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
 | `crates/snek-core` | Rules engine (faithful port of the official standard ruleset), observation encoding, standard board setup. Generic over snake count. |
-| `crates/snek-search` | Fixed-depth equilibrium search + SFP solver *(Phase 4)*. |
+| `crates/snek-search` | Simultaneous-move MCTS (decoupled-PUCT) over the policy+value net *(Phase 4)*. |
 | `crates/snek-py` | PyO3 bindings → the `snek` Python module (built with maturin). |
+| `crates/snek-server` | Pure-Rust Battlesnake `/move` API — the same MCTS as self-play *(Phase 6)*. |
 | `python/azsnek` | Network, self-play, training *(Phase 5)*. |
-| `python/server` | FastAPI Battlesnake endpoint *(Phase 6)*. |
 | `python/tests` | Binding tests. |
 
 ## Status
@@ -30,9 +28,9 @@ All phases implemented and tested (13 Python tests + 20 Rust tests green).
 - [x] Phase 1 — Rust rules engine (12 fidelity tests, ~sub-µs/step)
 - [x] Phase 2 — PyO3 bindings + observation encoding
 - [x] Phase 3 — neural network (PyTorch ResNet, policy + value)
-- [x] Phase 4 — fixed-depth equilibrium search + batched eval (Logit Equilibrium / SFP)
+- [x] Phase 4 — simultaneous-move MCTS (decoupled-PUCT) + batched leaf eval
 - [x] Phase 5 — self-play training loop (learns to beat the flood-fill baseline)
-- [x] Phase 6 — Battlesnake FastAPI server
+- [x] Phase 6 — pure-Rust Battlesnake `/move` server (same MCTS as self-play)
 - [x] Phase 7 — FFA (N=4) runs through the same N-generic search
 
 A 14-generation smoke run (~2 min on an RTX 5080, tiny net) took the agent from
@@ -42,18 +40,43 @@ need a bigger net / deeper search / longer training / a win incentive.
 
 ## Train & serve
 
-`maturin develop` installs `snek`, `azsnek`, and `server` into the venv as real
-packages, so no `PYTHONPATH` juggling is needed.
+`maturin develop` installs `snek` and `azsnek` into the venv as real packages, so
+no `PYTHONPATH` juggling is needed.
 
 ```bash
 # Train (writes runs/<run_id>/ckpt/best.pt on each eval improvement)
 python -m azsnek.train --generations 50 --samples 50000 \
-    --depth 2 --filters 64 --blocks 6 --eval-every 1
+    --sims 500 --filters 64 --blocks 6
 
-# Serve (filters/blocks must match the checkpoint)
-SNEK_CKPT=runs/myrun/ckpt/best.pt SNEK_FILTERS=64 SNEK_BLOCKS=6 \
-    uvicorn server.main:app --host 0.0.0.0 --port 8000
+# Serve the /move API (pure-Rust, same MCTS as self-play):
+make export-model && make api      # or: make api-run
 ```
+
+## Real-server arena
+
+The Rust API can also orchestrate local Battlesnake games in-process while
+serving the same `/app` replay UI. Every arena move is made by constructing a
+real Battlesnake `/move` request with `game.timeout = 100`, passing it through
+the same server move path as HTTP serving, then ending the game through the same
+recorder. Logs are written as the server's normal `.json.zst` game files and are
+available at `http://127.0.0.1:8000/app`.
+
+```bash
+# Export old generation snapshots if you want old-vs-new matchups.
+PYTHONPATH=python .venv/bin/python scripts/export_model.py \
+  runs/myrun/models/gen_0005.pt checkpoints/gen_0005.onnx
+PYTHONPATH=python .venv/bin/python scripts/export_model.py \
+  runs/myrun/models/gen_0050.pt checkpoints/gen_0050.onnx
+
+# Play 20 two-player games at the real 100ms move timeout.
+make arena ARENA_GAMES=20 \
+  ARENA_MODELS="checkpoints/gen_0005.onnx,checkpoints/gen_0050.onnx" \
+  ARENA_NAMES="gen5,gen50"
+```
+
+Each participant gets its own server/recorder instance, so the saved files are
+participant-perspective logs like `arena-1-0000-s0.json.zst` and
+`arena-1-0000-s1.json.zst` in `logs/api_moves/`.
 
 ## Live dashboard
 
@@ -86,7 +109,7 @@ make build       # compile the Rust extension into the venv
 make test        # Rust + Python tests
 make train       # train; writes runs/<id>/  (override GENERATIONS, SAMPLES, RUN_ID, ARGS...)
 make dashboard   # serve the live dashboard (PORT, default 8050)
-make serve       # run the Battlesnake server (CKPT=..., matching FILTERS/BLOCKS)
+make api         # build + run the pure-Rust /move server (after make export-model)
 make bench lint fmt clean clean-all
 ```
 
@@ -97,6 +120,9 @@ Typical first run: `make venv && make build && make test`, then
 
 Each generation, the trainer atomically writes full training state (model +
 optimizer + generation counter + best win-rate + RNG) to `runs/<run-id>/state.pt`.
+It also saves per-generation model snapshots to
+`runs/<run-id>/models/gen_XXXX.pt` for comparing against older versions of the
+same snake.
 **Re-running with the same `--run-id` resumes automatically** — it restores the
 net architecture from the saved state, continues the generation numbering, and
 appends to the same `metrics.jsonl`/`games/`:
