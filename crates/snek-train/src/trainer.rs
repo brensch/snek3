@@ -105,6 +105,24 @@ impl TrainerHandle {
         })
     }
 
+    pub fn history(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        let Some(run_id) = self.active_run.lock().unwrap().clone() else {
+            return Ok(Vec::new());
+        };
+        let path = RunPaths::new(&self.runs_dir, &run_id).metrics;
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let text = std::fs::read_to_string(path)?;
+        let mut rows = Vec::new();
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if let Ok(row) = serde_json::from_str(line) {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
     pub fn run_state(&self) -> crate::proto::RunState {
         let phase =
             crate::metrics::phase_from_u32(self.metrics.counters().phase.load(Ordering::Relaxed));
@@ -127,11 +145,12 @@ impl TrainerHandle {
     fn run_loop(&self, run_id: &str, fresh: bool) -> anyhow::Result<()> {
         let paths = RunPaths::new(&self.runs_dir, run_id);
         paths.ensure()?;
-        let cfg = if !fresh && paths.config.exists() {
+        let mut cfg = if !fresh && paths.config.exists() {
             RunConfig::load(&paths.config)?
         } else {
             self.config()
         };
+        configure_search_threads(&mut cfg);
         cfg.save_atomic(&paths.config)?;
         self.set_config(cfg.clone());
 
@@ -254,4 +273,23 @@ fn append_metric(path: &Path, summary: &GenerationSummary) -> anyhow::Result<()>
 
 fn timestamp_run_id() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
+fn configure_search_threads(cfg: &mut RunConfig) {
+    if cfg.search_threads == 0 {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        cfg.search_threads = cpus.saturating_sub(2).max(1);
+    }
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(cfg.search_threads)
+        .build_global()
+    {
+        Ok(()) => tracing::info!(
+            search_threads = cfg.search_threads,
+            "configured Rayon search pool"
+        ),
+        Err(err) => tracing::debug!(?err, "Rayon search pool was already configured"),
+    }
 }

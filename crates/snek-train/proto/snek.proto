@@ -27,31 +27,6 @@ message StatsFrame {
   double gpu_rows_per_sec = 14;
 }
 
-message Point {
-  uint32 x = 1;
-  uint32 y = 2;
-}
-
-message Snake {
-  bool alive = 1;
-  uint32 health = 2;
-  repeated Point body = 3;
-}
-
-message GameSnapshot {
-  uint32 id = 1;
-  uint32 turn = 2;
-  uint32 board_w = 3;
-  uint32 board_h = 4;
-  repeated Snake snakes = 5;
-  repeated Point food = 6;
-}
-
-message GamesSnapshot {
-  uint64 t_unix_ms = 1;
-  repeated GameSnapshot games = 2;
-}
-
 message GenerationSummary {
   uint32 generation = 1;
   double policy_loss = 2;

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import { openGamesStream, openStatsStream } from "../api/streams";
-import type { GamesSnapshot, RunConfig, RunList, RunState, StatsFrame } from "../types";
+import { openStatsStream } from "../api/streams";
+import type { GenerationMetric, RunConfig, RunList, RunState, StatsFrame } from "../types";
 
 export function useTrainer() {
   const [config, setConfig] = useState<RunConfig | null>(null);
@@ -9,7 +9,7 @@ export function useTrainer() {
   const [state, setState] = useState<RunState | null>(null);
   const [stats, setStats] = useState<StatsFrame | null>(null);
   const [history, setHistory] = useState<StatsFrame[]>([]);
-  const [games, setGames] = useState<GamesSnapshot | null>(null);
+  const [generationHistory, setGenerationHistory] = useState<GenerationMetric[]>([]);
 
   useEffect(() => {
     void refresh();
@@ -23,8 +23,7 @@ export function useTrainer() {
       setHistory((rows) => [...rows.slice(-239), frame]);
       setState((old) => ({ phase: frame.phase, generation: frame.generation, run_id: old?.run_id ?? "", running: !["idle", "stopped"].includes(frame.phase), device: old?.device }));
     });
-    const gamesStream = openGamesStream(setGames);
-    return () => { statsStream.close(); gamesStream.close(); };
+    return () => statsStream.close();
   }, []);
 
   const actions = useMemo(() => ({
@@ -48,7 +47,9 @@ export function useTrainer() {
     if (nextConfig) setConfig(nextConfig);
     setRuns(nextRuns);
     if (nextState) setState(nextState);
+    const nextHistory = await api.history();
+    setGenerationHistory(nextHistory.metrics);
   }
 
-  return { config, runs, state, stats, history, games, actions };
+  return { config, runs, state, stats, history, generationHistory, actions };
 }

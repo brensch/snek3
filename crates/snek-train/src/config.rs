@@ -25,7 +25,6 @@ pub struct RunConfig {
     pub buffer_size: usize,
     pub value_weight: f64,
     pub search_threads: usize,
-    pub record_games: usize,
     pub eval_every: usize,
     pub eval_games: usize,
 }
@@ -55,7 +54,6 @@ impl Default for RunConfig {
             buffer_size: 500_000,
             value_weight: 1.0,
             search_threads: 0,
-            record_games: 4,
             eval_every: 5,
             eval_games: 32,
         }

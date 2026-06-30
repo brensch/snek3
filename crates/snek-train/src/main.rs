@@ -35,6 +35,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    tch::set_num_threads(1);
+    tch::set_num_interop_threads(1);
+    tch::Cuda::cudnn_set_benchmark(true);
     let args = Args::parse();
     let metrics = Metrics::new();
     let trainer = TrainerHandle::new(args.runs_dir, metrics.clone(), RunConfig::default());

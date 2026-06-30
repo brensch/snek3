@@ -1,4 +1,4 @@
-import type { RunConfig, RunList, RunState } from "../types";
+import type { HistoryResponse, RunConfig, RunList, RunState } from "../types";
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
@@ -28,6 +28,7 @@ export const api = {
     const state = await getJson<Omit<RunState, "phase"> & { phase: number }>("/api/state");
     return { ...state, phase: phaseName(state.phase) };
   },
+  history: () => getJson<HistoryResponse>("/api/metrics/history").catch(() => ({ metrics: [] })),
   start: (runId: string, fresh: boolean) => postJson<{ run_id: string }>("/api/control/start", { run_id: runId, fresh }),
   stop: () => postJson<{ stopping: boolean }>("/api/control/stop"),
 };

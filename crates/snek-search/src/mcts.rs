@@ -823,6 +823,21 @@ impl MctsForest {
             .collect()
     }
 
+    /// Serial selection variant for high-frequency self-play shards. For small
+    /// shard sizes this avoids Rayon scheduling overhead on every GPU request.
+    pub fn select_serial(&mut self) -> Vec<usize> {
+        for (tree, &frozen) in self.trees.iter_mut().zip(self.frozen.iter()) {
+            if frozen {
+                tree.pending_leaf = None;
+            } else {
+                tree.select();
+            }
+        }
+        (0..self.trees.len())
+            .filter(|&i| !self.frozen[i] && self.trees[i].pending_leaf.is_some())
+            .collect()
+    }
+
     /// Freeze every still-active tree whose root decision is already exact *no
     /// matter how many more sims run*: all alive snakes have ≤1 legal candidate,
     /// so each snake's root visit policy is one-hot on its single move. Call this
@@ -870,6 +885,20 @@ impl MctsForest {
                     encode_into(board, agent, &mut buf[base..base + obs]);
                 }
             });
+    }
+
+    /// Serial observation writer for self-play shards.
+    pub fn write_pending_obs_serial(&self, pending: &[usize], out: &mut [f32]) {
+        let obs = self.obs_size();
+        let chunk = self.n_snakes * obs;
+        for (buf, &ti) in out.chunks_mut(chunk).zip(pending.iter()) {
+            let leaf = self.trees[ti].pending_leaf.unwrap();
+            let board = &self.trees[ti].nodes[leaf].board;
+            for agent in 0..self.n_snakes {
+                let base = agent * obs;
+                encode_into(board, agent, &mut buf[base..base + obs]);
+            }
+        }
     }
 
     /// Expand and back up the evaluated `pending` leaves. `policies` is
@@ -940,6 +969,19 @@ impl MctsForest {
                 pol.copy_from_slice(&p);
                 val.copy_from_slice(&v[..n]);
             });
+        (policies, values)
+    }
+
+    /// Serial root target extraction for self-play shards.
+    pub fn root_targets_serial(&self) -> (Vec<f32>, Vec<f32>) {
+        let n = self.n_snakes;
+        let mut policies = vec![0.0f32; self.trees.len() * n * 4];
+        let mut values = vec![0.0f32; self.trees.len() * n];
+        for (i, tree) in self.trees.iter().enumerate() {
+            let (p, v) = tree.root_targets();
+            policies[i * n * 4..(i + 1) * n * 4].copy_from_slice(&p);
+            values[i * n..(i + 1) * n].copy_from_slice(&v[..n]);
+        }
         (policies, values)
     }
 

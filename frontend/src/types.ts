@@ -23,7 +23,6 @@ export type RunConfig = {
   buffer_size: number;
   value_weight: number;
   search_threads: number;
-  record_games: number;
   eval_every: number;
   eval_games: number;
 };
@@ -53,15 +52,15 @@ export type StatsFrame = {
   gpu_rows_per_sec: number;
 };
 
-export type Point = { x: number; y: number };
-export type Snake = { alive: boolean; health: number; body: Point[] };
-export type GameSnapshot = {
-  id: number;
-  turn: number;
-  board_w: number;
-  board_h: number;
-  snakes: Snake[];
-  food: Point[];
+export type GenerationMetric = {
+  generation: number;
+  policy_loss: number;
+  value_loss: number;
+  win_rate?: number;
+  completed_games?: number;
+  seconds?: number;
 };
-export type GamesSnapshot = { t_unix_ms: number; games: GameSnapshot[] };
+
+export type HistoryResponse = { metrics: GenerationMetric[] };
+
 export type RunList = { runs: string[]; live: string | null };

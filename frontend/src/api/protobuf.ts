@@ -1,4 +1,4 @@
-import type { GameSnapshot, GamesSnapshot, Phase, Point, Snake, StatsFrame } from "../types";
+import type { Phase, StatsFrame } from "../types";
 
 const phases: Phase[] = ["idle", "playing", "training", "checkpoint", "stopping", "stopped"];
 
@@ -59,60 +59,6 @@ export function decodeStatsFrame(data: string): StatsFrame {
     else r.skip(w);
   }
   return out;
-}
-
-export function decodeGamesSnapshot(data: string): GamesSnapshot {
-  const r = new Reader(fromBase64(data));
-  const out: GamesSnapshot = { t_unix_ms: 0, games: [] };
-  while (!r.done()) {
-    const tag = Number(r.varint());
-    const f = tag >> 3, w = tag & 7;
-    if (f === 1) out.t_unix_ms = Number(r.varint());
-    else if (f === 2) out.games.push(readGame(r.message()));
-    else r.skip(w);
-  }
-  return out;
-}
-
-function readGame(r: Reader): GameSnapshot {
-  const g: GameSnapshot = { id: 0, turn: 0, board_w: 0, board_h: 0, snakes: [], food: [] };
-  while (!r.done()) {
-    const tag = Number(r.varint());
-    const f = tag >> 3, w = tag & 7;
-    if (f === 1) g.id = Number(r.varint());
-    else if (f === 2) g.turn = Number(r.varint());
-    else if (f === 3) g.board_w = Number(r.varint());
-    else if (f === 4) g.board_h = Number(r.varint());
-    else if (f === 5) g.snakes.push(readSnake(r.message()));
-    else if (f === 6) g.food.push(readPoint(r.message()));
-    else r.skip(w);
-  }
-  return g;
-}
-
-function readSnake(r: Reader): Snake {
-  const s: Snake = { alive: false, health: 0, body: [] };
-  while (!r.done()) {
-    const tag = Number(r.varint());
-    const f = tag >> 3, w = tag & 7;
-    if (f === 1) s.alive = r.varint() !== 0n;
-    else if (f === 2) s.health = Number(r.varint());
-    else if (f === 3) s.body.push(readPoint(r.message()));
-    else r.skip(w);
-  }
-  return s;
-}
-
-function readPoint(r: Reader): Point {
-  const p: Point = { x: 0, y: 0 };
-  while (!r.done()) {
-    const tag = Number(r.varint());
-    const f = tag >> 3, w = tag & 7;
-    if (f === 1) p.x = Number(r.varint());
-    else if (f === 2) p.y = Number(r.varint());
-    else r.skip(w);
-  }
-  return p;
 }
 
 function fromBase64(data: string): Uint8Array {

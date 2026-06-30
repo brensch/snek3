@@ -1,10 +1,12 @@
 import { number, percent, rate } from "../lib/format";
-import type { StatsFrame } from "../types";
+import type { RunState, StatsFrame } from "../types";
 
-type Props = { stats: StatsFrame | null };
+type Props = { stats: StatsFrame | null; state: RunState | null };
 
-export function StatGrid({ stats }: Props) {
+export function StatGrid({ stats, state }: Props) {
   const rows = [
+    ["Generation", number(stats?.generation ?? state?.generation)],
+    ["Phase", stats?.phase ?? state?.phase ?? "-"],
     ["Inf/s", rate(stats?.inferences_per_sec)],
     ["GPU rows/s", rate(stats?.gpu_rows_per_sec)],
     ["Games/s", rate(stats?.games_per_sec)],
@@ -12,9 +14,6 @@ export function StatGrid({ stats }: Props) {
     ["Samples", `${number(stats?.samples_collected)} / ${number(stats?.samples_target)}`],
     ["GPU busy", percent(stats?.gpu_busy_pct)],
     ["Batch rows", number(stats?.batch_avg_rows)],
-    ["Policy loss", number(stats?.policy_loss, 3)],
-    ["Value loss", number(stats?.value_loss, 3)],
-    ["Entropy", number(stats?.target_entropy, 3)],
   ];
   return (
     <section className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5">

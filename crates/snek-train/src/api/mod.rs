@@ -17,7 +17,6 @@ use tower_http::cors::CorsLayer;
 pub fn router(trainer: TrainerHandle) -> Router {
     Router::new()
         .route("/api/stream/stats", get(stream_stats))
-        .route("/api/stream/games", get(stream_games))
         .route("/api/state", get(state))
         .route("/api/config", get(get_config).post(set_config))
         .route("/api/control/start", post(start))
@@ -36,23 +35,6 @@ async fn stream_stats(
         loop {
             match rx.recv().await {
                 Ok(frame) => yield Ok(proto_event("stats", frame)),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    };
-    Sse::new(stream)
-        .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
-}
-
-async fn stream_games(
-    State(trainer): State<TrainerHandle>,
-) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
-    let mut rx = trainer.metrics().games_rx();
-    let stream = async_stream::stream! {
-        loop {
-            match rx.recv().await {
-                Ok(frame) => yield Ok(proto_event("games", frame)),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -112,8 +94,15 @@ async fn runs(State(trainer): State<TrainerHandle>) -> Response {
     }
 }
 
-async fn history() -> Json<serde_json::Value> {
-    Json(json!({ "metrics": [] }))
+async fn history(State(trainer): State<TrainerHandle>) -> Response {
+    match trainer.history() {
+        Ok(metrics) => Json(json!({ "metrics": metrics })).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "detail": err.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 fn proto_event<M: Message>(event: &'static str, msg: M) -> Event {

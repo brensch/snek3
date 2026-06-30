@@ -14,6 +14,7 @@ use tch::{no_grad, Device, Kind, Tensor};
 
 type GpuReq = Option<(usize, Vec<f32>, usize)>;
 type GpuRes = (usize, Vec<f32>, Vec<f32>);
+type FinishReq = Option<FinishedGame>;
 
 struct WorkerNet(*const snek_tch::AZNet);
 
@@ -51,6 +52,17 @@ struct Slot {
     steps: usize,
 }
 
+struct FinishedGame {
+    slot: Slot,
+    winner: Option<usize>,
+}
+
+struct SampleChunk {
+    obs: Vec<f32>,
+    pol: Vec<f32>,
+    z: Vec<f32>,
+}
+
 pub fn generate(
     net: &SelfPlayNet<'_>,
     cfg: &RunConfig,
@@ -85,6 +97,8 @@ pub fn generate(
     std::thread::scope(|scope| -> anyhow::Result<Samples> {
         let (tx_req, rx_req) = std::sync::mpsc::channel::<GpuReq>();
         let (tx_res, rx_res) = std::sync::mpsc::channel::<GpuRes>();
+        let (tx_finish, rx_finish) = std::sync::mpsc::channel::<FinishReq>();
+        let (tx_chunk, rx_chunk) = std::sync::mpsc::channel::<SampleChunk>();
         let gpu_counters = Arc::clone(&counters);
         let gpu_net = WorkerNet(net.net as *const snek_tch::AZNet);
         let gpu_device = net.device;
@@ -109,17 +123,43 @@ pub fn generate(
             }
             Ok(())
         });
+        let draw_value = cfg.draw_value;
+        let bootstrap_value = cfg.bootstrap_value;
+        let collector = scope.spawn(move || -> anyhow::Result<()> {
+            while let Ok(msg) = rx_finish.recv() {
+                let Some(done) = msg else { break };
+                if tx_chunk
+                    .send(materialize_finished_game(
+                        done,
+                        n,
+                        obs_len,
+                        draw_value,
+                        bootstrap_value,
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(())
+        });
 
         let run_result = (|| -> anyhow::Result<()> {
-            while out_z.len() < cfg.samples_per_gen && !stop.load(Ordering::Relaxed) {
-                metrics.replace_games(
-                    &boards
-                        .iter()
-                        .cloned()
-                        .zip(turns.iter().copied())
-                        .map(|(b, t)| (t, b))
-                        .collect::<Vec<_>>(),
+            let mut pending_samples = 0usize;
+            while out_z.len() + pending_samples < cfg.samples_per_gen
+                && !stop.load(Ordering::Relaxed)
+            {
+                drain_sample_chunks(
+                    &rx_chunk,
+                    &mut out_obs,
+                    &mut out_pol,
+                    &mut out_z,
+                    &mut pending_samples,
+                    cfg.samples_per_gen,
                 );
+                if out_z.len() >= cfg.samples_per_gen {
+                    break;
+                }
                 let (root_pol, root_val) = search_sharded(&tx_req, &rx_res, &boards, cfg)?;
                 for (g, board) in boards.iter().enumerate() {
                     let slot = &mut slots[g];
@@ -163,48 +203,43 @@ pub fn generate(
                         turns[g] = 0;
                         continue;
                     }
-                    let final_alive_base = slot.steps.saturating_sub(1) * n;
-                    for st in 0..slot.steps {
-                        for s in 0..n {
-                            if !slot.alive[st * n + s] {
-                                continue;
-                            }
-                            let oi = (st * n + s) * obs_len;
-                            out_obs.extend_from_slice(&slot.obs[oi..oi + obs_len]);
-                            let pi = (st * n + s) * 4;
-                            out_pol.extend_from_slice(&slot.pol[pi..pi + 4]);
-                            out_z.push(if cfg.bootstrap_value {
-                                slot.value[st * n + s]
-                            } else {
-                                terminal_value(
-                                    winner,
-                                    s,
-                                    slot.alive[final_alive_base + s],
-                                    cfg.draw_value,
-                                )
-                            });
-                            if out_z.len() >= cfg.samples_per_gen {
-                                break;
-                            }
-                        }
-                        if out_z.len() >= cfg.samples_per_gen {
-                            break;
-                        }
-                    }
+                    pending_samples += slot.alive.iter().filter(|&&alive| alive).count();
+                    tx_finish.send(Some(FinishedGame { slot, winner }))?;
                     games += 1;
                     counters.completed_games.fetch_add(1, Ordering::Relaxed);
-                    counters
-                        .samples_collected
-                        .store(out_z.len() as u32, Ordering::Relaxed);
                     boards[g] = standard_start(cfg.board, cfg.board, n, &mut rng);
                     turns[g] = 0;
                 }
+                drain_sample_chunks(
+                    &rx_chunk,
+                    &mut out_obs,
+                    &mut out_pol,
+                    &mut out_z,
+                    &mut pending_samples,
+                    cfg.samples_per_gen,
+                );
+                counters
+                    .samples_collected
+                    .store(out_z.len() as u32, Ordering::Relaxed);
             }
             Ok(())
         })();
         let _ = tx_req.send(None);
+        let _ = tx_finish.send(None);
         gpu.join()
             .map_err(|_| anyhow::anyhow!("GPU worker panicked"))??;
+        collector
+            .join()
+            .map_err(|_| anyhow::anyhow!("sample collector panicked"))??;
+        let mut pending_samples = usize::MAX;
+        drain_sample_chunks(
+            &rx_chunk,
+            &mut out_obs,
+            &mut out_pol,
+            &mut out_z,
+            &mut pending_samples,
+            cfg.samples_per_gen,
+        );
         run_result?;
 
         Ok(Samples {
@@ -216,6 +251,60 @@ pub fn generate(
             games,
         })
     })
+}
+
+fn materialize_finished_game(
+    done: FinishedGame,
+    n: usize,
+    obs_len: usize,
+    draw_value: f32,
+    bootstrap_value: bool,
+) -> SampleChunk {
+    let slot = done.slot;
+    let kept = slot.alive.iter().filter(|&&alive| alive).count();
+    let mut obs = Vec::with_capacity(kept * obs_len);
+    let mut pol = Vec::with_capacity(kept * 4);
+    let mut z = Vec::with_capacity(kept);
+    let final_alive_base = slot.steps.saturating_sub(1) * n;
+    for st in 0..slot.steps {
+        for s in 0..n {
+            if !slot.alive[st * n + s] {
+                continue;
+            }
+            let oi = (st * n + s) * obs_len;
+            obs.extend_from_slice(&slot.obs[oi..oi + obs_len]);
+            let pi = (st * n + s) * 4;
+            pol.extend_from_slice(&slot.pol[pi..pi + 4]);
+            z.push(if bootstrap_value {
+                slot.value[st * n + s]
+            } else {
+                terminal_value(done.winner, s, slot.alive[final_alive_base + s], draw_value)
+            });
+        }
+    }
+    SampleChunk { obs, pol, z }
+}
+
+fn drain_sample_chunks(
+    rx: &Receiver<SampleChunk>,
+    out_obs: &mut Vec<f32>,
+    out_pol: &mut Vec<f32>,
+    out_z: &mut Vec<f32>,
+    pending_samples: &mut usize,
+    target: usize,
+) {
+    while let Ok(chunk) = rx.try_recv() {
+        *pending_samples = pending_samples.saturating_sub(chunk.z.len());
+        let remaining = target.saturating_sub(out_z.len());
+        if remaining == 0 {
+            continue;
+        }
+        let take = remaining.min(chunk.z.len());
+        let obs_len = chunk.obs.len() / chunk.z.len().max(1);
+        out_obs.extend_from_slice(&chunk.obs[..take * obs_len]);
+        out_pol.extend_from_slice(&chunk.pol[..take * 4]);
+        out_z.extend_from_slice(&chunk.z[..take]);
+    }
 }
 
 fn search_sharded(
@@ -265,7 +354,7 @@ fn search_sharded(
     }
 
     for forest in &forests {
-        let (pol, val) = forest.root_targets();
+        let (pol, val) = forest.root_targets_serial();
         all_pol.extend_from_slice(&pol);
         all_val.extend_from_slice(&val);
     }
@@ -273,10 +362,10 @@ fn search_sharded(
 }
 
 fn select_write(forest: &mut MctsForest, pending: &mut Vec<usize>) -> (Vec<f32>, usize) {
-    *pending = forest.select();
+    *pending = forest.select_serial();
     let rows = pending.len() * forest.n_snakes;
     let mut obs = vec![0.0f32; rows * forest.obs_size()];
-    forest.write_pending_obs(pending, &mut obs);
+    forest.write_pending_obs_serial(pending, &mut obs);
     (obs, rows)
 }
 

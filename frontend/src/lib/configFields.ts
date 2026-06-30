@@ -23,7 +23,6 @@ export const configFields: Array<{ key: keyof RunConfig; label: string; hint?: s
   { key: "buffer_size", label: "Buffer" },
   { key: "value_weight", label: "Value weight" },
   { key: "search_threads", label: "Threads" },
-  { key: "record_games", label: "Record" },
   { key: "eval_every", label: "Eval every" },
   { key: "eval_games", label: "Eval games" },
 ];
