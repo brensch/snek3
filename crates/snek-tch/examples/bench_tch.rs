@@ -1,6 +1,5 @@
 //! tch-rs/libtorch inference throughput on the live net shape (14x11x11, trunk
-//! 96x8), to compare against ort (~57k rows/s @512). Mirrors the ort/burn
-//! benches. Set mode to:
+//! 96x8). Set mode to:
 //! - `copy` (default): H2D input + forward + D2H outputs.
 //! - `resident`: input stays on GPU; synchronize after forward.
 

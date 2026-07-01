@@ -21,10 +21,9 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use snek_core::json::parse_move_request;
-use snek_infer::Net;
 use snek_search::{ActionStat, ChildEdge, NodeSnake, TreeNodeSnapshot, TreeSnapshot};
 
-use snek_server::{serve_move_replay, Config};
+use snek_server::{serve_move_replay, Config, Net};
 
 /// Result of handling a viewer request: a status code and a JSON (or text) body.
 pub struct ViewerResponse {

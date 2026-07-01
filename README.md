@@ -8,10 +8,9 @@ AlphaZero-style Battlesnake training and serving in Rust.
 | --- | --- |
 | `crates/snek-core` | Rules engine, standard board setup, observation encoding. |
 | `crates/snek-search` | Simultaneous-move decoupled-PUCT MCTS. |
-| `crates/snek-tch` | Libtorch/tch policy+value network used by the trainer. |
+| `crates/snek-tch` | Libtorch/tch policy+value network used by training and serving. |
 | `crates/snek-train` | Rust training binary plus realtime API for the frontend. |
-| `crates/snek-server` | Battlesnake `/move` API server using the existing ONNX path. |
-| `crates/snek-infer` | ONNX Runtime inference wrapper used by `snek-server`. |
+| `crates/snek-server` | Battlesnake `/move` API server using the same tch network/checkpoint format. |
 | `frontend` | Standalone Vite/React dashboard. |
 | `archived` | Previous Python trainer/dashboard/bindings kept for reference during the port. |
 
@@ -31,7 +30,6 @@ Key routes:
 | Route | Purpose |
 | --- | --- |
 | `GET /api/stream/stats` | protobuf `StatsFrame` over SSE, base64 encoded |
-| `GET /api/stream/games` | protobuf `GamesSnapshot` over SSE, base64 encoded |
 | `GET /api/state` | current run state |
 | `GET/POST /api/config` | training knobs |
 | `POST /api/control/start` | start or resume a run |
@@ -65,16 +63,16 @@ make frontend-build
 
 ## Libtorch
 
-The trainer uses `tch`. For the current development setup, reuse the installed
-PyTorch libtorch:
+The trainer, network crate, and Battlesnake server use `tch`. For the current
+development setup, reuse the installed PyTorch libtorch:
 
 ```bash
 export LIBTORCH_USE_PYTORCH=1
 export LIBTORCH_BYPASS_VERSION_CHECK=1
 ```
 
-The Makefile applies those variables for trainer build/run targets. A fully
-standalone libtorch install can be used by setting `LIBTORCH` instead.
+The Makefile applies those variables for trainer and serving build/run targets.
+A fully standalone libtorch install can be used by setting `LIBTORCH` instead.
 
 ## Commands
 
@@ -83,7 +81,7 @@ make test             # top-level Rust tests
 make train            # build and run snek-train
 make frontend         # Vite dev server
 make frontend-build   # static frontend build
-make api              # existing Battlesnake /move server
+make api              # Battlesnake /move server
 make fmt
 make lint
 ```

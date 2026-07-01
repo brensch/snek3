@@ -1,6 +1,6 @@
 //! The snek3 AZNet (`arch="grid"`) in tch-rs (libtorch), matching
-//! the archived `azsnek/net.py`. Same layers as the burn port, but on libtorch so it
-//! uses cuDNN — the apples-to-apples comparison against the ONNX/ort path.
+//! the archived `azsnek/net.py`. Uses libtorch/cuDNN and is shared by training
+//! and serving.
 
 use tch::{nn, nn::Module, Kind, Tensor};
 

@@ -1,5 +1,5 @@
-//! Battlesnake `/move` API server — pure-Rust AlphaZero serving for a small CPU
-//! box. Every `/move` runs decoupled-PUCT MCTS over the ONNX policy+value net via
+//! Battlesnake `/move` API server — pure-Rust AlphaZero serving. Every `/move`
+//! runs decoupled-PUCT MCTS over the tch policy+value net via
 //! [`snek_server::serve_move`] — the same search as self-play, so what we serve
 //! matches what we trained. Stateless per move; `/end` finalizes the game log.
 //!
@@ -9,7 +9,7 @@
 //! the end, so per-move compute is never spent on logging.
 //!
 //! Config (env vars):
-//!   SNEK_MODEL        ONNX model path (default ./model.onnx)
+//!   SNEK_MODEL        safetensors model path (default ./net.safetensors)
 //!   SNEK_PORT         listen port (default 8000)
 //!   SNEK_THREADS      worker threads (default 2)
 //!   SNEK_MAX_SIMS     safety cap on MCTS simulations per move (default 100000)
@@ -17,7 +17,7 @@
 //!   SNEK_DEADLINE_MARGIN_MS  response margin reserved from timeout (default 150)
 //!   SNEK_C_PUCT       PUCT exploration constant (default 1.5)
 //!   SNEK_DRAW_VALUE   terminal value of a draw at leaves (default -0.25)
-//!   SNEK_EVAL_CHUNK   max obs rows per ONNX forward (default 4096)
+//!   SNEK_EVAL_CHUNK   max obs rows per net forward (default 4096)
 //!   SNEK_MOVE_LOG_DIR per-game compressed game log dir; empty disables (default logs/api_moves)
 //!   SNEK_GAME_IDLE_SECS  finalize a silent game as incomplete after this many seconds (default 300)
 //!   SNEK_LOG_ZSTD_LEVEL  zstd level for game logs, compressed at game end (default 19)
@@ -35,8 +35,7 @@ use std::time::{Duration, Instant};
 use recorder::{ActionDebug, MoveRecord, Recorder, SearchInfo, SnakeState};
 use rust_embed::RustEmbed;
 use snek_core::json::parse_move_request;
-use snek_infer::Net;
-use snek_server::{env_or, serve_move_until_diagnostics, Config, SearchDecision, MOVES};
+use snek_server::{env_or, serve_move_until_diagnostics, Config, Net, SearchDecision, MOVES};
 use tiny_http::{Header, Method, Response, Server};
 
 /// The built Vite viewer, embedded into the binary so the API ships
@@ -86,7 +85,11 @@ fn short_sha(sha: &str) -> &str {
 }
 
 fn main() {
-    let model = std::env::var("SNEK_MODEL").unwrap_or_else(|_| "model.onnx".into());
+    tch::set_num_threads(1);
+    tch::set_num_interop_threads(1);
+    tch::Cuda::cudnn_set_benchmark(true);
+
+    let model = std::env::var("SNEK_MODEL").unwrap_or_else(|_| "net.safetensors".into());
     let port: u16 = env_or("SNEK_PORT", 8000);
     let threads: usize = env_or("SNEK_THREADS", 2usize).max(1);
     let log_dir = move_log_dir();
@@ -145,11 +148,10 @@ fn main() {
 }
 
 fn build_app(model: String, log_dir: Option<PathBuf>, settings: &AppSettings) -> Arc<App> {
-    let net =
-        Net::load(&model).unwrap_or_else(|e| panic!("failed to load ONNX model '{model}': {e}"));
+    let net = Net::load(&model).unwrap_or_else(|e| panic!("failed to load model '{model}': {e}"));
     // Content hash of the loaded weights, recorded with each game so the viewer
     // can tell whether a replay used the same model the game was played with
-    // (the weights file, e.g. `latest.onnx`, can be overwritten by training).
+    // (the weights file can be overwritten by training).
     let model_sha = model_hash(&model);
     let recorder_cfg = serde_json::json!({
         "max_sims": settings.cfg.max_sims,

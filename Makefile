@@ -7,7 +7,7 @@ FRESH ?=
 BIND ?= 127.0.0.1:$(PORT)
 
 SERVE_PORT ?= 8000
-MODEL ?= checkpoints/latest.onnx
+MODEL ?= net.safetensors
 API_MAX_SIMS ?= 100000
 API_TIMEOUT_MS ?= 500
 API_DEADLINE_MARGIN_MS ?= 150
@@ -58,9 +58,10 @@ frontend-build: ## Build the standalone Vite frontend
 	cd frontend && npm install && npm run build
 
 api-build: ## Build the Battlesnake /move API server
-	cargo build --release --manifest-path crates/snek-server/Cargo.toml
+	$(LIBTORCH_ENV) cargo build --release --manifest-path crates/snek-server/Cargo.toml
 
-api: api-build ## Run the Battlesnake /move API server with an existing ONNX model
+api: api-build ## Run the Battlesnake /move API server with an existing safetensors model
+	$(LIBTORCH_ENV) \
 	SNEK_MODEL=$(MODEL) SNEK_PORT=$(SERVE_PORT) SNEK_MAX_SIMS=$(API_MAX_SIMS) \
 	SNEK_TIMEOUT_MS=$(API_TIMEOUT_MS) SNEK_DEADLINE_MARGIN_MS=$(API_DEADLINE_MARGIN_MS) \
 	SNEK_THREADS=$(API_THREADS) SNEK_EVAL_CHUNK=$(API_EVAL_CHUNK) SNEK_MOVE_LOG_DIR=$(API_MOVE_LOG_DIR) \
@@ -69,3 +70,4 @@ api: api-build ## Run the Battlesnake /move API server with an existing ONNX mod
 clean: ## Remove build outputs
 	cargo clean
 	cargo clean --manifest-path crates/snek-train/Cargo.toml
+	cargo clean --manifest-path crates/snek-server/Cargo.toml

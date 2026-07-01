@@ -1,4 +1,4 @@
-//! Pure-Rust AlphaZero serving: decoupled-PUCT MCTS over a single ONNX
+//! Pure-Rust AlphaZero serving: decoupled-PUCT MCTS over a single tch/libtorch
 //! policy+value net — the *same* search used in self-play (`crates/snek-search`
 //! `MctsForest`), so what we serve matches what we trained.
 //!
@@ -9,8 +9,10 @@
 use std::time::Instant;
 
 use snek_core::{obs_h, obs_w, Board, Move, NUM_CHANNELS};
-use snek_infer::Net;
 use snek_search::{forced_move, MctsForest, TreeSnapshot};
+
+mod net;
+pub use net::Net;
 
 #[derive(Clone, Debug)]
 pub struct RootActionDebug {
@@ -49,7 +51,7 @@ pub struct Config {
     pub c_puct: f32,
     /// Terminal value of a draw at search leaves (match training).
     pub draw_value: f32,
-    /// Max leaf observations per ONNX forward pass.
+    /// Max leaf observations per net forward pass.
     pub eval_chunk: usize,
     /// Leaves collected per batched (virtual-loss) selection round. 1 disables
     /// batching (one leaf per forward, as in self-play's per-game lockstep).
@@ -183,8 +185,7 @@ pub fn serve_move_until_diagnostics(
             }
         }
         // Batched virtual-loss selection: collect up to `leaves_per` distinct
-        // leaves, evaluate them in one (chunked) forward pass. On CPU this
-        // amortizes the per-call ONNX-runtime overhead across many leaves.
+        // leaves, then evaluate them in one chunked forward pass.
         let k = forest.select_batch_first(leaves_per, cfg.virtual_loss);
         if k == 0 {
             terminal_only_sims += 1;

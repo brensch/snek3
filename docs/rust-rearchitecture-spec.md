@@ -35,10 +35,10 @@ Python; rewriting the MCTS math.
 | Rules / board / encode | `crates/snek-core` | keep |
 | MCTS forest (`MctsForest`) | `crates/snek-search` | keep |
 | Self-play loop `generate_selfplay` | `crates/snek-py` (PyO3) | **port** to pure Rust (swap ort→tch), then archive crate |
-| ort inference wrapper | `crates/snek-infer` | keep only for `snek-server`; not used by trainer |
+| ort inference wrapper | `crates/snek-infer` | removed after `snek-server` moved to tch |
 | tch net (`AZNet`, `init_orthogonal`) | `crates/snek-tch` | **keep — core of new trainer** |
-| burn net + bench | `crates/snek-burn` | keep as documentation of why cubecl was rejected (or archive) |
-| `/move` API + arena | `crates/snek-server` | keep (unchanged) |
+| burn net + bench | `crates/snek-burn` | removed |
+| `/move` API + arena | `crates/snek-server` | keep; now uses `snek-tch` |
 | Python trainer / dashboard / tests | `python/` | **archive** |
 | React/Vite dashboard UI | `python/dashboard/ui` | **move** to `/frontend`, repoint at Rust API |
 
@@ -50,8 +50,7 @@ crates/
   snek-search/    (unchanged)
   snek-tch/       net + training primitives (grow this)
   snek-train/     NEW binary: self-play + train + API + orchestration
-  snek-server/    (unchanged; deployed /move server)
-  snek-infer/     (used only by snek-server)
+  snek-server/    deployed /move server, using snek-tch
 frontend/         NEW: standalone Vite app (moved from python/dashboard/ui)
 archived/
   python/         (everything from python/, for reference)
@@ -60,7 +59,7 @@ docs/
   rust-rearchitecture-spec.md   (this file)
 ```
 
-`snek-train` is a standalone crate (its own `[workspace]`, like `snek-tch`/`snek-infer`)
+`snek-train` is a standalone crate (its own `[workspace]`, like `snek-tch`)
 that path-depends on `snek-core`, `snek-search`, `snek-tch`, and links libtorch.
 
 ## 4. `snek-train` internals
@@ -347,9 +346,8 @@ UI at step 9.
   (`LD_PRELOAD` quirk). Fine for the training box; documented.
 - **Games stream volume.** 512 games at a few Hz over base64 SSE — measure; fall
   back to WebSocket/binary if needed (schema unchanged).
-- **`snek-server` divergence.** It still uses ort/ONNX for serving. We either keep
-  exporting an ONNX artifact at release time, or later move serving to tch too.
-  Out of scope here; flagged.
+- **`snek-server` divergence.** Superseded: serving now uses the same
+  `snek-tch` checkpoint format as training.
 - **Buffer persistence size.** Persisting the replay buffer (step 5/6) trades disk
   for resume quality; cap and shard like today's `buffer/`.
 
@@ -358,5 +356,6 @@ UI at step 9.
 - `crates/snek-tch`: exact, validated `AZNet` + correct `init_orthogonal` + a
   throughput bench (71k rows/s @512). This is the net the trainer will use.
 - GPU/libtorch env recipe proven and recorded in AGENTS.md.
-- burn/cubecl rejected with data (~12× too slow) — `crates/snek-burn` documents it.
+- burn/cubecl rejected with data (~12× too slow); the experimental crate was
+  removed once the tch path became canonical.
 ```

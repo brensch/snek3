@@ -5,7 +5,7 @@
 - Rust rules and search live under `crates/snek-core` and `crates/snek-search`.
 - The Rust trainer/API is `crates/snek-train`; it is a standalone Cargo project because it links libtorch through `tch`.
 - The policy/value net is `crates/snek-tch`.
-- The Battlesnake `/move` API remains `crates/snek-server` and uses `crates/snek-infer`/ONNX Runtime.
+- The Battlesnake `/move` API is `crates/snek-server` and uses the same `snek-tch` checkpoint format as the trainer.
 - The dashboard is the standalone Vite React TypeScript app in `frontend/`.
 - Previous Python code is archived under `archived/` for reference only.
 - Training outputs are runtime data under `runs/` and are ignored by git. Logs are under `logs/` and ignored.
@@ -16,29 +16,21 @@
 - `make train START=1 RUN_ID=<id>`: build and run the Rust trainer/API.
 - `make frontend`: run the Vite frontend, proxying `/api` to the trainer.
 - `make frontend-build`: build the frontend to `frontend/dist`.
-- `make api`: run the existing Battlesnake `/move` server.
+- `make api MODEL=runs/<run-id>/net.safetensors`: run the Battlesnake `/move` server.
 
 ## Libtorch / GPU Notes
 
-`crates/snek-train` and `crates/snek-tch` use `tch`, so build/run with libtorch
-available. The current dev shortcut reuses the local PyTorch libtorch:
+`crates/snek-train`, `crates/snek-tch`, and `crates/snek-server` use `tch`, so
+build/run with libtorch available. The current dev shortcut reuses the local
+PyTorch libtorch:
 
 ```sh
 export LIBTORCH_USE_PYTORCH=1
 export LIBTORCH_BYPASS_VERSION_CHECK=1
 ```
 
-The Makefile applies those variables for trainer targets. A standalone libtorch
-install can be used with `LIBTORCH=/path/to/libtorch`.
-
-The older ONNX Runtime path is still used by `snek-server`. For standalone Rust
-ONNX binaries that need GPU, set:
-
-```sh
-SP=.venv/lib/python3.12/site-packages
-export ORT_DYLIB_PATH="$(ls $SP/onnxruntime/capi/libonnxruntime.so* | head -1)"
-export LD_LIBRARY_PATH="$(find $SP/nvidia -name lib -type d | tr '\n' ':')$SP/onnxruntime/capi:$LD_LIBRARY_PATH"
-```
+The Makefile applies those variables for trainer and serving targets. A
+standalone libtorch install can be used with `LIBTORCH=/path/to/libtorch`.
 
 ## Training State
 
@@ -61,4 +53,4 @@ Each Rust trainer run writes to `runs/<run-id>/`:
 
 - Frontend files should stay TypeScript, small, and single concern.
 - Rebuild with `make frontend-build` after React/CSS changes.
-- Realtime stats stream from `/api/stream/stats`; live boards stream from `/api/stream/games`.
+- Realtime stats stream from `/api/stream/stats`.
