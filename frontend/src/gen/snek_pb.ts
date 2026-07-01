@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file snek.proto.
  */
 export const file_snek: GenFile = /*@__PURE__*/
-  fileDesc("CgpzbmVrLnByb3RvEgRzbmVrIt0CCgpTdGF0c0ZyYW1lEhEKCXRfdW5peF9tcxgBIAEoBBISCgpnZW5lcmF0aW9uGAIgASgNEhoKBXBoYXNlGAMgASgOMgsuc25lay5QaGFzZRIaChJpbmZlcmVuY2VzX3Blcl9zZWMYBCABKAESFQoNZ2FtZXNfcGVyX3NlYxgFIAEoARIdChVjb21wbGV0ZWRfZ2FtZXNfdG90YWwYBiABKAQSGQoRc2FtcGxlc19jb2xsZWN0ZWQYByABKA0SFgoOc2FtcGxlc190YXJnZXQYCCABKA0SFAoMZ3B1X2J1c3lfcGN0GAkgASgBEhYKDmJhdGNoX2F2Z19yb3dzGAogASgNEhMKC3BvbGljeV9sb3NzGAsgASgBEhIKCnZhbHVlX2xvc3MYDCABKAESFgoOdGFyZ2V0X2VudHJvcHkYDSABKAESGAoQZ3B1X3Jvd3NfcGVyX3NlYxgOIAEoASKMAQoRR2VuZXJhdGlvblN1bW1hcnkSEgoKZ2VuZXJhdGlvbhgBIAEoDRITCgtwb2xpY3lfbG9zcxgCIAEoARISCgp2YWx1ZV9sb3NzGAMgASgBEhAKCHdpbl9yYXRlGAQgASgBEhcKD2NvbXBsZXRlZF9nYW1lcxgFIAEoDRIPCgdzZWNvbmRzGAYgASgBIlsKCFJ1blN0YXRlEhoKBXBoYXNlGAEgASgOMgsuc25lay5QaGFzZRISCgpnZW5lcmF0aW9uGAIgASgNEg4KBnJ1bl9pZBgDIAEoCRIPCgdydW5uaW5nGAQgASgIKlcKBVBoYXNlEggKBElETEUQABILCgdQTEFZSU5HEAESDAoIVFJBSU5JTkcQAhIOCgpDSEVDS1BPSU5UEAMSDAoIU1RPUFBJTkcQBBILCgdTVE9QUEVEEAViBnByb3RvMw");
+  fileDesc("CgpzbmVrLnByb3RvEgRzbmVrIowDCgpTdGF0c0ZyYW1lEhEKCXRfdW5peF9tcxgBIAEoBBISCgpnZW5lcmF0aW9uGAIgASgNEhoKBXBoYXNlGAMgASgOMgsuc25lay5QaGFzZRIaChJpbmZlcmVuY2VzX3Blcl9zZWMYBCABKAESFQoNZ2FtZXNfcGVyX3NlYxgFIAEoARIdChVjb21wbGV0ZWRfZ2FtZXNfdG90YWwYBiABKAQSGQoRc2FtcGxlc19jb2xsZWN0ZWQYByABKA0SFgoOc2FtcGxlc190YXJnZXQYCCABKA0SFAoMZ3B1X2J1c3lfcGN0GAkgASgBEhYKDmJhdGNoX2F2Z19yb3dzGAogASgNEhMKC3BvbGljeV9sb3NzGAsgASgBEhIKCnZhbHVlX2xvc3MYDCABKAESFgoOdGFyZ2V0X2VudHJvcHkYDSABKAESGAoQZ3B1X3Jvd3NfcGVyX3NlYxgOIAEoARISCgp0cmFpbl9zdGVwGA8gASgNEhkKEXRyYWluX3N0ZXBzX3RvdGFsGBAgASgNIlsKCFJ1blN0YXRlEhoKBXBoYXNlGAEgASgOMgsuc25lay5QaGFzZRISCgpnZW5lcmF0aW9uGAIgASgNEg4KBnJ1bl9pZBgDIAEoCRIPCgdydW5uaW5nGAQgASgIKlcKBVBoYXNlEggKBElETEUQABILCgdQTEFZSU5HEAESDAoIVFJBSU5JTkcQAhIOCgpDSEVDS1BPSU5UEAMSDAoIU1RPUFBJTkcQBBILCgdTVE9QUEVEEAViBnByb3RvMw");
 
 /**
  * @generated from message snek.StatsFrame
@@ -85,6 +85,16 @@ export type StatsFrame = Message<"snek.StatsFrame"> & {
    * @generated from field: double gpu_rows_per_sec = 14;
    */
   gpuRowsPerSec: number;
+
+  /**
+   * @generated from field: uint32 train_step = 15;
+   */
+  trainStep: number;
+
+  /**
+   * @generated from field: uint32 train_steps_total = 16;
+   */
+  trainStepsTotal: number;
 };
 
 /**
@@ -93,48 +103,6 @@ export type StatsFrame = Message<"snek.StatsFrame"> & {
  */
 export const StatsFrameSchema: GenMessage<StatsFrame> = /*@__PURE__*/
   messageDesc(file_snek, 0);
-
-/**
- * @generated from message snek.GenerationSummary
- */
-export type GenerationSummary = Message<"snek.GenerationSummary"> & {
-  /**
-   * @generated from field: uint32 generation = 1;
-   */
-  generation: number;
-
-  /**
-   * @generated from field: double policy_loss = 2;
-   */
-  policyLoss: number;
-
-  /**
-   * @generated from field: double value_loss = 3;
-   */
-  valueLoss: number;
-
-  /**
-   * @generated from field: double win_rate = 4;
-   */
-  winRate: number;
-
-  /**
-   * @generated from field: uint32 completed_games = 5;
-   */
-  completedGames: number;
-
-  /**
-   * @generated from field: double seconds = 6;
-   */
-  seconds: number;
-};
-
-/**
- * Describes the message snek.GenerationSummary.
- * Use `create(GenerationSummarySchema)` to create a new message.
- */
-export const GenerationSummarySchema: GenMessage<GenerationSummary> = /*@__PURE__*/
-  messageDesc(file_snek, 1);
 
 /**
  * @generated from message snek.RunState
@@ -166,7 +134,7 @@ export type RunState = Message<"snek.RunState"> & {
  * Use `create(RunStateSchema)` to create a new message.
  */
 export const RunStateSchema: GenMessage<RunState> = /*@__PURE__*/
-  messageDesc(file_snek, 2);
+  messageDesc(file_snek, 1);
 
 /**
  * @generated from enum snek.Phase

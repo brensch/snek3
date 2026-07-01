@@ -1,8 +1,16 @@
 use crate::proto::{Phase, StatsFrame};
+use serde::Serialize;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
+
+/// A human-readable trainer event, streamed to the terminal and the frontend.
+#[derive(Clone, Debug, Serialize)]
+pub struct LogEntry {
+    pub t_unix_ms: u64,
+    pub message: String,
+}
 
 #[derive(Default)]
 pub struct Counters {
@@ -10,6 +18,8 @@ pub struct Counters {
     pub phase: AtomicU32,
     pub samples_collected: AtomicU32,
     pub samples_target: AtomicU32,
+    pub train_step: AtomicU32,
+    pub train_steps_total: AtomicU32,
     pub completed_games: AtomicU64,
     pub inferences: AtomicU64,
     pub gpu_forward_us: AtomicU64,
@@ -39,14 +49,17 @@ impl Counters {
 pub struct Metrics {
     counters: Arc<Counters>,
     stats_tx: broadcast::Sender<StatsFrame>,
+    log_tx: broadcast::Sender<LogEntry>,
 }
 
 impl Metrics {
     pub fn new() -> Self {
         let (stats_tx, _) = broadcast::channel(256);
+        let (log_tx, _) = broadcast::channel(256);
         Self {
             counters: Arc::new(Counters::default()),
             stats_tx,
+            log_tx,
         }
     }
 
@@ -56,6 +69,20 @@ impl Metrics {
 
     pub fn stats_rx(&self) -> broadcast::Receiver<StatsFrame> {
         self.stats_tx.subscribe()
+    }
+
+    pub fn log_rx(&self) -> broadcast::Receiver<LogEntry> {
+        self.log_tx.subscribe()
+    }
+
+    /// Emit a trainer event: logged to the terminal and streamed to any frontend.
+    pub fn log(&self, message: impl Into<String>) {
+        let message = message.into();
+        tracing::info!(target: "snek", "{message}");
+        let _ = self.log_tx.send(LogEntry {
+            t_unix_ms: unix_ms(),
+            message,
+        });
     }
 
     pub fn set_phase(&self, phase: Phase) {
@@ -114,6 +141,8 @@ impl Metrics {
                 completed_games_total: games,
                 samples_collected: self.counters.samples_collected.load(Ordering::Relaxed),
                 samples_target: self.counters.samples_target.load(Ordering::Relaxed),
+                train_step: self.counters.train_step.load(Ordering::Relaxed),
+                train_steps_total: self.counters.train_steps_total.load(Ordering::Relaxed),
                 gpu_busy_pct: gpu_busy_ema,
                 batch_avg_rows: (row_delta / req_delta) as u32,
                 policy_loss: f64::from_bits(self.counters.policy_loss_bits.load(Ordering::Relaxed)),

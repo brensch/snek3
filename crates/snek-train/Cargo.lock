@@ -1387,15 +1387,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "snek-search"
-version = "0.1.0"
-dependencies = [
- "arrayvec",
- "rayon",
- "snek-core",
-]
-
-[[package]]
 name = "snek-tch"
 version = "0.1.0"
 dependencies = [
@@ -1425,7 +1416,6 @@ dependencies = [
  "serde",
  "serde_json",
  "snek-core",
- "snek-search",
  "snek-tch",
  "tch",
  "tokio",

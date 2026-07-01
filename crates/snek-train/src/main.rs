@@ -1,4 +1,5 @@
 mod api;
+mod carry;
 mod config;
 mod metrics;
 mod proto;
@@ -38,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     tch::set_num_threads(1);
     tch::set_num_interop_threads(1);
-    tch::Cuda::cudnn_set_benchmark(true);
+    tch::Cuda::cudnn_set_benchmark(std::env::var("SNEK_CUDNN_BENCH").as_deref() != Ok("0"));
     let args = Args::parse();
     let metrics = Metrics::new();
     let trainer = TrainerHandle::new(args.runs_dir, metrics.clone(), RunConfig::default());
@@ -47,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         trainer.start(trainer::StartRequest {
             run_id: args.run_id,
             fresh: Some(args.fresh),
+            config: None,
         })?;
     }
     let app = api::router(trainer);

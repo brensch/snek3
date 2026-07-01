@@ -113,6 +113,17 @@ struct MetricJson {
     value_loss: Option<f64>,
     win_rate: Option<f64>,
     completed_games: Option<u32>,
+    target_entropy: Option<f64>,
+    samples: Option<u32>,
+    turns: Option<u32>,
+    buffer: Option<u64>,
+    gen_seconds: Option<f64>,
+    play_seconds: Option<f64>,
+    train_seconds: Option<f64>,
+    inferences_per_sec: Option<f64>,
+    games_per_sec: Option<f64>,
+    gpu_busy_pct: Option<f64>,
+    avg_game_turn: Option<f64>,
 }
 
 fn metrics(root: &Path) -> Vec<proto::MetricRow> {
@@ -135,6 +146,17 @@ fn metrics(root: &Path) -> Vec<proto::MetricRow> {
                 win_rate: win_rate.unwrap_or(0.0),
                 has_win_rate: win_rate.is_some(),
                 completed_games: row.completed_games.unwrap_or(0),
+                target_entropy: row.target_entropy.unwrap_or(0.0),
+                samples: row.samples.unwrap_or(0),
+                turns: row.turns.unwrap_or(0),
+                buffer: row.buffer.unwrap_or(0),
+                gen_seconds: row.gen_seconds.unwrap_or(0.0),
+                play_seconds: row.play_seconds.unwrap_or(0.0),
+                train_seconds: row.train_seconds.unwrap_or(0.0),
+                inferences_per_sec: row.inferences_per_sec.unwrap_or(0.0),
+                games_per_sec: row.games_per_sec.unwrap_or(0.0),
+                gpu_busy_pct: row.gpu_busy_pct.unwrap_or(0.0),
+                avg_game_turn: row.avg_game_turn.unwrap_or(0.0),
             })
         })
         .collect()
@@ -164,6 +186,7 @@ fn gen_from_name(name: &str) -> Option<u32> {
 fn convert_game_file(file: GameFileJson) -> proto::GameFile {
     proto::GameFile {
         gen: file.gen,
+        config_json: file.config.map(|v| v.to_string()).unwrap_or_default(),
         games: file
             .games
             .into_iter()

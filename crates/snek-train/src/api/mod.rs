@@ -19,7 +19,9 @@ use tower_http::cors::CorsLayer;
 pub fn router(trainer: TrainerHandle) -> Router {
     Router::new()
         .route("/api/stream/stats", get(stream_stats))
+        .route("/api/stream/logs", get(stream_logs))
         .route("/api/state", get(state))
+        .route("/api/config", get(config))
         .route("/api/control/start", post(start))
         .route("/api/control/stop", post(stop))
         .route("/api/runs", get(runs))
@@ -48,6 +50,26 @@ async fn stream_stats(
         .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
 }
 
+async fn stream_logs(
+    State(trainer): State<TrainerHandle>,
+) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+    let mut rx = trainer.metrics().log_rx();
+    let stream = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(entry) => match serde_json::to_string(&entry) {
+                    Ok(data) => yield Ok(Event::default().event("log").data(data)),
+                    Err(_) => continue,
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
+}
+
 async fn state(State(trainer): State<TrainerHandle>) -> Json<serde_json::Value> {
     let state = trainer.run_state();
     Json(json!({
@@ -57,6 +79,11 @@ async fn state(State(trainer): State<TrainerHandle>) -> Json<serde_json::Value> 
         "running": state.running,
         "device": trainer.device_label(),
     }))
+}
+
+// The in-memory default config, used to seed the "start fresh run" knob form.
+async fn config(State(trainer): State<TrainerHandle>) -> Json<RunConfig> {
+    Json(trainer.config())
 }
 
 async fn start(State(trainer): State<TrainerHandle>, Json(req): Json<StartRequest>) -> Response {

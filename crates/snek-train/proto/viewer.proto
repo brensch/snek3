@@ -27,14 +27,26 @@ message RunListReply {
   repeated RunSummary runs = 1; // newest first
 }
 
-// A single metrics.jsonl row, projected to the fields the charts use.
+// A single metrics.jsonl row (one per generation), projected to the fields the
+// charts use. All per-gen counts are for that generation only, not cumulative.
 message MetricRow {
   uint32 generation = 1;
   double policy_loss = 2;
   double value_loss = 3;
   double win_rate = 4;
   bool has_win_rate = 5;
-  uint32 completed_games = 6;
+  uint32 completed_games = 6;   // games finished during this generation
+  double target_entropy = 7;
+  uint32 samples = 8;           // training samples collected this generation
+  uint32 turns = 9;             // self-play turns this generation
+  uint64 buffer = 10;           // replay buffer size after this generation
+  double gen_seconds = 11;      // wall time for the whole generation
+  double play_seconds = 12;     // self-play portion
+  double train_seconds = 13;    // training portion
+  double inferences_per_sec = 14;
+  double games_per_sec = 15;
+  double gpu_busy_pct = 16;
+  double avg_game_turn = 17;    // mean game turn across all buffered samples
 }
 
 // A generation that has recorded self-play sample games on disk.
@@ -84,4 +96,5 @@ message Game {
 message GameFile {
   uint32 gen = 1;
   repeated Game games = 2;
+  string config_json = 3;   // training config in effect for this generation
 }

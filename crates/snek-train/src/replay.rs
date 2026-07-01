@@ -8,6 +8,9 @@ pub struct Samples {
     pub obs: Vec<f32>,
     pub pol: Vec<f32>,
     pub z: Vec<f32>,
+    /// Absolute game turn per sample (parallel to `z`). Defaulted for old shards.
+    #[serde(default)]
+    pub turn: Vec<u32>,
     pub obs_shape: [usize; 3],
     pub turns: usize,
     pub games: usize,
@@ -70,10 +73,29 @@ impl ReplayBuffer {
             obs,
             pol,
             z,
+            turn: Vec::new(),
             obs_shape: first.obs_shape,
             turns: 0,
             games: 0,
         })
+    }
+
+    /// Average absolute game turn across every sample currently in the buffer.
+    /// Indicates how deep into games the buffered positions are.
+    pub fn avg_turn(&self) -> f64 {
+        let mut sum = 0u64;
+        let mut count = 0u64;
+        for shard in &self.shards {
+            for &t in &shard.turn {
+                sum += t as u64;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            sum as f64 / count as f64
+        } else {
+            0.0
+        }
     }
 
     pub fn save_shard(&self, dir: &Path, gen: u32, samples: &Samples) -> anyhow::Result<()> {

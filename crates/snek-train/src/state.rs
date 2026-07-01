@@ -29,6 +29,7 @@ pub struct RunPaths {
     pub replay: PathBuf,
     pub metrics: PathBuf,
     pub games: PathBuf,
+    pub carry: PathBuf,
 }
 
 impl RunPaths {
@@ -41,6 +42,7 @@ impl RunPaths {
             replay: root.join("buffer"),
             metrics: root.join("metrics.jsonl"),
             games: root.join("games"),
+            carry: root.join("selfplay.json"),
             root,
         }
     }

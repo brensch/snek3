@@ -25,15 +25,8 @@ message StatsFrame {
   double value_loss = 12;
   double target_entropy = 13;
   double gpu_rows_per_sec = 14;
-}
-
-message GenerationSummary {
-  uint32 generation = 1;
-  double policy_loss = 2;
-  double value_loss = 3;
-  double win_rate = 4;
-  uint32 completed_games = 5;
-  double seconds = 6;
+  uint32 train_step = 15;
+  uint32 train_steps_total = 16;
 }
 
 message RunState {

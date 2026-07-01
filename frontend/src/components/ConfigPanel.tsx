@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { configFields } from "../lib/configFields";
 import type { RunConfig } from "../types";
+import { ConfigFields } from "./ConfigFields";
 
 type Props = {
   config: RunConfig | null;
@@ -77,31 +77,8 @@ export function ConfigPanel({ config, onSave, readOnly }: Props) {
       </div>
 
       {open && (
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
-          {configFields.map((field) => (
-            <label key={field.key} className="grid gap-1">
-              <span className="flex items-baseline justify-between gap-2 text-xs text-slate-500">
-                <span>{field.label}</span>
-                {field.hint ? <em className="truncate text-[10px] not-italic text-slate-600">{field.hint}</em> : null}
-              </span>
-              {field.kind === "bool" ? (
-                <input
-                  type="checkbox"
-                  checked={Boolean(draft[field.key])}
-                  onChange={(e) => setField(field.key, e.target.checked)}
-                  disabled={busy || readOnly}
-                />
-              ) : (
-                <input
-                  className="input"
-                  type="number"
-                  value={String(draft[field.key])}
-                  onChange={(e) => setField(field.key, Number(e.target.value))}
-                  disabled={busy || readOnly}
-                />
-              )}
-            </label>
-          ))}
+        <div className="mt-3">
+          <ConfigFields config={draft} onChange={setField} disabled={busy || readOnly} />
         </div>
       )}
     </section>

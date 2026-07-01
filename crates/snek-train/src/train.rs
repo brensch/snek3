@@ -1,7 +1,9 @@
 use crate::config::RunConfig;
+use crate::metrics::Counters;
 use crate::replay::{ReplayBuffer, Samples};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use std::sync::atomic::Ordering;
 use tch::nn::OptimizerConfig;
 use tch::{nn, Device, Kind, Reduction, Tensor};
 
@@ -19,16 +21,24 @@ pub fn train_steps(
     replay: &ReplayBuffer,
     cfg: &RunConfig,
     seed: u64,
+    counters: &Counters,
 ) -> anyhow::Result<TrainMetrics> {
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     let mut last = TrainMetrics::default();
-    for _ in 0..cfg.train_steps {
+    counters
+        .train_steps_total
+        .store(cfg.train_steps as u32, Ordering::Relaxed);
+    counters.train_step.store(0, Ordering::Relaxed);
+    for step in 0..cfg.train_steps {
         let Some(batch) =
             replay.sample_batch(cfg.batch_size.min(replay.len()), cfg.recency, &mut rng)
         else {
             break;
         };
         last = train_one(net, vs.device(), opt, &batch, cfg.value_weight)?;
+        counters
+            .train_step
+            .store((step + 1) as u32, Ordering::Relaxed);
     }
     Ok(last)
 }

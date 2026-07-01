@@ -1,14 +1,16 @@
 use crate::config::RunConfig;
 use crate::metrics::Metrics;
-use crate::proto::{GenerationSummary, Phase};
+use crate::proto::Phase;
 use crate::replay::ReplayBuffer;
 use crate::selfplay::{generate, SelfPlayNet};
 use crate::state::{load_trainer_state, save_trainer_state, RunPaths};
 use crate::train::{build_optimizer, train_steps};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use snek_core::Board;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tch::{nn, Device};
 
 /// How many generations of recorded sample games to retain on disk per run.
@@ -29,6 +31,9 @@ pub struct TrainerHandle {
 pub struct StartRequest {
     pub run_id: Option<String>,
     pub fresh: Option<bool>,
+    /// Knob overrides for the new run. Applied to the in-memory config before the
+    /// run loop spawns, so a fresh run picks them up via `self.config()`.
+    pub config: Option<RunConfig>,
 }
 
 impl TrainerHandle {
@@ -66,6 +71,9 @@ impl TrainerHandle {
                 .ok_or_else(|| anyhow::anyhow!("trainer is running without active run"));
         }
         self.stop.store(false, Ordering::SeqCst);
+        if let Some(config) = req.config {
+            self.set_config(config);
+        }
         let run_id = req.run_id.unwrap_or_else(timestamp_run_id);
         *self.active_run.lock().unwrap() = Some(run_id.clone());
         let handle = self.clone();
@@ -83,6 +91,7 @@ impl TrainerHandle {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         self.metrics.set_phase(Phase::Stopping);
+        self.log("stop requested — interrupting self-play, saving snapshot");
     }
 
     pub fn runs_dir(&self) -> &Path {
@@ -95,6 +104,11 @@ impl TrainerHandle {
 
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
+    }
+
+    /// Emit a trainer event to the terminal and the frontend log stream.
+    pub fn log(&self, message: impl Into<String>) {
+        self.metrics.log(message);
     }
 
     pub fn history(&self) -> anyhow::Result<Vec<serde_json::Value>> {
@@ -178,6 +192,22 @@ impl TrainerHandle {
         } else {
             ReplayBuffer::restore(&paths.replay, cfg.buffer_size)?
         };
+        // Carry in-progress self-play games across restarts: reload the boards so a
+        // resumed run continues them instead of starting fresh. Empty here means a
+        // fresh set is created inside `generate`.
+        let (mut boards, mut turns): (Vec<Board>, Vec<usize>) = if fresh {
+            (Vec::new(), Vec::new())
+        } else {
+            crate::carry::load(&paths.carry)?.unwrap_or_default()
+        };
+        self.log(format!(
+            "{verb} run '{run_id}' at gen {gen}: buffer {buf} samples (avg turn {avg:.1}), {games} carried games",
+            verb = if fresh { "starting" } else { "resuming" },
+            gen = state.generation,
+            buf = replay.len(),
+            avg = replay.avg_turn(),
+            games = boards.len(),
+        ));
 
         while !self.stop.load(Ordering::Relaxed) {
             let cfg = self.config();
@@ -187,12 +217,18 @@ impl TrainerHandle {
                 .generation
                 .store(state.generation, Ordering::Relaxed);
             self.metrics.set_phase(Phase::Playing);
+            let counters = self.metrics.counters();
+            let gen_start = Instant::now();
+            let inf_before = counters.inferences.load(Ordering::Relaxed);
+            let fwd_us_before = counters.gpu_forward_us.load(Ordering::Relaxed);
             let (samples, recorded_games) = generate(
                 &SelfPlayNet { net: &net, device },
                 &cfg,
                 state.seed + state.generation as u64,
                 &self.metrics,
                 &self.stop,
+                &mut boards,
+                &mut turns,
             )?;
             // Stop requested mid-generation: bail out now rather than spending a
             // full train + checkpoint cycle on this interrupted generation. The
@@ -201,21 +237,42 @@ impl TrainerHandle {
             if self.stop.load(Ordering::Relaxed) {
                 break;
             }
+            let play_seconds = gen_start.elapsed().as_secs_f64();
+            // Per-generation figures (not cumulative): `samples` reports this
+            // generation's completed games / turns / samples directly.
+            let gen_completed_games = samples.games as u32;
+            let gen_turns = samples.turns as u32;
+            let gen_samples = samples.len() as u32;
+            let gen_inferences = counters.inferences.load(Ordering::Relaxed) - inf_before;
+            let gpu_forward_seconds = counters
+                .gpu_forward_us
+                .load(Ordering::Relaxed)
+                .saturating_sub(fwd_us_before) as f64
+                / 1_000_000.0;
+
             if !recorded_games.is_empty() {
                 if let Err(err) = crate::sample::write_generation(
                     &paths.games,
                     state.generation,
                     recorded_games,
+                    serde_json::to_value(&cfg).unwrap_or_default(),
                     SAMPLE_GAMES_KEEP,
                 ) {
                     tracing::warn!(%err, "failed to write sample games");
                 }
             }
             replay.save_shard(&paths.replay, state.generation, &samples)?;
-            state.samples_seen += samples.len() as u64;
+            state.samples_seen += gen_samples as u64;
             replay.add(samples);
+            let buffer_len = replay.len() as u64;
+            let avg_game_turn = replay.avg_turn();
+            // Persist the carried games so a resume continues them.
+            if let Err(err) = crate::carry::save(&paths.carry, &boards, &turns) {
+                tracing::warn!(%err, "failed to save carried self-play boards");
+            }
 
             self.metrics.set_phase(Phase::Training);
+            let train_start = Instant::now();
             let losses = train_steps(
                 &net,
                 &vs,
@@ -223,40 +280,100 @@ impl TrainerHandle {
                 &replay,
                 &cfg,
                 state.seed ^ state.generation as u64,
+                &counters,
             )?;
-            self.metrics.counters().set_losses(
-                losses.policy_loss,
-                losses.value_loss,
-                losses.target_entropy,
-            );
+            let train_seconds = train_start.elapsed().as_secs_f64();
+            counters.set_losses(losses.policy_loss, losses.value_loss, losses.target_entropy);
 
             self.metrics.set_phase(Phase::Checkpoint);
             vs.save(&paths.net)?;
             append_metric(
                 &paths.metrics,
-                &GenerationSummary {
+                &GenRecord {
                     generation: state.generation,
                     policy_loss: losses.policy_loss,
                     value_loss: losses.value_loss,
+                    target_entropy: losses.target_entropy,
                     win_rate: 0.0,
-                    completed_games: self
-                        .metrics
-                        .counters()
-                        .completed_games
-                        .load(Ordering::Relaxed) as u32,
-                    seconds: 0.0,
+                    completed_games: gen_completed_games,
+                    samples: gen_samples,
+                    turns: gen_turns,
+                    buffer: buffer_len,
+                    samples_seen: state.samples_seen,
+                    gen_seconds: gen_start.elapsed().as_secs_f64(),
+                    play_seconds,
+                    train_seconds,
+                    inferences: gen_inferences,
+                    inferences_per_sec: safe_div(gen_inferences as f64, play_seconds),
+                    games_per_sec: safe_div(gen_completed_games as f64, play_seconds),
+                    turns_per_sec: safe_div(gen_turns as f64, play_seconds),
+                    gpu_busy_pct: (100.0 * safe_div(gpu_forward_seconds, play_seconds)).clamp(0.0, 100.0),
+                    avg_game_turn,
                 },
             )?;
+            self.log(format!(
+                "gen {gen} done: {games} games, {samples} samples, buffer {buf} (avg turn {avg:.1}), play {play:.1}s train {train:.1}s, ploss {ploss:.3} vloss {vloss:.3}",
+                gen = state.generation,
+                games = gen_completed_games,
+                samples = gen_samples,
+                buf = buffer_len,
+                avg = avg_game_turn,
+                play = play_seconds,
+                train = train_seconds,
+                ploss = losses.policy_loss,
+                vloss = losses.value_loss,
+            ));
             state.generation += 1;
             save_trainer_state(&paths.trainer_state, &state)?;
         }
         vs.save(&paths.net)?;
         save_trainer_state(&paths.trainer_state, &state)?;
+        if let Err(err) = crate::carry::save(&paths.carry, &boards, &turns) {
+            tracing::warn!(%err, "failed to save carried self-play boards");
+        }
+        self.log(format!(
+            "stopped run '{run_id}' at gen {}: snapshot saved ({} carried games)",
+            state.generation,
+            boards.len()
+        ));
         Ok(())
     }
 }
 
-fn append_metric(path: &Path, summary: &GenerationSummary) -> anyhow::Result<()> {
+/// One line of `runs/<id>/metrics.jsonl`: a complete per-generation summary. All
+/// counts are for that generation only (not cumulative), except `samples_seen`.
+#[derive(Serialize)]
+struct GenRecord {
+    generation: u32,
+    policy_loss: f64,
+    value_loss: f64,
+    target_entropy: f64,
+    win_rate: f64,
+    completed_games: u32,
+    samples: u32,
+    turns: u32,
+    buffer: u64,
+    samples_seen: u64,
+    gen_seconds: f64,
+    play_seconds: f64,
+    train_seconds: f64,
+    inferences: u64,
+    inferences_per_sec: f64,
+    games_per_sec: f64,
+    turns_per_sec: f64,
+    gpu_busy_pct: f64,
+    avg_game_turn: f64,
+}
+
+fn safe_div(a: f64, b: f64) -> f64 {
+    if b > 0.0 {
+        a / b
+    } else {
+        0.0
+    }
+}
+
+fn append_metric(path: &Path, record: &GenRecord) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -265,18 +382,7 @@ fn append_metric(path: &Path, summary: &GenerationSummary) -> anyhow::Result<()>
         .create(true)
         .append(true)
         .open(path)?;
-    writeln!(
-        f,
-        "{}",
-        serde_json::json!({
-            "generation": summary.generation,
-            "policy_loss": summary.policy_loss,
-            "value_loss": summary.value_loss,
-            "win_rate": summary.win_rate,
-            "completed_games": summary.completed_games,
-            "seconds": summary.seconds,
-        })
-    )?;
+    writeln!(f, "{}", serde_json::to_string(record)?)?;
     Ok(())
 }
 

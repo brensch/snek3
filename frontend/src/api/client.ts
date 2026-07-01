@@ -26,7 +26,9 @@ export const control = {
   setRunConfig: (runId: string, config: RunConfig) =>
     postJson<RunConfig>(`/api/runs/${encodeURIComponent(runId)}/config`, config),
   state: () => getJson<RunState>("/api/state"),
-  start: (runId: string | null, fresh: boolean) =>
-    postJson<{ run_id: string }>("/api/control/start", { run_id: runId, fresh }),
+  // The trainer's default config, used to seed the "start fresh run" knob form.
+  config: () => getJson<RunConfig>("/api/config"),
+  start: (runId: string | null, fresh: boolean, config?: RunConfig) =>
+    postJson<{ run_id: string }>("/api/control/start", { run_id: runId, fresh, config }),
   stop: () => postJson<{ stopping: boolean }>("/api/control/stop"),
 };

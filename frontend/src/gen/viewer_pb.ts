@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file viewer.proto.
  */
 export const file_viewer: GenFile = /*@__PURE__*/
-  fileDesc("Cgx2aWV3ZXIucHJvdG8SBHNuZWsijwIKClJ1blN1bW1hcnkSDgoGcnVuX2lkGAEgASgJEgwKBGxpdmUYAiABKAgSDwoHcnVubmluZxgDIAEoCBISCgpnZW5lcmF0aW9uGAQgASgNEhkKEXRvdGFsX2dlbmVyYXRpb25zGAUgASgNEg0KBWJvYXJkGAYgASgNEhIKCm51bV9zbmFrZXMYByABKA0SEwoLcG9saWN5X2xvc3MYCCABKAESEgoKdmFsdWVfbG9zcxgJIAEoARIQCgh3aW5fcmF0ZRgKIAEoARIUCgxoYXNfd2luX3JhdGUYCyABKAgSFgoOZ2FtZV9nZW5fY291bnQYDCABKA0SFwoPdXBkYXRlZF91bml4X21zGA0gASgDIi4KDFJ1bkxpc3RSZXBseRIeCgRydW5zGAEgAygLMhAuc25lay5SdW5TdW1tYXJ5IokBCglNZXRyaWNSb3cSEgoKZ2VuZXJhdGlvbhgBIAEoDRITCgtwb2xpY3lfbG9zcxgCIAEoARISCgp2YWx1ZV9sb3NzGAMgASgBEhAKCHdpbl9yYXRlGAQgASgBEhQKDGhhc193aW5fcmF0ZRgFIAEoCBIXCg9jb21wbGV0ZWRfZ2FtZXMYBiABKA0iKQoHR2FtZUdlbhILCgNnZW4YASABKA0SEQoJbnVtX2dhbWVzGAIgASgNIocBCglSdW5EZXRhaWwSIQoHc3VtbWFyeRgBIAEoCzIQLnNuZWsuUnVuU3VtbWFyeRITCgtjb25maWdfanNvbhgCIAEoCRIgCgdtZXRyaWNzGAMgAygLMg8uc25lay5NZXRyaWNSb3cSIAoJZ2FtZV9nZW5zGAQgAygLMg0uc25lay5HYW1lR2VuIh0KBVBvaW50EgkKAXgYASABKAUSCQoBeRgCIAEoBSKPAQoKU25ha2VGcmFtZRINCgVhbGl2ZRgBIAEoCBIZCgRib2R5GAIgAygLMgsuc25lay5Qb2ludBIOCgZoZWFsdGgYAyABKAUSEwoLY2hvc2VuX21vdmUYBCABKA0SDgoGcG9saWN5GAUgAygBEhMKC3BsYXlfcG9saWN5GAYgAygBEg0KBXZhbHVlGAcgASgBIo8BCgVGcmFtZRIMCgR0dXJuGAEgASgNEg0KBXdpZHRoGAIgASgNEg4KBmhlaWdodBgDIAEoDRIZCgRmb29kGAQgAygLMgsuc25lay5Qb2ludBIcCgdoYXphcmRzGAUgAygLMgsuc25lay5Qb2ludBIgCgZzbmFrZXMYBiADKAsyEC5zbmVrLlNuYWtlRnJhbWUiRgoER2FtZRIbCgZmcmFtZXMYASADKAsyCy5zbmVrLkZyYW1lEg4KBndpbm5lchgCIAEoBRIRCgludW1fdHVybnMYAyABKA0iMgoIR2FtZUZpbGUSCwoDZ2VuGAEgASgNEhkKBWdhbWVzGAIgAygLMgouc25lay5HYW1lYgZwcm90bzM");
+  fileDesc("Cgx2aWV3ZXIucHJvdG8SBHNuZWsijwIKClJ1blN1bW1hcnkSDgoGcnVuX2lkGAEgASgJEgwKBGxpdmUYAiABKAgSDwoHcnVubmluZxgDIAEoCBISCgpnZW5lcmF0aW9uGAQgASgNEhkKEXRvdGFsX2dlbmVyYXRpb25zGAUgASgNEg0KBWJvYXJkGAYgASgNEhIKCm51bV9zbmFrZXMYByABKA0SEwoLcG9saWN5X2xvc3MYCCABKAESEgoKdmFsdWVfbG9zcxgJIAEoARIQCgh3aW5fcmF0ZRgKIAEoARIUCgxoYXNfd2luX3JhdGUYCyABKAgSFgoOZ2FtZV9nZW5fY291bnQYDCABKA0SFwoPdXBkYXRlZF91bml4X21zGA0gASgDIi4KDFJ1bkxpc3RSZXBseRIeCgRydW5zGAEgAygLMhAuc25lay5SdW5TdW1tYXJ5IvMCCglNZXRyaWNSb3cSEgoKZ2VuZXJhdGlvbhgBIAEoDRITCgtwb2xpY3lfbG9zcxgCIAEoARISCgp2YWx1ZV9sb3NzGAMgASgBEhAKCHdpbl9yYXRlGAQgASgBEhQKDGhhc193aW5fcmF0ZRgFIAEoCBIXCg9jb21wbGV0ZWRfZ2FtZXMYBiABKA0SFgoOdGFyZ2V0X2VudHJvcHkYByABKAESDwoHc2FtcGxlcxgIIAEoDRINCgV0dXJucxgJIAEoDRIOCgZidWZmZXIYCiABKAQSEwoLZ2VuX3NlY29uZHMYCyABKAESFAoMcGxheV9zZWNvbmRzGAwgASgBEhUKDXRyYWluX3NlY29uZHMYDSABKAESGgoSaW5mZXJlbmNlc19wZXJfc2VjGA4gASgBEhUKDWdhbWVzX3Blcl9zZWMYDyABKAESFAoMZ3B1X2J1c3lfcGN0GBAgASgBEhUKDWF2Z19nYW1lX3R1cm4YESABKAEiKQoHR2FtZUdlbhILCgNnZW4YASABKA0SEQoJbnVtX2dhbWVzGAIgASgNIocBCglSdW5EZXRhaWwSIQoHc3VtbWFyeRgBIAEoCzIQLnNuZWsuUnVuU3VtbWFyeRITCgtjb25maWdfanNvbhgCIAEoCRIgCgdtZXRyaWNzGAMgAygLMg8uc25lay5NZXRyaWNSb3cSIAoJZ2FtZV9nZW5zGAQgAygLMg0uc25lay5HYW1lR2VuIh0KBVBvaW50EgkKAXgYASABKAUSCQoBeRgCIAEoBSKPAQoKU25ha2VGcmFtZRINCgVhbGl2ZRgBIAEoCBIZCgRib2R5GAIgAygLMgsuc25lay5Qb2ludBIOCgZoZWFsdGgYAyABKAUSEwoLY2hvc2VuX21vdmUYBCABKA0SDgoGcG9saWN5GAUgAygBEhMKC3BsYXlfcG9saWN5GAYgAygBEg0KBXZhbHVlGAcgASgBIo8BCgVGcmFtZRIMCgR0dXJuGAEgASgNEg0KBXdpZHRoGAIgASgNEg4KBmhlaWdodBgDIAEoDRIZCgRmb29kGAQgAygLMgsuc25lay5Qb2ludBIcCgdoYXphcmRzGAUgAygLMgsuc25lay5Qb2ludBIgCgZzbmFrZXMYBiADKAsyEC5zbmVrLlNuYWtlRnJhbWUiRgoER2FtZRIbCgZmcmFtZXMYASADKAsyCy5zbmVrLkZyYW1lEg4KBndpbm5lchgCIAEoBRIRCgludW1fdHVybnMYAyABKA0iRwoIR2FtZUZpbGUSCwoDZ2VuGAEgASgNEhkKBWdhbWVzGAIgAygLMgouc25lay5HYW1lEhMKC2NvbmZpZ19qc29uGAMgASgJYgZwcm90bzM");
 
 /**
  * One row on the home page: enough to render a run card without loading detail.
@@ -125,7 +125,8 @@ export const RunListReplySchema: GenMessage<RunListReply> = /*@__PURE__*/
   messageDesc(file_viewer, 1);
 
 /**
- * A single metrics.jsonl row, projected to the fields the charts use.
+ * A single metrics.jsonl row (one per generation), projected to the fields the
+ * charts use. All per-gen counts are for that generation only, not cumulative.
  *
  * @generated from message snek.MetricRow
  */
@@ -156,9 +157,80 @@ export type MetricRow = Message<"snek.MetricRow"> & {
   hasWinRate: boolean;
 
   /**
+   * games finished during this generation
+   *
    * @generated from field: uint32 completed_games = 6;
    */
   completedGames: number;
+
+  /**
+   * @generated from field: double target_entropy = 7;
+   */
+  targetEntropy: number;
+
+  /**
+   * training samples collected this generation
+   *
+   * @generated from field: uint32 samples = 8;
+   */
+  samples: number;
+
+  /**
+   * self-play turns this generation
+   *
+   * @generated from field: uint32 turns = 9;
+   */
+  turns: number;
+
+  /**
+   * replay buffer size after this generation
+   *
+   * @generated from field: uint64 buffer = 10;
+   */
+  buffer: bigint;
+
+  /**
+   * wall time for the whole generation
+   *
+   * @generated from field: double gen_seconds = 11;
+   */
+  genSeconds: number;
+
+  /**
+   * self-play portion
+   *
+   * @generated from field: double play_seconds = 12;
+   */
+  playSeconds: number;
+
+  /**
+   * training portion
+   *
+   * @generated from field: double train_seconds = 13;
+   */
+  trainSeconds: number;
+
+  /**
+   * @generated from field: double inferences_per_sec = 14;
+   */
+  inferencesPerSec: number;
+
+  /**
+   * @generated from field: double games_per_sec = 15;
+   */
+  gamesPerSec: number;
+
+  /**
+   * @generated from field: double gpu_busy_pct = 16;
+   */
+  gpuBusyPct: number;
+
+  /**
+   * mean game turn across all buffered samples
+   *
+   * @generated from field: double avg_game_turn = 17;
+   */
+  avgGameTurn: number;
 };
 
 /**
@@ -395,6 +467,13 @@ export type GameFile = Message<"snek.GameFile"> & {
    * @generated from field: repeated snek.Game games = 2;
    */
   games: Game[];
+
+  /**
+   * training config in effect for this generation
+   *
+   * @generated from field: string config_json = 3;
+   */
+  configJson: string;
 };
 
 /**

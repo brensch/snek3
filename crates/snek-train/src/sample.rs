@@ -19,6 +19,10 @@ pub type Coord = [i32; 2];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameFileJson {
     pub gen: u32,
+    /// The training config in effect for this generation, so the settings that
+    /// produced these games are historised (config.json only holds the latest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
     pub games: Vec<GameJson>,
 }
 
@@ -106,11 +110,16 @@ pub fn write_generation(
     games_dir: &Path,
     gen: u32,
     games: Vec<GameJson>,
+    config: serde_json::Value,
     keep: usize,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(games_dir)?;
     let path = games_dir.join(format!("gen_{gen:04}.json"));
-    let payload = GameFileJson { gen, games };
+    let payload = GameFileJson {
+        gen,
+        config: Some(config),
+        games,
+    };
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec(&payload)?)?;
     std::fs::rename(&tmp, &path)?;

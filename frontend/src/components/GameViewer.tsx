@@ -49,7 +49,9 @@ export function GameViewer({ runId, gameGens, metrics }: Props) {
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[12rem_minmax(0,1fr)]">
+    <div className="grid gap-3">
+      {file?.configJson && <ConfigStrip json={file.configJson} gen={file.gen} />}
+      <div className="grid gap-4 lg:grid-cols-[12rem_minmax(0,1fr)]">
       <div className="rounded border border-slate-800 bg-slate-900">
         <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
           <span className="section-title">Generations</span>
@@ -119,6 +121,30 @@ export function GameViewer({ runId, gameGens, metrics }: Props) {
             ))}
           </div>
         )}
+      </div>
+      </div>
+    </div>
+  );
+}
+
+// The training config in effect for the selected generation, historised in that
+// generation's games file (config.json only holds the latest).
+function ConfigStrip({ json, gen }: { json: string; gen: number }) {
+  let cfg: Record<string, unknown>;
+  try {
+    cfg = JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  return (
+    <div className="rounded border border-slate-800 bg-slate-900 p-2">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">Config used for gen {gen}</div>
+      <div className="flex flex-wrap gap-1">
+        {Object.entries(cfg).map(([k, v]) => (
+          <span key={k} className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300">
+            <span className="text-slate-500">{k}</span> <span className="font-mono">{String(v)}</span>
+          </span>
+        ))}
       </div>
     </div>
   );
