@@ -21,6 +21,9 @@ pub struct Counters {
     pub train_step: AtomicU32,
     pub train_steps_total: AtomicU32,
     pub completed_games: AtomicU64,
+    /// Total turns across all completed games (paired with `completed_games`
+    /// to derive a realtime mean game length).
+    pub completed_turns: AtomicU64,
     pub inferences: AtomicU64,
     pub gpu_forward_us: AtomicU64,
     pub gpu_requests: AtomicU64,
@@ -93,12 +96,14 @@ impl Metrics {
         let mut last_at = Instant::now();
         let mut last_inf = 0u64;
         let mut last_games = 0u64;
+        let mut last_turns = 0u64;
         let mut last_fwd_us = 0u64;
         let mut last_rows = 0u64;
         let mut last_reqs = 0u64;
         let mut inf_rate_ema = 0.0;
         let mut games_rate_ema = 0.0;
         let mut gpu_busy_ema = 0.0;
+        let mut avg_turn_ema = 0.0;
         let mut initialized = false;
         let mut stats_tick = tokio::time::interval(Duration::from_millis(250));
         loop {
@@ -107,6 +112,7 @@ impl Metrics {
             let dt = now.duration_since(last_at).as_secs_f64().max(1e-9);
             let inf = self.counters.inferences.load(Ordering::Relaxed);
             let games = self.counters.completed_games.load(Ordering::Relaxed);
+            let turns = self.counters.completed_turns.load(Ordering::Relaxed);
             let fwd_us = self.counters.gpu_forward_us.load(Ordering::Relaxed);
             let rows = self.counters.gpu_rows.load(Ordering::Relaxed);
             let reqs = self.counters.gpu_requests.load(Ordering::Relaxed);
@@ -114,15 +120,25 @@ impl Metrics {
             let raw_games_rate = (games - last_games) as f64 / dt;
             let fwd_delta_us = fwd_us.saturating_sub(last_fwd_us);
             let raw_gpu_busy = (100.0 * fwd_delta_us as f64 / (dt * 1_000_000.0)).clamp(0.0, 100.0);
+            // Mean length of games completing this window; only updated when
+            // games actually finished, so it holds steady through training.
+            let games_delta = games.saturating_sub(last_games);
+            let raw_avg_turn = if games_delta > 0 {
+                turns.saturating_sub(last_turns) as f64 / games_delta as f64
+            } else {
+                avg_turn_ema
+            };
             let alpha = 0.35;
             if initialized {
                 inf_rate_ema = alpha * raw_inf_rate + (1.0 - alpha) * inf_rate_ema;
                 games_rate_ema = alpha * raw_games_rate + (1.0 - alpha) * games_rate_ema;
                 gpu_busy_ema = alpha * raw_gpu_busy + (1.0 - alpha) * gpu_busy_ema;
+                avg_turn_ema = alpha * raw_avg_turn + (1.0 - alpha) * avg_turn_ema;
             } else {
                 inf_rate_ema = raw_inf_rate;
                 games_rate_ema = raw_games_rate;
                 gpu_busy_ema = raw_gpu_busy;
+                avg_turn_ema = raw_avg_turn;
                 initialized = true;
             }
             let req_delta = reqs.saturating_sub(last_reqs).max(1);
@@ -151,10 +167,12 @@ impl Metrics {
                     self.counters.target_entropy_bits.load(Ordering::Relaxed),
                 ),
                 gpu_rows_per_sec,
+                avg_game_turn: avg_turn_ema,
             };
             last_at = now;
             last_inf = inf;
             last_games = games;
+            last_turns = turns;
             last_fwd_us = fwd_us;
             last_rows = rows;
             last_reqs = reqs;

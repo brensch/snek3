@@ -22,11 +22,11 @@ use crate::config::RunConfig;
 use crate::metrics::{Counters, Metrics};
 use crate::replay::Samples;
 use crate::sample::{frame_from_board, FrameJson, GameJson};
-use snek_tch::cudagraph::GraphedForward;
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use snek_core::{encode_into, obs_side, standard_start, Board, Move, MAX_SNAKES, NUM_CHANNELS};
+use snek_tch::cudagraph::GraphedForward;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -58,7 +58,11 @@ fn candidates(board: &Board, i: usize) -> ([u8; MAXC], usize) {
         return (out, 1); // dummy move (Up); ignored by step
     }
     let head = s.head();
-    let neck = if s.len() >= 2 { Some(s.body.get(1)) } else { None };
+    let neck = if s.len() >= 2 {
+        Some(s.body.get(1))
+    } else {
+        None
+    };
     let mut k = 0usize;
     for m in Move::ALL {
         let nh = m.apply(head);
@@ -316,7 +320,11 @@ impl Tree {
                     continue;
                 }
                 let n_a = node.nvisit[i][a];
-                let q = if n_a > 0.0 { node.wsum[i][a] / n_a } else { 0.0 };
+                let q = if n_a > 0.0 {
+                    node.wsum[i][a] / n_a
+                } else {
+                    0.0
+                };
                 let u = self.c_puct * node.prior[i][a] * sqrt_total / (1.0 + n_a);
                 let score = q + u;
                 if score > best {
@@ -513,9 +521,12 @@ impl Gpu {
 
 /// Per-game training trajectory: one recorded entry per turn (root board obs for
 /// every snake, the root visit policy, the root value, the alive mask, and the
-/// absolute game turn). Materialised into samples on game completion.
+/// absolute game turn). Materialised into samples on game completion — so, like
+/// the game boards, it carries across generations (samples only appear when a
+/// game finishes; resetting per generation would drop every long game's early
+/// turns). Opaque to the trainer, which just owns the carried `Vec`.
 #[derive(Default)]
-struct Traj {
+pub(crate) struct Traj {
     obs: Vec<f32>,    // steps * n * obs_len
     pol: Vec<f32>,    // steps * n * 4
     val: Vec<f32>,    // steps * n
@@ -559,6 +570,8 @@ pub fn generate(
     stop: &AtomicBool,
     boards: &mut Vec<Board>,
     turns: &mut Vec<usize>,
+    rec: &mut Vec<Vec<FrameJson>>,
+    trajs: &mut Vec<Traj>,
 ) -> anyhow::Result<(Samples, Vec<GameJson>)> {
     let counters = metrics.counters();
     counters
@@ -581,17 +594,36 @@ pub fn generate(
     let count = cfg.concurrent_games();
 
     // (Re)initialise or repair the carried game state to exactly `count` games.
+    // `rec` (replay frames) and `trajs` (training trajectories) carry across
+    // generations in lockstep with `boards`, so a game that spans a generation
+    // boundary is recorded whole (from its turn 0) and its whole trajectory is
+    // materialised into samples when it finishes, rather than only its last slice.
     let mut init_rng = Xoshiro256PlusPlus::seed_from_u64(seed ^ 0xCA22_1E5D_F00Du64);
     if boards.len() != count || turns.len() != count {
         *boards = (0..count)
             .map(|_| standard_start(board, board, n, &mut init_rng))
             .collect();
         *turns = vec![0usize; count];
+        *rec = (0..count).map(|_| Vec::new()).collect();
+        *trajs = (0..count).map(|_| Traj::default()).collect();
     } else {
-        for (b, t) in boards.iter_mut().zip(turns.iter_mut()) {
+        if rec.len() != count {
+            *rec = (0..count).map(|_| Vec::new()).collect();
+        }
+        if trajs.len() != count {
+            *trajs = (0..count).map(|_| Traj::default()).collect();
+        }
+        for (((b, t), r), tr) in boards
+            .iter_mut()
+            .zip(turns.iter_mut())
+            .zip(rec.iter_mut())
+            .zip(trajs.iter_mut())
+        {
             if b.is_terminal() {
                 *b = standard_start(board, board, n, &mut init_rng);
                 *t = 0;
+                r.clear();
+                tr.clear();
             }
         }
     }
@@ -616,10 +648,18 @@ pub fn generate(
     // mutates the shared `boards`/`turns` in place (so carry-out is free).
     let board_chunks: Vec<&mut [Board]> = boards.chunks_mut(chunk_games).collect();
     let turn_chunks: Vec<&mut [usize]> = turns.chunks_mut(chunk_games).collect();
+    let rec_chunks: Vec<&mut [Vec<FrameJson>]> = rec.chunks_mut(chunk_games).collect();
+    let traj_chunks: Vec<&mut [Traj]> = trajs.chunks_mut(chunk_games).collect();
 
     let worker_outs: Vec<WorkerOut> = std::thread::scope(|scope| {
         let mut handles = Vec::new();
-        for (chunk, (bslice, tslice)) in board_chunks.into_iter().zip(turn_chunks).enumerate() {
+        for (chunk, (((bslice, tslice), rslice), trajs)) in board_chunks
+            .into_iter()
+            .zip(turn_chunks)
+            .zip(rec_chunks)
+            .zip(traj_chunks)
+            .enumerate()
+        {
             let gpu = Arc::clone(&gpu);
             let gpu_lock = Arc::clone(&gpu_lock);
             let samples_total = Arc::clone(&samples_total);
@@ -638,8 +678,6 @@ pub fn generate(
                 let mut trees: Vec<Tree> = (0..games)
                     .map(|_| Tree::new(n, board, board, cfg.c_puct, cfg.draw_value, cap))
                     .collect();
-                let mut trajs: Vec<Traj> = (0..games).map(|_| Traj::default()).collect();
-                let mut rec_frames: Vec<Vec<FrameJson>> = vec![Vec::new(); games];
 
                 let mut obs = vec![0.0f32; rows * obs_len];
                 let mut pol = vec![0.0f32; rows * 4];
@@ -657,7 +695,12 @@ pub fn generate(
                     let _g = gpu_lock.lock().unwrap();
                     let net_ref = unsafe { &*gpu.net };
                     Some(GraphedForward::capture(
-                        net_ref, gpu.device, rows as i64, gpu.c, gpu.h, gpu.w,
+                        net_ref,
+                        gpu.device,
+                        rows as i64,
+                        gpu.c,
+                        gpu.h,
+                        gpu.w,
                     ))
                 } else {
                     None
@@ -708,7 +751,9 @@ pub fn generate(
                         counters.gpu_forward_us.fetch_add(dt, Ordering::Relaxed);
                         counters.gpu_requests.fetch_add(1, Ordering::Relaxed);
                         counters.gpu_rows.fetch_add(rows as u64, Ordering::Relaxed);
-                        counters.inferences.fetch_add(rows as u64, Ordering::Relaxed);
+                        counters
+                            .inferences
+                            .fetch_add(rows as u64, Ordering::Relaxed);
                         for g in 0..games {
                             if trees[g].pending.is_some() {
                                 let pb = &pol[g * n * 4..(g + 1) * n * 4];
@@ -718,7 +763,6 @@ pub fn generate(
                         }
                     }
 
-                    let want_record = recorded_len.load(Ordering::Relaxed) < cfg.sample_games;
                     for g in 0..games {
                         trees[g].root_targets(&mut root_pol, &mut root_val);
 
@@ -747,14 +791,15 @@ pub fn generate(
                             actions[s] = sample_move(&play, cfg.exploration_prob, &mut rng);
                         }
 
-                        if want_record && rec_frames[g].len() < MAX_REC_FRAMES {
-                            rec_frames[g].push(frame_from_board(
-                                &bslice[g],
-                                n,
-                                &root_pol,
-                                &root_val,
-                                &play_pols,
-                                &actions,
+                        // Buffer this turn's replay frame. A slot only starts a new
+                        // recording at a game's turn 0, so a game already in progress
+                        // with no buffer (e.g. carried across a resume, where frames
+                        // aren't persisted) is skipped until it restarts — that way
+                        // every emitted replay is a whole game, never a mid-game tail.
+                        let recording = !rslice[g].is_empty() || bslice[g].turn == 0;
+                        if recording && rslice[g].len() < MAX_REC_FRAMES {
+                            rslice[g].push(frame_from_board(
+                                &bslice[g], n, &root_pol, &root_val, &play_pols, &actions,
                             ));
                         }
 
@@ -775,14 +820,19 @@ pub fn generate(
                             && trajs[g].steps <= cfg.skip_short_draw_turns
                         {
                             trajs[g].clear();
-                            rec_frames[g].clear();
+                            rslice[g].clear();
                             bslice[g] = standard_start(board, board, n, &mut rng);
                             tslice[g] = 0;
                             continue;
                         }
 
                         // Finalise the recorded replay (append the terminal frame).
-                        if want_record && !rec_frames[g].is_empty() {
+                        // Only slots recorded from turn 0 have a non-empty buffer, so
+                        // this always emits a whole game; keep it if this generation
+                        // still wants more sample games.
+                        if !rslice[g].is_empty()
+                            && recorded_len.load(Ordering::Relaxed) < cfg.sample_games
+                        {
                             let term_vals: Vec<f32> = (0..n)
                                 .map(|s| {
                                     terminal_value(
@@ -793,7 +843,7 @@ pub fn generate(
                                     )
                                 })
                                 .collect();
-                            let mut frames = std::mem::take(&mut rec_frames[g]);
+                            let mut frames = std::mem::take(&mut rslice[g]);
                             frames.push(frame_from_board(
                                 &bslice[g],
                                 n,
@@ -826,9 +876,12 @@ pub fn generate(
                         );
                         let added = out.z.len() - before;
                         trajs[g].clear();
-                        rec_frames[g].clear();
+                        rslice[g].clear();
                         out.games += 1;
                         counters.completed_games.fetch_add(1, Ordering::Relaxed);
+                        counters
+                            .completed_turns
+                            .fetch_add(tslice[g] as u64, Ordering::Relaxed);
                         let total = samples_total.fetch_add(added, Ordering::Relaxed) + added;
                         counters
                             .samples_collected

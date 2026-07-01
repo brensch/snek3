@@ -85,7 +85,11 @@ pub fn frame_from_board(
             let snake = &board.snakes[s];
             SnakeJson {
                 alive: snake.alive(),
-                body: snake.body.iter().map(|p| [p.x as i32, p.y as i32]).collect(),
+                body: snake
+                    .body
+                    .iter()
+                    .map(|p| [p.x as i32, p.y as i32])
+                    .collect(),
                 health: snake.health as i32,
                 chosen_move: actions[s].index() as u32,
                 policy: policy[s * 4..s * 4 + 4].iter().map(|&v| v as f64).collect(),
@@ -98,8 +102,16 @@ pub fn frame_from_board(
         turn: board.turn,
         width: board.width as i32,
         height: board.height as i32,
-        food: board.food.iter().map(|p| [p.x as i32, p.y as i32]).collect(),
-        hazards: board.hazards.iter().map(|p| [p.x as i32, p.y as i32]).collect(),
+        food: board
+            .food
+            .iter()
+            .map(|p| [p.x as i32, p.y as i32])
+            .collect(),
+        hazards: board
+            .hazards
+            .iter()
+            .map(|p| [p.x as i32, p.y as i32])
+            .collect(),
         snakes,
     }
 }

@@ -8,12 +8,11 @@ type Props = {
   readOnly?: boolean;
 };
 
-// The training knobs. Collapsible, and edits are staged locally: changing a field
-// only updates the draft, and nothing is sent to the backend until Save. For the
-// live run this applies at the next generation boundary; historical runs are
-// read-only.
+// The training knobs. Visibility is controlled by the caller (the run page's
+// "Configure" button); edits are staged locally so changing a field only updates
+// the draft, and nothing is sent to the backend until Save. For the live run this
+// applies at the next generation boundary; historical runs are read-only.
 export function ConfigPanel({ config, onSave, readOnly }: Props) {
-  const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<RunConfig | null>(config);
   const [busy, setBusy] = useState(false);
 
@@ -47,15 +46,8 @@ export function ConfigPanel({ config, onSave, readOnly }: Props) {
 
   return (
     <section className="panel">
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-2 text-left"
-        >
-          <span className="text-slate-500">{open ? "▾" : "▸"}</span>
-          <span className="section-title">Training knobs</span>
-        </button>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="section-title">Training knobs</span>
         <span className="text-xs text-slate-500">
           {readOnly ? "read-only (run not live)" : "applied at generation boundaries"}
         </span>
@@ -75,12 +67,7 @@ export function ConfigPanel({ config, onSave, readOnly }: Props) {
           </div>
         )}
       </div>
-
-      {open && (
-        <div className="mt-3">
-          <ConfigFields config={draft} onChange={setField} disabled={busy || readOnly} />
-        </div>
-      )}
+      <ConfigFields config={draft} onChange={setField} disabled={busy || readOnly} />
     </section>
   );
 }

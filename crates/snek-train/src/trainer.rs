@@ -200,6 +200,13 @@ impl TrainerHandle {
         } else {
             crate::carry::load(&paths.carry)?.unwrap_or_default()
         };
+        // In-progress replay frames and training trajectories for each carried
+        // game, so a game spanning generation boundaries is recorded whole and its
+        // full trajectory is materialised into samples when it finishes. Kept in
+        // memory only (not persisted with the carry): a resume resumes recording
+        // and accumulating from where the carried games currently stand.
+        let mut rec_frames: Vec<Vec<crate::sample::FrameJson>> = Vec::new();
+        let mut trajs: Vec<crate::selfplay::Traj> = Vec::new();
         self.log(format!(
             "{verb} run '{run_id}' at gen {gen}: buffer {buf} samples (avg turn {avg:.1}), {games} carried games",
             verb = if fresh { "starting" } else { "resuming" },
@@ -229,6 +236,8 @@ impl TrainerHandle {
                 &self.stop,
                 &mut boards,
                 &mut turns,
+                &mut rec_frames,
+                &mut trajs,
             )?;
             // Stop requested mid-generation: bail out now rather than spending a
             // full train + checkpoint cycle on this interrupted generation. The
@@ -307,7 +316,8 @@ impl TrainerHandle {
                     inferences_per_sec: safe_div(gen_inferences as f64, play_seconds),
                     games_per_sec: safe_div(gen_completed_games as f64, play_seconds),
                     turns_per_sec: safe_div(gen_turns as f64, play_seconds),
-                    gpu_busy_pct: (100.0 * safe_div(gpu_forward_seconds, play_seconds)).clamp(0.0, 100.0),
+                    gpu_busy_pct: (100.0 * safe_div(gpu_forward_seconds, play_seconds))
+                        .clamp(0.0, 100.0),
                     avg_game_turn,
                 },
             )?;

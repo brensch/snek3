@@ -20,12 +20,17 @@ type Props = {
   xUnit?: string;
   // Shorter chart body for the dense realtime row.
   compact?: boolean;
+  // Scale each series to its own range so metrics with very different
+  // magnitudes (e.g. samples vs games/sec) can share a chart for shape
+  // comparison. The numeric y-axis is dropped; the legend/tooltip keep real
+  // values.
+  normalize?: boolean;
 };
 
 const DEFAULT_COLOR = "#38bdf8";
 
-// A sparkline with y-axis ticks and a hover crosshair/tooltip. Draws one or more
-// series on a shared axis; shared by the live-stats tiles and the per-generation
+// A sparkline with optional y-axis ticks and a hover crosshair/tooltip. Draws
+// one or more series; shared by the live-stats tiles and the per-generation
 // metric charts.
 export function SeriesChart({
   label,
@@ -39,6 +44,7 @@ export function SeriesChart({
   xValues,
   xUnit = "gen",
   compact = false,
+  normalize = false,
 }: Props) {
   const [hover, setHover] = useState<number | null>(null);
 
@@ -46,14 +52,17 @@ export function SeriesChart({
   const lines: Series[] = series ?? [{ values: values ?? [], color, name: label }];
   const len = lines.reduce((n, s) => Math.max(n, s.values.length), 0);
   const multi = lines.length > 1;
+  const showAxis = !normalize;
 
-  const finiteMax = Math.max(
-    1e-9,
-    ...lines.flatMap((s) => s.values.filter(Number.isFinite)),
-  );
-  const max = fixedMax ?? niceMax(finiteMax);
+  // Per-series max when normalizing; otherwise one shared max across all series.
+  const seriesMax = lines.map((s) => niceMax(Math.max(1e-9, ...s.values.filter(Number.isFinite))));
+  const sharedMax = fixedMax ?? niceMax(Math.max(1e-9, ...lines.flatMap((s) => s.values.filter(Number.isFinite))));
+
   const px = (i: number) => (len <= 1 ? 0 : (i / (len - 1)) * 100);
-  const py = (v: number) => 100 - Math.max(0, Math.min(1, v / max)) * 100;
+  const py = (v: number, li: number) => {
+    const m = fixedMax ?? (normalize ? seriesMax[li] : sharedMax);
+    return 100 - Math.max(0, Math.min(1, v / m)) * 100;
+  };
 
   const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -72,7 +81,7 @@ export function SeriesChart({
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="truncate text-xs uppercase tracking-wide text-slate-500">{label}</div>
         {multi ? (
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-x-2 gap-y-0.5">
             {lines.map((s, i) => (
               <span key={i} className="flex items-center gap-1 font-mono text-[10px] text-slate-300">
                 <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: s.color ?? DEFAULT_COLOR }} />
@@ -86,17 +95,21 @@ export function SeriesChart({
         )}
       </div>
       <div
-        className={`grid grid-cols-[3.25rem_minmax(0,1fr)] grid-rows-[minmax(0,1fr)_1.25rem] gap-x-2 ${
-          compact ? "h-24" : "h-40"
+        className={`grid grid-rows-[minmax(0,1fr)_1.25rem] gap-x-2 ${compact ? "h-24" : "h-40"} ${
+          showAxis ? (compact ? "grid-cols-[2.25rem_minmax(0,1fr)]" : "grid-cols-[2.75rem_minmax(0,1fr)]") : "grid-cols-1"
         }`}
       >
-        <div className="row-start-1 flex h-full flex-col justify-between py-1 text-right font-mono text-[10px] text-slate-500">
-          <span>{format(max, digits)}</span>
-          <span>{format(max / 2, digits)}</span>
-          <span>0</span>
-        </div>
+        {showAxis && (
+          <div className="row-start-1 flex h-full flex-col justify-between py-1 text-right font-mono text-[10px] text-slate-500">
+            <span>{format(sharedMax, digits)}</span>
+            <span>{format(sharedMax / 2, digits)}</span>
+            <span>0</span>
+          </div>
+        )}
         <div
-          className="relative min-w-0 overflow-hidden rounded border border-slate-800 bg-slate-950"
+          className={`relative min-w-0 overflow-hidden rounded border border-slate-800 bg-slate-950 ${
+            showAxis ? "col-start-2" : "col-start-1"
+          }`}
           onMouseMove={onMove}
           onMouseLeave={() => setHover(null)}
         >
@@ -107,7 +120,7 @@ export function SeriesChart({
             {lines.map((s, li) => (
               <polyline
                 key={li}
-                points={s.values.map((v, i) => `${px(i)},${py(v)}`).join(" ")}
+                points={s.values.map((v, i) => `${px(i)},${py(v, li)}`).join(" ")}
                 fill="none"
                 stroke={s.color ?? DEFAULT_COLOR}
                 strokeWidth="2"
@@ -122,7 +135,7 @@ export function SeriesChart({
                 {lines.map((s, li) => {
                   const v = s.values[hover];
                   return v != null && Number.isFinite(v) ? (
-                    <circle key={li} cx={px(hover)} cy={py(v)} r="2.5" fill={s.color ?? DEFAULT_COLOR} vectorEffect="non-scaling-stroke" />
+                    <circle key={li} cx={px(hover)} cy={py(v, li)} r="2.5" fill={s.color ?? DEFAULT_COLOR} vectorEffect="non-scaling-stroke" />
                   ) : null;
                 })}
               </>
@@ -149,7 +162,11 @@ export function SeriesChart({
             </div>
           )}
         </div>
-        <div className="col-start-2 row-start-2 flex justify-between pt-1 font-mono text-[10px] text-slate-500">
+        <div
+          className={`row-start-2 flex justify-between pt-1 font-mono text-[10px] text-slate-500 ${
+            showAxis ? "col-start-2" : "col-start-1"
+          }`}
+        >
           <span>{xLeft ?? ""}</span>
           <span>{xRight ?? "now"}</span>
         </div>

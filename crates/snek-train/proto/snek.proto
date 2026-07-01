@@ -27,6 +27,8 @@ message StatsFrame {
   double gpu_rows_per_sec = 14;
   uint32 train_step = 15;
   uint32 train_steps_total = 16;
+  // Mean length (turns) of games completing during self-play, windowed EMA.
+  double avg_game_turn = 17;
 }
 
 message RunState {

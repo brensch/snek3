@@ -1,7 +1,6 @@
 import { useState } from "react";
 
 type Props = {
-  live: boolean;
   running: boolean;
   stopping: boolean;
   onResume: () => Promise<void>;
@@ -11,8 +10,8 @@ type Props = {
 // Run-scoped training controls. A run is either the trainer's live run (which
 // can be stopped) or a stored run that can be resumed to make it live again.
 // While a stop is draining, the button is disabled until the loop has fully
-// stopped.
-export function RunControls({ live, running, stopping, onResume, onStop }: Props) {
+// stopped. The "live" chip lives on the generation-progress panel.
+export function RunControls({ running, stopping, onResume, onStop }: Props) {
   const [busy, setBusy] = useState(false);
 
   async function invoke(action: () => Promise<void>) {
@@ -26,9 +25,6 @@ export function RunControls({ live, running, stopping, onResume, onStop }: Props
 
   return (
     <div className="flex items-center gap-2">
-      {live && running && !stopping ? (
-        <span className="rounded-full bg-green-500/15 px-2 py-0.5 text-xs font-medium text-green-400">● live</span>
-      ) : null}
       {running ? (
         <button className="btn-danger" disabled={busy || stopping} onClick={() => invoke(onStop)}>
           {stopping ? "Stopping…" : "Stop training"}

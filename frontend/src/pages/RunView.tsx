@@ -14,12 +14,13 @@ import { Phase } from "../gen/snek_pb";
 import type { MetricRow } from "../gen/viewer_pb";
 import type { RunConfig } from "../types";
 
-// Per-generation charts, driven off metrics.jsonl. Related metrics that share a
-// unit and scale are combined onto one chart (losses, timing, samples vs buffer)
-// so the section reads as a handful of meaningful panels rather than a wall of
-// single lines.
+// Per-generation charts, driven off metrics.jsonl. Related metrics are grouped
+// into a handful of categories rather than one line per field. Same-unit groups
+// (losses, phase timing) share a real y-axis; mixed-scale groups (throughput,
+// per-gen volume) set `normalize` so each line is scaled to its own range for
+// shape comparison, with real values kept in the legend/tooltip.
 type GenSeries = { pick: (m: MetricRow) => number; name: string; color: string };
-const GEN_CHARTS: { label: string; digits?: number; fixedMax?: number; series: GenSeries[] }[] = [
+const GEN_CHARTS: { label: string; digits?: number; fixedMax?: number; normalize?: boolean; series: GenSeries[] }[] = [
   {
     label: "Loss",
     digits: 3,
@@ -33,17 +34,39 @@ const GEN_CHARTS: { label: string; digits?: number; fixedMax?: number; series: G
     label: "Phase timing (s)",
     digits: 1,
     series: [
-      { pick: (m) => m.genSeconds, name: "gen", color: "#fbbf24" },
+      { pick: (m) => m.genSeconds, name: "total", color: "#fbbf24" },
+      { pick: (m) => m.playSeconds, name: "play", color: "#38bdf8" },
       { pick: (m) => m.trainSeconds, name: "train", color: "#f472b6" },
     ],
   },
-  { label: "Games completed", digits: 0, series: [{ pick: (m) => m.completedGames, name: "games", color: "#a855f7" }] },
-  { label: "Self-play turns", digits: 0, series: [{ pick: (m) => m.turns, name: "turns", color: "#34d399" }] },
-  { label: "Avg game turn (buffer)", digits: 1, series: [{ pick: (m) => m.avgGameTurn, name: "avg", color: "#2dd4bf" }] },
-  { label: "Samples", digits: 0, series: [{ pick: (m) => m.samples, name: "samples", color: "#60a5fa" }] },
-  { label: "Buffer size", digits: 0, series: [{ pick: (m) => Number(m.buffer), name: "buffer", color: "#94a3b8" }] },
-  { label: "Games / sec", digits: 1, series: [{ pick: (m) => m.gamesPerSec, name: "games/s", color: "#22c55e" }] },
-  { label: "Inferences / sec", digits: 0, series: [{ pick: (m) => m.inferencesPerSec, name: "inf/s", color: "#38bdf8" }] },
+  {
+    label: "Throughput / sec",
+    digits: 1,
+    normalize: true,
+    series: [
+      { pick: (m) => m.gamesPerSec, name: "games", color: "#22c55e" },
+      { pick: (m) => m.inferencesPerSec, name: "inf", color: "#38bdf8" },
+    ],
+  },
+  {
+    label: "Volume / gen",
+    digits: 0,
+    normalize: true,
+    series: [
+      { pick: (m) => m.samples, name: "samples", color: "#60a5fa" },
+      { pick: (m) => m.turns, name: "turns", color: "#34d399" },
+      { pick: (m) => m.completedGames, name: "games", color: "#a855f7" },
+    ],
+  },
+  {
+    label: "Game length & buffer",
+    digits: 0,
+    normalize: true,
+    series: [
+      { pick: (m) => m.avgGameTurn, name: "avg turn", color: "#2dd4bf" },
+      { pick: (m) => Number(m.buffer), name: "buffer", color: "#94a3b8" },
+    ],
+  },
   { label: "GPU busy %", digits: 0, fixedMax: 100, series: [{ pick: (m) => m.gpuBusyPct, name: "gpu", color: "#eab308" }] },
 ];
 
@@ -82,6 +105,7 @@ export function RunView() {
   // Optimistic override so the panel reflects a save immediately, before the next
   // detail poll reports the new config.json back.
   const [savedConfig, setSavedConfig] = useState<RunConfig | null>(null);
+  const [showConfig, setShowConfig] = useState(false);
   useEffect(() => {
     if (savedConfig && diskConfig && JSON.stringify(savedConfig) === JSON.stringify(diskConfig)) {
       setSavedConfig(null);
@@ -100,13 +124,22 @@ export function RunView() {
   const winRates = metrics.filter((m) => m.hasWinRate);
 
   const controls = (
-    <RunControls
-      live={isLive}
-      running={running}
-      stopping={stopping}
-      onResume={() => control.start(runId, false).then(() => undefined)}
-      onStop={() => control.stop().then(() => undefined)}
-    />
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        className="btn"
+        aria-pressed={showConfig}
+        onClick={() => setShowConfig((v) => !v)}
+      >
+        {showConfig ? "Hide config" : "Configure"}
+      </button>
+      <RunControls
+        running={running}
+        stopping={stopping}
+        onResume={() => control.start(runId, false).then(() => undefined)}
+        onStop={() => control.stop().then(() => undefined)}
+      />
+    </div>
   );
 
   return (
@@ -126,22 +159,34 @@ export function RunView() {
       {error && <div className="mb-4 rounded border border-red-900 bg-red-950 p-3 text-sm text-red-200">{error}</div>}
       {loading && !detail && <div className="text-sm text-slate-500">Loading run…</div>}
 
-      {/* Full-screen split: metrics/controls on the left, sample games on the
-          right. Stacks into a single column below xl (tablet / mobile). */}
+      {/* Full-width status banner: generation progress + run controls, with the
+          training knobs popping out below it on demand. */}
+      <div className="mb-4 grid gap-4">
+        <TrainingProgress
+          stats={live.stats}
+          state={live.state}
+          controls={controls}
+          fallbackGen={summary?.generation ?? 0}
+          live={isLive && running && !stopping}
+        />
+        {showConfig && <ConfigPanel config={savedConfig ?? diskConfig} onSave={saveConfig} />}
+      </div>
+
+      {/* Full-screen split: graphs on the left, sample games on the right.
+          Stacks into a single column below xl (tablet / mobile). */}
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] xl:items-start">
         <div className="grid gap-4">
-          <TrainingProgress stats={live.stats} state={live.state} controls={controls} fallbackGen={summary?.generation ?? 0} />
-
           <LogPanel logs={logs} />
 
           {isLive && (
             <section>
               <h2 className="section-title mb-2">Realtime (this generation)</h2>
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 <SeriesChart values={live.history.map((r) => r.inferencesPerSec)} label="Inference rate" digits={0} xUnit="t" compact />
                 <SeriesChart values={live.history.map((r) => r.gpuRowsPerSec)} label="GPU rows/s" color="#a855f7" digits={0} xUnit="t" compact />
                 <SeriesChart values={live.history.map((r) => r.gamesPerSec)} label="Game rate" color="#22c55e" digits={1} xUnit="t" compact />
                 <SeriesChart values={live.history.map((r) => r.gpuBusyPct)} label="GPU busy" color="#eab308" fixedMax={100} digits={0} xUnit="t" compact />
+                <SeriesChart values={live.history.map((r) => r.avgGameTurn)} label="Avg game turn" color="#2dd4bf" digits={1} xUnit="t" compact />
               </div>
             </section>
           )}
@@ -157,6 +202,7 @@ export function RunView() {
                     label={chart.label}
                     digits={chart.digits}
                     fixedMax={chart.fixedMax ?? null}
+                    normalize={chart.normalize}
                     xValues={gens}
                     xLeft={genLeft}
                     xRight={genRight}
@@ -168,10 +214,6 @@ export function RunView() {
               </div>
             </section>
           )}
-
-          <section>
-            <ConfigPanel config={savedConfig ?? diskConfig} onSave={saveConfig} />
-          </section>
         </div>
 
         <section className="xl:sticky xl:top-4">

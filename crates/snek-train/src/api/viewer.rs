@@ -12,11 +12,7 @@ use std::time::UNIX_EPOCH;
 
 /// Resolve a run directory, refusing anything that escapes `runs_dir`.
 pub fn resolve_run(runs_dir: &Path, run_id: &str) -> Option<PathBuf> {
-    if run_id.is_empty()
-        || run_id.contains('/')
-        || run_id.contains('\\')
-        || run_id.contains("..")
-    {
+    if run_id.is_empty() || run_id.contains('/') || run_id.contains('\\') || run_id.contains("..") {
         return None;
     }
     let path = runs_dir.join(run_id);
@@ -180,7 +176,10 @@ fn game_gens(root: &Path) -> Vec<proto::GameGen> {
 }
 
 fn gen_from_name(name: &str) -> Option<u32> {
-    name.strip_prefix("gen_")?.strip_suffix(".json")?.parse().ok()
+    name.strip_prefix("gen_")?
+        .strip_suffix(".json")?
+        .parse()
+        .ok()
 }
 
 fn convert_game_file(file: GameFileJson) -> proto::GameFile {
@@ -227,10 +226,7 @@ fn convert_game_file(file: GameFileJson) -> proto::GameFile {
 }
 
 fn points(coords: &[[i32; 2]]) -> Vec<proto::Point> {
-    coords
-        .iter()
-        .map(|&[x, y]| proto::Point { x, y })
-        .collect()
+    coords.iter().map(|&[x, y]| proto::Point { x, y }).collect()
 }
 
 fn read_text(path: &Path) -> Option<String> {

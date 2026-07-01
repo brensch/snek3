@@ -11,7 +11,7 @@ type Props = {
 // a live/historical run) and the home page's "start fresh run" form.
 export function ConfigFields({ config, onChange, disabled }: Props) {
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
       {configFields.map((field) => (
         <label key={field.key} className="grid gap-1">
           <span className="flex items-baseline justify-between gap-2 text-xs text-slate-500">

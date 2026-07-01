@@ -146,8 +146,8 @@ async fn run_game(
     State(trainer): State<TrainerHandle>,
     Path((id, gen)): Path<(String, u32)>,
 ) -> Response {
-    let game = viewer::resolve_run(trainer.runs_dir(), &id)
-        .and_then(|root| viewer::game_file(&root, gen));
+    let game =
+        viewer::resolve_run(trainer.runs_dir(), &id).and_then(|root| viewer::game_file(&root, gen));
     match game {
         Some(file) => Protobuf(file).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
