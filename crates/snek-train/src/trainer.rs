@@ -5,11 +5,14 @@ use crate::replay::ReplayBuffer;
 use crate::selfplay::{generate, SelfPlayNet};
 use crate::state::{load_trainer_state, save_trainer_state, RunPaths};
 use crate::train::{build_optimizer, train_steps};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tch::{nn, Device};
+
+/// How many generations of recorded sample games to retain on disk per run.
+const SAMPLE_GAMES_KEEP: usize = 60;
 
 #[derive(Clone)]
 pub struct TrainerHandle {
@@ -26,12 +29,6 @@ pub struct TrainerHandle {
 pub struct StartRequest {
     pub run_id: Option<String>,
     pub fresh: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RunList {
-    pub runs: Vec<String>,
-    pub live: Option<String>,
 }
 
 impl TrainerHandle {
@@ -88,21 +85,16 @@ impl TrainerHandle {
         self.metrics.set_phase(Phase::Stopping);
     }
 
-    pub fn runs(&self) -> anyhow::Result<RunList> {
-        let mut runs = Vec::new();
-        if self.runs_dir.exists() {
-            for entry in std::fs::read_dir(&self.runs_dir)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    runs.push(entry.file_name().to_string_lossy().to_string());
-                }
-            }
-        }
-        runs.sort();
-        Ok(RunList {
-            runs,
-            live: self.active_run.lock().unwrap().clone(),
-        })
+    pub fn runs_dir(&self) -> &Path {
+        &self.runs_dir
+    }
+
+    pub fn active_run_id(&self) -> Option<String> {
+        self.active_run.lock().unwrap().clone()
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
     }
 
     pub fn history(&self) -> anyhow::Result<Vec<serde_json::Value>> {
@@ -195,13 +187,30 @@ impl TrainerHandle {
                 .generation
                 .store(state.generation, Ordering::Relaxed);
             self.metrics.set_phase(Phase::Playing);
-            let samples = generate(
+            let (samples, recorded_games) = generate(
                 &SelfPlayNet { net: &net, device },
                 &cfg,
                 state.seed + state.generation as u64,
                 &self.metrics,
                 &self.stop,
             )?;
+            // Stop requested mid-generation: bail out now rather than spending a
+            // full train + checkpoint cycle on this interrupted generation. The
+            // net, trainer state, and replay shards from completed generations are
+            // already on disk / saved below, so resume loses only this partial gen.
+            if self.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if !recorded_games.is_empty() {
+                if let Err(err) = crate::sample::write_generation(
+                    &paths.games,
+                    state.generation,
+                    recorded_games,
+                    SAMPLE_GAMES_KEEP,
+                ) {
+                    tracing::warn!(%err, "failed to write sample games");
+                }
+            }
             replay.save_shard(&paths.replay, state.generation, &samples)?;
             state.samples_seen += samples.len() as u64;
             replay.add(samples);

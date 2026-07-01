@@ -1,19 +1,21 @@
+import type { StatsFrame } from "../gen/snek_pb";
 import { number, percent, rate } from "../lib/format";
-import type { RunState, StatsFrame } from "../types";
+import { phaseLabel } from "../lib/phase";
+import type { RunState } from "../types";
 
 type Props = { stats: StatsFrame | null; state: RunState | null };
 
 export function StatGrid({ stats, state }: Props) {
   const rows = [
     ["Generation", number(stats?.generation ?? state?.generation)],
-    ["Phase", stats?.phase ?? state?.phase ?? "-"],
-    ["Inf/s", rate(stats?.inferences_per_sec)],
-    ["GPU rows/s", rate(stats?.gpu_rows_per_sec)],
-    ["Games/s", rate(stats?.games_per_sec)],
-    ["Done", number(stats?.completed_games_total)],
-    ["Samples", `${number(stats?.samples_collected)} / ${number(stats?.samples_target)}`],
-    ["GPU busy", percent(stats?.gpu_busy_pct)],
-    ["Batch rows", number(stats?.batch_avg_rows)],
+    ["Phase", phaseLabel(stats?.phase ?? state?.phase)],
+    ["Inf/s", rate(stats?.inferencesPerSec)],
+    ["GPU rows/s", rate(stats?.gpuRowsPerSec)],
+    ["Games/s", rate(stats?.gamesPerSec)],
+    ["Done", number(stats ? Number(stats.completedGamesTotal) : undefined)],
+    ["Samples", `${number(stats?.samplesCollected)} / ${number(stats?.samplesTarget)}`],
+    ["GPU busy", percent(stats?.gpuBusyPct)],
+    ["Batch rows", number(stats?.batchAvgRows)],
   ];
   return (
     <section className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5">

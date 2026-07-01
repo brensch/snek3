@@ -1,0 +1,87 @@
+syntax = "proto3";
+package snek;
+
+// Contract for the run-viewer API. The Rust trainer serves these as binary
+// protobuf (application/x-protobuf); the frontend decodes them with the
+// buf-generated protobuf-es classes. Kept separate from snek.proto (the live
+// training stats/control messages) so the two concerns stay decoupled.
+
+// One row on the home page: enough to render a run card without loading detail.
+message RunSummary {
+  string run_id = 1;
+  bool live = 2;                // this run is the trainer's active run
+  bool running = 3;            // trainer is actively stepping it
+  uint32 generation = 4;       // latest generation reached
+  uint32 total_generations = 5;
+  uint32 board = 6;
+  uint32 num_snakes = 7;
+  double policy_loss = 8;       // latest metrics.jsonl row
+  double value_loss = 9;
+  double win_rate = 10;
+  bool has_win_rate = 11;       // false when the run never evaluated
+  uint32 game_gen_count = 12;   // number of generations with recorded games
+  int64 updated_unix_ms = 13;   // last-modified time, for sorting/display
+}
+
+message RunListReply {
+  repeated RunSummary runs = 1; // newest first
+}
+
+// A single metrics.jsonl row, projected to the fields the charts use.
+message MetricRow {
+  uint32 generation = 1;
+  double policy_loss = 2;
+  double value_loss = 3;
+  double win_rate = 4;
+  bool has_win_rate = 5;
+  uint32 completed_games = 6;
+}
+
+// A generation that has recorded self-play sample games on disk.
+message GameGen {
+  uint32 gen = 1;
+  uint32 num_games = 2;
+}
+
+message RunDetail {
+  RunSummary summary = 1;
+  string config_json = 2;          // raw config.json, shown in the knobs panel
+  repeated MetricRow metrics = 3;  // full history, oldest first
+  repeated GameGen game_gens = 4;  // newest first
+}
+
+message Point {
+  int32 x = 1;
+  int32 y = 2;
+}
+
+// One snake's state and search readout at a single turn.
+message SnakeFrame {
+  bool alive = 1;
+  repeated Point body = 2;         // head first
+  int32 health = 3;
+  uint32 chosen_move = 4;          // 0=Up 1=Down 2=Left 3=Right
+  repeated double policy = 5;      // search visit policy over the 4 moves
+  repeated double play_policy = 6; // masked policy actually sampled from
+  double value = 7;                // value head at the root
+}
+
+message Frame {
+  uint32 turn = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  repeated Point food = 4;
+  repeated Point hazards = 5;
+  repeated SnakeFrame snakes = 6;
+}
+
+message Game {
+  repeated Frame frames = 1;
+  int32 winner = 2;   // winning snake index, -1 for a draw
+  uint32 num_turns = 3;
+}
+
+message GameFile {
+  uint32 gen = 1;
+  repeated Game games = 2;
+}

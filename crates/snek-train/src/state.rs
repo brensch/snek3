@@ -28,6 +28,7 @@ pub struct RunPaths {
     pub net: PathBuf,
     pub replay: PathBuf,
     pub metrics: PathBuf,
+    pub games: PathBuf,
 }
 
 impl RunPaths {
@@ -39,6 +40,7 @@ impl RunPaths {
             net: root.join("net.safetensors"),
             replay: root.join("buffer"),
             metrics: root.join("metrics.jsonl"),
+            games: root.join("games"),
             root,
         }
     }

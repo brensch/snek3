@@ -3,6 +3,7 @@ mod config;
 mod metrics;
 mod proto;
 mod replay;
+mod sample;
 mod selfplay;
 mod state;
 mod train;

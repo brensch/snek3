@@ -1,41 +1,43 @@
 import { useState } from "react";
-import type { RunList, RunState } from "../types";
 
 type Props = {
-  runs: RunList;
-  state: RunState | null;
-  onStart: (runId: string, fresh: boolean) => Promise<void>;
+  live: boolean;
+  running: boolean;
+  stopping: boolean;
+  onResume: () => Promise<void>;
   onStop: () => Promise<void>;
 };
 
-export function RunControls({ runs, state, onStart, onStop }: Props) {
-  const [runId, setRunId] = useState("");
+// Run-scoped training controls. A run is either the trainer's live run (which
+// can be stopped) or a stored run that can be resumed to make it live again.
+// While a stop is draining, the button is disabled until the loop has fully
+// stopped.
+export function RunControls({ live, running, stopping, onResume, onStop }: Props) {
   const [busy, setBusy] = useState(false);
-  const running = state?.running;
 
   async function invoke(action: () => Promise<void>) {
     setBusy(true);
-    try { await action(); } finally { setBusy(false); }
+    try {
+      await action();
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
-    <section className="rounded border border-slate-800 bg-slate-900 p-4">
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="grid gap-1">
-          <span className="text-xs uppercase text-slate-500">Run id</span>
-          <input className="w-56 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm" value={runId} onChange={(e) => setRunId(e.target.value)} placeholder="new-run" />
-        </label>
-        <button className="btn" disabled={busy || !runId.trim()} onClick={() => invoke(() => onStart(runId.trim(), true))}>Start fresh</button>
-        <button className="btn" disabled={busy || !runId.trim()} onClick={() => invoke(() => onStart(runId.trim(), false))}>Resume</button>
-        <button className="btn-danger" disabled={busy || !running} onClick={() => invoke(onStop)}>Stop</button>
-      </div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {runs.runs.map((run) => (
-          <button key={run} className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300" onClick={() => setRunId(run)}>
-            {run}{run === runs.live ? " · live" : ""}
-          </button>
-        ))}
-      </div>
-    </section>
+    <div className="flex items-center gap-2">
+      {live && running && !stopping ? (
+        <span className="rounded-full bg-green-500/15 px-2 py-0.5 text-xs font-medium text-green-400">● live</span>
+      ) : null}
+      {running ? (
+        <button className="btn-danger" disabled={busy || stopping} onClick={() => invoke(onStop)}>
+          {stopping ? "Stopping…" : "Stop training"}
+        </button>
+      ) : (
+        <button className="btn" disabled={busy} onClick={() => invoke(onResume)}>
+          Resume training
+        </button>
+      )}
+    </div>
   );
 }

@@ -1,4 +1,7 @@
-import type { HistoryResponse, RunConfig, RunList, RunState } from "../types";
+// JSON control-plane client. These endpoints act on the trainer's single active
+// run (config knobs, run state, start/stop). Run/game browsing goes through the
+// binary-protobuf client in ./proto.
+import type { RunConfig, RunState } from "../types";
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
@@ -13,22 +16,17 @@ async function postJson<T>(url: string, body: unknown = {}): Promise<T> {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail ?? `${url} returned ${res.status}`);
+  if (!res.ok) throw new Error((data as { detail?: string }).detail ?? `${url} returned ${res.status}`);
   return data as T;
 }
 
-const phaseName = (phase: number): RunState["phase"] =>
-  ["idle", "playing", "training", "checkpoint", "stopping", "stopped"][phase] as RunState["phase"] ?? "idle";
-
-export const api = {
-  config: () => getJson<RunConfig>("/api/config"),
-  setConfig: (config: RunConfig) => postJson<RunConfig>("/api/config", config),
-  runs: () => getJson<RunList>("/api/runs").catch(() => ({ runs: [], live: null })),
-  state: async (): Promise<RunState> => {
-    const state = await getJson<Omit<RunState, "phase"> & { phase: number }>("/api/state");
-    return { ...state, phase: phaseName(state.phase) };
-  },
-  history: () => getJson<HistoryResponse>("/api/metrics/history").catch(() => ({ metrics: [] })),
-  start: (runId: string, fresh: boolean) => postJson<{ run_id: string }>("/api/control/start", { run_id: runId, fresh }),
+export const control = {
+  // Single config-save path for every run, live or not: writes the run's
+  // config.json (and updates the in-memory config server-side if it is active).
+  setRunConfig: (runId: string, config: RunConfig) =>
+    postJson<RunConfig>(`/api/runs/${encodeURIComponent(runId)}/config`, config),
+  state: () => getJson<RunState>("/api/state"),
+  start: (runId: string | null, fresh: boolean) =>
+    postJson<{ run_id: string }>("/api/control/start", { run_id: runId, fresh }),
   stop: () => postJson<{ stopping: boolean }>("/api/control/stop"),
 };

@@ -1,4 +1,7 @@
-export type Phase = "idle" | "playing" | "training" | "checkpoint" | "stopping" | "stopped";
+// Protobuf types (StatsFrame, RunState, Phase) come from the generated
+// ../gen/snek_pb. RunConfig is the JSON control-plane payload, which has no proto
+// schema (it is a large serde struct served as JSON), so it stays hand-typed.
+import type { Phase } from "./gen/snek_pb";
 
 export type RunConfig = {
   board: number;
@@ -23,10 +26,12 @@ export type RunConfig = {
   buffer_size: number;
   value_weight: number;
   search_threads: number;
-  eval_every: number;
-  eval_games: number;
+  sample_games: number;
 };
 
+// The JSON shape returned by GET /api/state. `phase` is the Phase enum value
+// (a number over the wire); `run_id`/`device` are snake_case JSON, so this is
+// kept distinct from the proto RunState (which the SSE/stats path uses).
 export type RunState = {
   phase: Phase;
   generation: number;
@@ -34,33 +39,3 @@ export type RunState = {
   running: boolean;
   device?: string;
 };
-
-export type StatsFrame = {
-  t_unix_ms: number;
-  generation: number;
-  phase: Phase;
-  inferences_per_sec: number;
-  games_per_sec: number;
-  completed_games_total: number;
-  samples_collected: number;
-  samples_target: number;
-  gpu_busy_pct: number;
-  batch_avg_rows: number;
-  policy_loss: number;
-  value_loss: number;
-  target_entropy: number;
-  gpu_rows_per_sec: number;
-};
-
-export type GenerationMetric = {
-  generation: number;
-  policy_loss: number;
-  value_loss: number;
-  win_rate?: number;
-  completed_games?: number;
-  seconds?: number;
-};
-
-export type HistoryResponse = { metrics: GenerationMetric[] };
-
-export type RunList = { runs: string[]; live: string | null };

@@ -1,0 +1,9 @@
+version: v2
+clean: true
+plugins:
+  # protobuf-es (local plugin from the frontend's node_modules). Generates the
+  # TypeScript schemas the frontend decodes binary protobuf with.
+  - local: frontend/node_modules/.bin/protoc-gen-es
+    out: frontend/src/gen
+    opt:
+      - target=ts

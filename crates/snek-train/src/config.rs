@@ -25,8 +25,13 @@ pub struct RunConfig {
     pub buffer_size: usize,
     pub value_weight: f64,
     pub search_threads: usize,
-    pub eval_every: usize,
-    pub eval_games: usize,
+    /// How many self-play games to record as browsable samples each generation.
+    #[serde(default = "default_sample_games")]
+    pub sample_games: usize,
+}
+
+fn default_sample_games() -> usize {
+    8
 }
 
 impl Default for RunConfig {
@@ -54,8 +59,7 @@ impl Default for RunConfig {
             buffer_size: 500_000,
             value_weight: 1.0,
             search_threads: 0,
-            eval_every: 5,
-            eval_games: 32,
+            sample_games: default_sample_games(),
         }
     }
 }
