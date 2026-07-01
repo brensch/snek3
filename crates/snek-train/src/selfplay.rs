@@ -3,9 +3,11 @@
 //! The only shared resource is the GPU, so it is guarded by a `Mutex` — the lock
 //! handoff *is* the inference queue: the instant one worker unlocks, another that
 //! has finished its CPU phase is already blocked on it and takes over, so the GPU
-//! never idles. Each of `num_chunks` worker threads owns a fixed set of
-//! `gpu_batch_games` games plus preallocated, reused, POD search trees; every
-//! forward is the identical padded batch shape (cuDNN autotunes exactly once).
+//! never idles. Each worker thread owns a fixed set of `gpu_batch_games` games
+//! plus preallocated, reused, POD search trees; every forward is the identical
+//! padded batch shape (cuDNN autotunes exactly once). The number of workers is
+//! derived from the GPU batch size (`RunConfig::concurrent_games` — a double
+//! buffer), not configured separately, so the only GPU dial is the batch size.
 //!
 //! Nodes are fixed-size POD (candidates <= 4, snakes <= MAX_SNAKES), so a game's
 //! tree is a flat `Vec<Node>` reused turn after turn with no hot-path heap
@@ -20,6 +22,7 @@ use crate::config::RunConfig;
 use crate::metrics::{Counters, Metrics};
 use crate::replay::Samples;
 use crate::sample::{frame_from_board, FrameJson, GameJson};
+use snek_tch::cudagraph::GraphedForward;
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -544,7 +547,7 @@ struct WorkerOut {
 }
 
 /// Generate one self-play generation. `boards`/`turns` carry the in-progress
-/// games across generations and restarts: they hold `cfg.count` games and are
+/// games across generations and restarts: they hold `concurrent_games` games and are
 /// mutated in place (a completed game is replaced by a fresh start; games still
 /// running at the sample target are left mid-play for the next generation to
 /// resume). Empty / mismatched-length vecs are (re)initialised to fresh games.
@@ -573,14 +576,17 @@ pub fn generate(
     let target = cfg.samples_per_gen;
 
     let chunk_games = cfg.gpu_batch_games.max(1);
+    // Concurrency is derived from the GPU batch size (a double buffer), so a shard
+    // per buffer: `count / chunk_games` workers, each holding one GPU batch.
+    let count = cfg.concurrent_games();
 
     // (Re)initialise or repair the carried game state to exactly `count` games.
     let mut init_rng = Xoshiro256PlusPlus::seed_from_u64(seed ^ 0xCA22_1E5D_F00Du64);
-    if boards.len() != cfg.count || turns.len() != cfg.count {
-        *boards = (0..cfg.count)
+    if boards.len() != count || turns.len() != count {
+        *boards = (0..count)
             .map(|_| standard_start(board, board, n, &mut init_rng))
             .collect();
-        *turns = vec![0usize; cfg.count];
+        *turns = vec![0usize; count];
     } else {
         for (b, t) in boards.iter_mut().zip(turns.iter_mut()) {
             if b.is_terminal() {
@@ -598,6 +604,10 @@ pub fn generate(
         w: w as i64,
     });
     let gpu_lock = Arc::new(Mutex::new(()));
+    // Capture the fixed-shape forward as a CUDA graph (one launch per replay).
+    // Marginal on a compute-bound GPU at large batch, a big win on faster GPUs
+    // where per-launch overhead dominates. Set SNEK_CUDA_GRAPH=0 to disable.
+    let use_graph = std::env::var("SNEK_CUDA_GRAPH").as_deref() != Ok("0");
     let samples_total = Arc::new(AtomicUsize::new(0));
     let recorded: Arc<Mutex<Vec<GameJson>>> = Arc::new(Mutex::new(Vec::new()));
     let recorded_len = Arc::new(AtomicUsize::new(0));
@@ -639,6 +649,20 @@ pub fn generate(
                 let mut play_pols = vec![[0.0f32; 4]; n];
                 let mut actions = vec![Move::Up; n];
 
+                // Capture this worker's fixed-shape forward as a CUDA graph. Done
+                // while holding the GPU lock so no other worker issues CUDA work
+                // during the (global-mode) stream capture. The capture pins a side
+                // stream current on this thread, which replays then reuse.
+                let mut graph = if use_graph {
+                    let _g = gpu_lock.lock().unwrap();
+                    let net_ref = unsafe { &*gpu.net };
+                    Some(GraphedForward::capture(
+                        net_ref, gpu.device, rows as i64, gpu.c, gpu.h, gpu.w,
+                    ))
+                } else {
+                    None
+                };
+
                 let mut out = WorkerOut::default();
 
                 'gen: while !stop.load(Ordering::Relaxed)
@@ -675,7 +699,10 @@ pub fn generate(
                         let dt = {
                             let _g = gpu_lock.lock().unwrap();
                             let t0 = Instant::now();
-                            gpu.forward(&obs, rows, &mut pol, &mut val);
+                            match graph.as_mut() {
+                                Some(g) => g.run(&obs, &mut pol, &mut val),
+                                None => gpu.forward(&obs, rows, &mut pol, &mut val),
+                            }
                             t0.elapsed().as_micros() as u64
                         };
                         counters.gpu_forward_us.fetch_add(dt, Ordering::Relaxed);

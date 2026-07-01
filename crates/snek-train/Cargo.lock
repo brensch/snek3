@@ -1390,6 +1390,7 @@ dependencies = [
 name = "snek-tch"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "rand",
  "tch",
 ]

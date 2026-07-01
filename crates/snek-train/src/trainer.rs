@@ -190,7 +190,7 @@ impl TrainerHandle {
         let mut replay = if fresh {
             ReplayBuffer::new(cfg.buffer_size)
         } else {
-            ReplayBuffer::restore(&paths.replay, cfg.buffer_size)?
+            ReplayBuffer::restore(&paths.replay, cfg.buffer_size, state.generation)?
         };
         // Carry in-progress self-play games across restarts: reload the boards so a
         // resumed run continues them instead of starting fresh. Empty here means a

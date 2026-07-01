@@ -100,6 +100,11 @@ impl ReplayBuffer {
 
     pub fn save_shard(&self, dir: &Path, gen: u32, samples: &Samples) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir)?;
+        // Drop any earlier shard for this generation first: a resumed run can
+        // regenerate a gen with a different sample count (hence a different
+        // filename), and leaving the stale file would double-count it on the next
+        // restore.
+        remove_shards_for_gen(dir, gen);
         let final_path = dir.join(format!("gen_{gen:06}_n{}.json", samples.len()));
         let tmp = final_path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec(samples)?)?;
@@ -107,7 +112,12 @@ impl ReplayBuffer {
         Ok(())
     }
 
-    pub fn restore(dir: &Path, capacity: usize) -> anyhow::Result<Self> {
+    /// Rebuild the buffer from on-disk shards, keeping only committed generations.
+    /// `up_to_gen` is the resume generation (`trainer_state.generation`): a shard
+    /// for that gen or later was written mid-generation before the trainer state
+    /// advanced, so the run is about to regenerate it — loading it here would
+    /// double-count a generation's worth of samples into the buffer.
+    pub fn restore(dir: &Path, capacity: usize, up_to_gen: u32) -> anyhow::Result<Self> {
         let mut out = Self::new(capacity);
         if !dir.exists() {
             return Ok(out);
@@ -119,6 +129,9 @@ impl ReplayBuffer {
             .collect::<Vec<_>>();
         files.sort();
         for path in files {
+            if shard_gen(&path).is_some_and(|gen| gen >= up_to_gen) {
+                continue;
+            }
             let samples: Samples = serde_json::from_slice(&std::fs::read(path)?)?;
             out.add(samples);
         }
@@ -141,6 +154,30 @@ impl ReplayBuffer {
             idx -= s.len();
         }
         None
+    }
+}
+
+/// Parse the generation number out of a `gen_{gen:06}_n{len}.json` shard path.
+fn shard_gen(path: &Path) -> Option<u32> {
+    let name = path.file_name()?.to_str()?;
+    let digits: String = name
+        .strip_prefix("gen_")?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// Delete every shard file for a given generation (there is normally at most one,
+/// but a differing sample count changes the filename).
+fn remove_shards_for_gen(dir: &Path, gen: u32) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+        if shard_gen(&path) == Some(gen) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 

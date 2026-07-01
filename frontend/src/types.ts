@@ -6,9 +6,11 @@ import type { Phase } from "./gen/snek_pb";
 export type RunConfig = {
   board: number;
   num_snakes: number;
-  count: number;
   sims: number;
   c_puct: number;
+  // Games per GPU forward. The forward tensor has this many rows × num_snakes
+  // (one row per snake); concurrent self-play games are derived from it in the
+  // backend (a double buffer), so this is the only GPU dial.
   gpu_batch_games: number;
   samples_per_gen: number;
   exploration_prob: number;

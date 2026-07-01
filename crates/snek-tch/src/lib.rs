@@ -4,6 +4,8 @@
 
 use tch::{nn, nn::Module, Kind, Tensor};
 
+pub mod cudagraph;
+
 const GN: i64 = 8;
 
 // NOTE on init: net.py uses orthogonal(gain=sqrt(2)) for conv/linear weights and

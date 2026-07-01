@@ -5,9 +5,11 @@ use std::path::Path;
 pub struct RunConfig {
     pub board: i8,
     pub num_snakes: usize,
-    pub count: usize,
     pub sims: usize,
     pub c_puct: f32,
+    /// Games batched into one GPU forward. The forward's tensor is this many rows
+    /// times `num_snakes` (one row per snake). Everything else about self-play
+    /// concurrency is derived from this — see [`RunConfig::concurrent_games`].
     pub gpu_batch_games: usize,
     pub samples_per_gen: usize,
     pub exploration_prob: f32,
@@ -34,12 +36,26 @@ fn default_sample_games() -> usize {
     8
 }
 
+/// How many GPU-batch-sized groups of games are kept in flight at once. Two is a
+/// double buffer: while one batch is on the GPU, the other is being built on the
+/// CPU. Self-play is GPU-forward-bound (the GPU never idles under the lock
+/// handoff), so two is enough to saturate it and more only wastes memory.
+const GPU_PIPELINE_BUFFERS: usize = 2;
+
+impl RunConfig {
+    /// Total number of games played concurrently in one self-play generation.
+    /// Derived from the GPU batch size rather than configured directly: it is just
+    /// enough games to keep the GPU saturated via double buffering.
+    pub fn concurrent_games(&self) -> usize {
+        self.gpu_batch_games.max(1) * GPU_PIPELINE_BUFFERS
+    }
+}
+
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
             board: 11,
             num_snakes: 4,
-            count: 512,
             sims: 24,
             c_puct: 1.5,
             gpu_batch_games: 128,

@@ -14,21 +14,37 @@ import { Phase } from "../gen/snek_pb";
 import type { MetricRow } from "../gen/viewer_pb";
 import type { RunConfig } from "../types";
 
-// Per-generation charts, driven off metrics.jsonl. Each pulls one field.
-const GEN_CHARTS: { pick: (m: MetricRow) => number; label: string; color: string; digits?: number; fixedMax?: number }[] = [
-  { pick: (m) => m.policyLoss, label: "Policy loss", color: "#38bdf8", digits: 3 },
-  { pick: (m) => m.valueLoss, label: "Value loss", color: "#f59e0b", digits: 3 },
-  { pick: (m) => m.targetEntropy, label: "Target entropy", color: "#e879f9", digits: 3 },
-  { pick: (m) => m.completedGames, label: "Games completed", color: "#a855f7", digits: 0 },
-  { pick: (m) => m.turns, label: "Self-play turns", color: "#34d399", digits: 0 },
-  { pick: (m) => m.samples, label: "Samples", color: "#60a5fa", digits: 0 },
-  { pick: (m) => Number(m.buffer), label: "Buffer size", color: "#94a3b8", digits: 0 },
-  { pick: (m) => m.genSeconds, label: "Gen seconds", color: "#fbbf24", digits: 1 },
-  { pick: (m) => m.trainSeconds, label: "Train seconds", color: "#f472b6", digits: 1 },
-  { pick: (m) => m.gamesPerSec, label: "Games / sec", color: "#22c55e", digits: 1 },
-  { pick: (m) => m.inferencesPerSec, label: "Inferences / sec", color: "#38bdf8", digits: 0 },
-  { pick: (m) => m.gpuBusyPct, label: "GPU busy %", color: "#eab308", digits: 0, fixedMax: 100 },
-  { pick: (m) => m.avgGameTurn, label: "Avg game turn (buffer)", color: "#2dd4bf", digits: 1 },
+// Per-generation charts, driven off metrics.jsonl. Related metrics that share a
+// unit and scale are combined onto one chart (losses, timing, samples vs buffer)
+// so the section reads as a handful of meaningful panels rather than a wall of
+// single lines.
+type GenSeries = { pick: (m: MetricRow) => number; name: string; color: string };
+const GEN_CHARTS: { label: string; digits?: number; fixedMax?: number; series: GenSeries[] }[] = [
+  {
+    label: "Loss",
+    digits: 3,
+    series: [
+      { pick: (m) => m.policyLoss, name: "policy", color: "#38bdf8" },
+      { pick: (m) => m.valueLoss, name: "value", color: "#f59e0b" },
+    ],
+  },
+  { label: "Target entropy", digits: 3, series: [{ pick: (m) => m.targetEntropy, name: "entropy", color: "#e879f9" }] },
+  {
+    label: "Phase timing (s)",
+    digits: 1,
+    series: [
+      { pick: (m) => m.genSeconds, name: "gen", color: "#fbbf24" },
+      { pick: (m) => m.trainSeconds, name: "train", color: "#f472b6" },
+    ],
+  },
+  { label: "Games completed", digits: 0, series: [{ pick: (m) => m.completedGames, name: "games", color: "#a855f7" }] },
+  { label: "Self-play turns", digits: 0, series: [{ pick: (m) => m.turns, name: "turns", color: "#34d399" }] },
+  { label: "Avg game turn (buffer)", digits: 1, series: [{ pick: (m) => m.avgGameTurn, name: "avg", color: "#2dd4bf" }] },
+  { label: "Samples", digits: 0, series: [{ pick: (m) => m.samples, name: "samples", color: "#60a5fa" }] },
+  { label: "Buffer size", digits: 0, series: [{ pick: (m) => Number(m.buffer), name: "buffer", color: "#94a3b8" }] },
+  { label: "Games / sec", digits: 1, series: [{ pick: (m) => m.gamesPerSec, name: "games/s", color: "#22c55e" }] },
+  { label: "Inferences / sec", digits: 0, series: [{ pick: (m) => m.inferencesPerSec, name: "inf/s", color: "#38bdf8" }] },
+  { label: "GPU busy %", digits: 0, fixedMax: 100, series: [{ pick: (m) => m.gpuBusyPct, name: "gpu", color: "#eab308" }] },
 ];
 
 // A single run, focused: no run switcher — just this run's metrics, knobs, live
@@ -83,74 +99,86 @@ export function RunView() {
   const gens = metrics.map((m) => m.generation);
   const winRates = metrics.filter((m) => m.hasWinRate);
 
+  const controls = (
+    <RunControls
+      live={isLive}
+      running={running}
+      stopping={stopping}
+      onResume={() => control.start(runId, false).then(() => undefined)}
+      onStop={() => control.stop().then(() => undefined)}
+    />
+  );
+
   return (
-    <div className="mx-auto max-w-6xl px-5 py-6">
-      <LogPanel logs={logs} />
-      <div className="mb-4 flex flex-wrap items-center gap-3">
+    <div className="mx-auto w-full max-w-[120rem] px-3 py-4 sm:px-5">
+      <header className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1">
         <Link to="/" className="text-sm text-slate-400 hover:text-sky-300">
           ← runs
         </Link>
-        <h1 className="font-mono text-lg font-semibold text-slate-100">{runId}</h1>
+        <h1 className="font-mono text-base font-semibold text-slate-100 sm:text-lg">{runId}</h1>
         {summary && (
           <span className="text-xs text-slate-500">
             gen {summary.generation} · {summary.board}² · {summary.numSnakes}p
           </span>
         )}
-        <div className="ml-auto">
-          <RunControls
-            live={isLive}
-            running={running}
-            stopping={stopping}
-            onResume={() => control.start(runId, false).then(() => undefined)}
-            onStop={() => control.stop().then(() => undefined)}
-          />
-        </div>
-      </div>
+      </header>
 
       {error && <div className="mb-4 rounded border border-red-900 bg-red-950 p-3 text-sm text-red-200">{error}</div>}
       {loading && !detail && <div className="text-sm text-slate-500">Loading run…</div>}
 
-      {isLive && (
-        <section className="mb-4 grid gap-3">
-          <TrainingProgress stats={live.stats} state={live.state} />
-          <div className="grid gap-3 lg:grid-cols-4">
-            <SeriesChart values={live.history.map((r) => r.inferencesPerSec)} label="Inference rate" digits={0} xUnit="t" />
-            <SeriesChart values={live.history.map((r) => r.gpuRowsPerSec)} label="GPU rows/s" color="#a855f7" digits={0} xUnit="t" />
-            <SeriesChart values={live.history.map((r) => r.gamesPerSec)} label="Game rate" color="#22c55e" digits={1} xUnit="t" />
-            <SeriesChart values={live.history.map((r) => r.gpuBusyPct)} label="GPU busy" color="#eab308" fixedMax={100} digits={0} xUnit="t" />
-          </div>
-        </section>
-      )}
+      {/* Full-screen split: metrics/controls on the left, sample games on the
+          right. Stacks into a single column below xl (tablet / mobile). */}
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] xl:items-start">
+        <div className="grid gap-4">
+          <TrainingProgress stats={live.stats} state={live.state} controls={controls} fallbackGen={summary?.generation ?? 0} />
 
-      {metrics.length > 0 && (
-        <section className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {GEN_CHARTS.map((chart) => (
-            <SeriesChart
-              key={chart.label}
-              values={metrics.map(chart.pick)}
-              label={`${chart.label} / gen`}
-              color={chart.color}
-              digits={chart.digits}
-              fixedMax={chart.fixedMax ?? null}
-              xValues={gens}
-              xLeft={genLeft}
-              xRight={genRight}
-            />
-          ))}
-          {winRates.length > 0 && (
-            <SeriesChart values={winRates.map((m) => m.winRate)} label="Win rate / gen" color="#22c55e" fixedMax={1} digits={2} xValues={winRates.map((m) => m.generation)} />
+          <LogPanel logs={logs} />
+
+          {isLive && (
+            <section>
+              <h2 className="section-title mb-2">Realtime (this generation)</h2>
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <SeriesChart values={live.history.map((r) => r.inferencesPerSec)} label="Inference rate" digits={0} xUnit="t" compact />
+                <SeriesChart values={live.history.map((r) => r.gpuRowsPerSec)} label="GPU rows/s" color="#a855f7" digits={0} xUnit="t" compact />
+                <SeriesChart values={live.history.map((r) => r.gamesPerSec)} label="Game rate" color="#22c55e" digits={1} xUnit="t" compact />
+                <SeriesChart values={live.history.map((r) => r.gpuBusyPct)} label="GPU busy" color="#eab308" fixedMax={100} digits={0} xUnit="t" compact />
+              </div>
+            </section>
           )}
+
+          {metrics.length > 0 && (
+            <section>
+              <h2 className="section-title mb-2">Per generation</h2>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {GEN_CHARTS.map((chart) => (
+                  <SeriesChart
+                    key={chart.label}
+                    series={chart.series.map((s) => ({ values: metrics.map(s.pick), color: s.color, name: s.name }))}
+                    label={chart.label}
+                    digits={chart.digits}
+                    fixedMax={chart.fixedMax ?? null}
+                    xValues={gens}
+                    xLeft={genLeft}
+                    xRight={genRight}
+                  />
+                ))}
+                {winRates.length > 0 && (
+                  <SeriesChart values={winRates.map((m) => m.winRate)} label="Win rate" color="#22c55e" fixedMax={1} digits={2} xValues={winRates.map((m) => m.generation)} />
+                )}
+              </div>
+            </section>
+          )}
+
+          <section>
+            <ConfigPanel config={savedConfig ?? diskConfig} onSave={saveConfig} />
+          </section>
+        </div>
+
+        <section className="xl:sticky xl:top-4">
+          <h2 className="section-title mb-2">Sample games</h2>
+          <GameViewer runId={runId} gameGens={detail?.gameGens ?? []} metrics={metrics} />
         </section>
-      )}
-
-      <section className="mb-4">
-        <ConfigPanel config={savedConfig ?? diskConfig} onSave={saveConfig} />
-      </section>
-
-      <section>
-        <h2 className="section-title mb-2">Sample games</h2>
-        <GameViewer runId={runId} gameGens={detail?.gameGens ?? []} metrics={metrics} />
-      </section>
+      </div>
     </div>
   );
 }

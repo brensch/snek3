@@ -5,7 +5,7 @@ export function LogPanel({ logs }: { logs: LogEntry[] }) {
   if (!logs.length) return null;
   const recent = [...logs].reverse().slice(0, 8);
   return (
-    <div className="mb-4 rounded border border-slate-800 bg-slate-900 p-2">
+    <div className="rounded border border-slate-800 bg-slate-900 p-2">
       <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">Trainer log</div>
       <div className="grid max-h-32 gap-0.5 overflow-y-auto font-mono text-[11px]">
         {recent.map((entry, i) => (

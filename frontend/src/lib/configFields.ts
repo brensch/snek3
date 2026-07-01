@@ -3,8 +3,10 @@ import type { RunConfig } from "../types";
 export const configFields: Array<{ key: keyof RunConfig; label: string; hint?: string; kind?: "bool" }> = [
   { key: "board", label: "Board" },
   { key: "num_snakes", label: "Snakes" },
-  { key: "count", label: "count", hint: "parallel live games" },
-  { key: "gpu_batch_games", label: "gpu_batch_games", hint: "games per search shard" },
+  // The only GPU dial. This is games per forward; the actual GPU batch is this
+  // multiplied by the number of snakes (one tensor row per snake). The count of
+  // concurrent self-play games is derived from it (double-buffered) in the backend.
+  { key: "gpu_batch_games", label: "GPU batch size", hint: "games/forward · ×snakes rows" },
   { key: "samples_per_gen", label: "Samples" },
   { key: "sims", label: "Sims" },
   { key: "c_puct", label: "C PUCT" },
