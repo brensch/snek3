@@ -28,5 +28,5 @@ export const getGameFile = (runId: string, gen: number) =>
   getProto(`/api/runs/${encodeURIComponent(runId)}/games/${gen}`, GameFileSchema);
 
 // Recorded games for one league match (same wire shape as sample games).
-export const getEvalGameFile = (runId: string, seq: bigint, gen: number, opponentGen: number) =>
-  getProto(`/api/runs/${encodeURIComponent(runId)}/eval/${seq}/${gen}/${opponentGen}`, GameFileSchema);
+export const getEvalGameFile = (runId: string, seq: bigint) =>
+  getProto(`/api/runs/${encodeURIComponent(runId)}/eval/${seq}`, GameFileSchema);

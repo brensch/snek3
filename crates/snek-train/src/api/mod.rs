@@ -32,7 +32,7 @@ pub fn router(trainer: TrainerHandle, static_dir: Option<&FsPath>) -> Router {
         .route("/api/runs/:id", get(run_detail))
         .route("/api/runs/:id/config", post(set_run_config))
         .route("/api/runs/:id/games/:gen", get(run_game))
-        .route("/api/runs/:id/eval/:seq/:gen/:opp", get(run_eval_game))
+        .route("/api/runs/:id/eval/:seq", get(run_eval_game))
         .route("/api/metrics/history", get(history))
         .layer(CorsLayer::permissive())
         .with_state(trainer);
@@ -221,10 +221,10 @@ async fn run_game(
 
 async fn run_eval_game(
     State(trainer): State<TrainerHandle>,
-    Path((id, seq, gen, opp)): Path<(String, u64, u32, u32)>,
+    Path((id, seq)): Path<(String, u64)>,
 ) -> Response {
     let game = viewer::resolve_run(trainer.runs_dir(), &id)
-        .and_then(|root| viewer::eval_game_file(&root, seq, gen, opp));
+        .and_then(|root| viewer::eval_game_file(&root, seq));
     match game {
         Some(file) => Protobuf(file).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),

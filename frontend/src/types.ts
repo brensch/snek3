@@ -19,7 +19,6 @@ export type RunConfig = {
   skip_short_draw_turns: number;
   trunk_channels: number;
   trunk_blocks: number;
-  gpool_every: number;
   train_steps: number;
   batch_size: number;
   recency: number;

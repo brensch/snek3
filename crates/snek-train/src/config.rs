@@ -36,7 +36,7 @@ pub struct RunConfig {
     /// Fixed MCTS sims per eval move (deterministic, CPU).
     #[serde(default = "default_eval_sims")]
     pub eval_sims: usize,
-    /// CPU cores pinned to each side of a league match.
+    /// CPU cores (worker threads) pinned to each net in a league game.
     #[serde(default = "default_eval_cores")]
     pub eval_cores: usize,
 }
@@ -50,11 +50,11 @@ fn default_league_entrant_gens() -> usize {
 }
 
 fn default_eval_sims() -> usize {
-    128
+    64
 }
 
 fn default_eval_cores() -> usize {
-    2
+    1
 }
 
 /// How many GPU-batch-sized groups of games are kept in flight at once. Two is a

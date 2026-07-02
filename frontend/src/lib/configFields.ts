@@ -16,7 +16,6 @@ export const configFields: Array<{ key: keyof RunConfig; label: string; hint?: s
   { key: "skip_short_draw_turns", label: "Skip draws" },
   { key: "trunk_channels", label: "Channels" },
   { key: "trunk_blocks", label: "Blocks" },
-  { key: "gpool_every", label: "GPool every" },
   { key: "train_steps", label: "Train steps" },
   { key: "batch_size", label: "Batch" },
   { key: "recency", label: "Recency" },

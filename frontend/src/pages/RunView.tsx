@@ -119,11 +119,11 @@ export function RunView() {
   };
 
   const metrics = detail?.metrics ?? [];
-  const evalPoints = detail?.evalPoints ?? [];
-  // Bradley–Terry ratings from the continuous evaluation league, ascending by
+  // Plackett–Luce ratings from the continuous evaluation league, ascending by
   // generation and anchored at the earliest rated net (Elo 0) — the run's
   // head-to-head progress curve.
   const league = detail?.league ?? [];
+  const leagueMatches = detail?.matches ?? [];
   const genLeft = metrics.length ? `gen ${metrics[0].generation}` : "";
   const genRight = metrics.length ? `gen ${metrics[metrics.length - 1].generation}` : "";
   const gens = metrics.map((m) => m.generation);
@@ -248,7 +248,7 @@ export function RunView() {
           the arena and rendered with the same board primitives as self-play. */}
       <section className="mt-4">
         <h2 className="section-title mb-2">Evaluation games</h2>
-        <EvalViewer runId={runId} evalPoints={evalPoints} live={isLive} />
+        <EvalViewer runId={runId} matches={leagueMatches} league={league} live={isLive} />
       </section>
     </div>
   );

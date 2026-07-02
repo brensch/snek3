@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file viewer.proto.
  */
 export const file_viewer: GenFile = /*@__PURE__*/
-  fileDesc("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");
+  fileDesc("Cgx2aWV3ZXIucHJvdG8SBHNuZWsijwIKClJ1blN1bW1hcnkSDgoGcnVuX2lkGAEgASgJEgwKBGxpdmUYAiABKAgSDwoHcnVubmluZxgDIAEoCBISCgpnZW5lcmF0aW9uGAQgASgNEhkKEXRvdGFsX2dlbmVyYXRpb25zGAUgASgNEg0KBWJvYXJkGAYgASgNEhIKCm51bV9zbmFrZXMYByABKA0SEwoLcG9saWN5X2xvc3MYCCABKAESEgoKdmFsdWVfbG9zcxgJIAEoARIQCgh3aW5fcmF0ZRgKIAEoARIUCgxoYXNfd2luX3JhdGUYCyABKAgSFgoOZ2FtZV9nZW5fY291bnQYDCABKA0SFwoPdXBkYXRlZF91bml4X21zGA0gASgDIi4KDFJ1bkxpc3RSZXBseRIeCgRydW5zGAEgAygLMhAuc25lay5SdW5TdW1tYXJ5Iv8CCglNZXRyaWNSb3cSEgoKZ2VuZXJhdGlvbhgBIAEoDRITCgtwb2xpY3lfbG9zcxgCIAEoARISCgp2YWx1ZV9sb3NzGAMgASgBEhAKCHdpbl9yYXRlGAQgASgBEhQKDGhhc193aW5fcmF0ZRgFIAEoCBIXCg9jb21wbGV0ZWRfZ2FtZXMYBiABKA0SFgoOdGFyZ2V0X2VudHJvcHkYByABKAESDwoHc2FtcGxlcxgIIAEoDRINCgV0dXJucxgJIAEoDRIOCgZidWZmZXIYCiABKAQSEwoLZ2VuX3NlY29uZHMYCyABKAESFAoMcGxheV9zZWNvbmRzGAwgASgBEhUKDXRyYWluX3NlY29uZHMYDSABKAESGgoSaW5mZXJlbmNlc19wZXJfc2VjGA4gASgBEhUKDWdhbWVzX3Blcl9zZWMYDyABKAESFAoMZ3B1X2J1c3lfcGN0GBAgASgBEhUKDWF2Z19nYW1lX3R1cm4YESABKAESCgoCbHIYEiABKAEiKQoHR2FtZUdlbhILCgNnZW4YASABKA0SEQoJbnVtX2dhbWVzGAIgASgNIl8KDk1hdGNoUGxhY2VtZW50EgsKA2dlbhgBIAEoDRIMCgRzZWF0GAIgASgNEgwKBHJhbmsYAyABKA0SEgoKZGVhdGhfdHVybhgEIAEoDRIQCghzdXJ2aXZlZBgFIAEoCCKRAQoLTGVhZ3VlTWF0Y2gSCwoDc2VxGAEgASgEEigKCnBsYWNlbWVudHMYAiADKAsyFC5zbmVrLk1hdGNoUGxhY2VtZW50Eg0KBXR1cm5zGAMgASgNEgwKBHNpbXMYBCABKA0SFAoMd2FsbF9zZWNvbmRzGAUgASgBEhgKEGZpbmlzaGVkX3VuaXhfbXMYBiABKAMiVwoMTGVhZ3VlUmF0aW5nEgsKA2dlbhgBIAEoDRILCgNlbG8YAiABKAESDQoFZ2FtZXMYAyABKA0SDAoEd2lucxgEIAEoDRIQCghhdmdfcmFuaxgFIAEoASLPAQoJUnVuRGV0YWlsEiEKB3N1bW1hcnkYASABKAsyEC5zbmVrLlJ1blN1bW1hcnkSEwoLY29uZmlnX2pzb24YAiABKAkSIAoHbWV0cmljcxgDIAMoCzIPLnNuZWsuTWV0cmljUm93EiAKCWdhbWVfZ2VucxgEIAMoCzINLnNuZWsuR2FtZUdlbhIiCgZsZWFndWUYBiADKAsyEi5zbmVrLkxlYWd1ZVJhdGluZxIiCgdtYXRjaGVzGAcgAygLMhEuc25lay5MZWFndWVNYXRjaCIdCgVQb2ludBIJCgF4GAEgASgFEgkKAXkYAiABKAUijwEKClNuYWtlRnJhbWUSDQoFYWxpdmUYASABKAgSGQoEYm9keRgCIAMoCzILLnNuZWsuUG9pbnQSDgoGaGVhbHRoGAMgASgFEhMKC2Nob3Nlbl9tb3ZlGAQgASgNEg4KBnBvbGljeRgFIAMoARITCgtwbGF5X3BvbGljeRgGIAMoARINCgV2YWx1ZRgHIAEoASKPAQoFRnJhbWUSDAoEdHVybhgBIAEoDRINCgV3aWR0aBgCIAEoDRIOCgZoZWlnaHQYAyABKA0SGQoEZm9vZBgEIAMoCzILLnNuZWsuUG9pbnQSHAoHaGF6YXJkcxgFIAMoCzILLnNuZWsuUG9pbnQSIAoGc25ha2VzGAYgAygLMhAuc25lay5TbmFrZUZyYW1lIkYKBEdhbWUSGwoGZnJhbWVzGAEgAygLMgsuc25lay5GcmFtZRIOCgZ3aW5uZXIYAiABKAUSEQoJbnVtX3R1cm5zGAMgASgNIkcKCEdhbWVGaWxlEgsKA2dlbhgBIAEoDRIZCgVnYW1lcxgCIAMoCzIKLnNuZWsuR2FtZRITCgtjb25maWdfanNvbhgDIAEoCWIGcHJvdG8z");
 
 /**
  * One row on the home page: enough to render a run card without loading detail.
@@ -272,119 +272,101 @@ export const GameGenSchema: GenMessage<GameGen> = /*@__PURE__*/
   messageDesc(file_viewer, 3);
 
 /**
- * One completed league match: the net at `gen` (side A) vs the checkpoint at
- * `opponent_gen` (from runs/<id>/eval/summary.jsonl). Win counts and the
- * score/Elo are for side A; the per-match Elo is noisy — the fitted league
- * rating (LeagueRating) is the real signal.
+ * One seat's finish in a league game. Rank 1 is best; ties share a rank.
  *
- * @generated from message snek.EvalPoint
+ * @generated from message snek.MatchPlacement
  */
-export type EvalPoint = Message<"snek.EvalPoint"> & {
+export type MatchPlacement = Message<"snek.MatchPlacement"> & {
   /**
+   * which net held the seat
+   *
    * @generated from field: uint32 gen = 1;
    */
   gen: number;
 
   /**
-   * @generated from field: uint32 opponent_gen = 2;
+   * @generated from field: uint32 seat = 2;
    */
-  opponentGen: number;
+  seat: number;
 
   /**
-   * @generated from field: uint32 games = 3;
+   * @generated from field: uint32 rank = 3;
    */
-  games: number;
+  rank: number;
 
   /**
-   * @generated from field: uint32 wins = 4;
-   */
-  wins: number;
-
-  /**
-   * @generated from field: uint32 losses = 5;
-   */
-  losses: number;
-
-  /**
-   * @generated from field: uint32 draws = 6;
-   */
-  draws: number;
-
-  /**
-   * mean score, draws counting 0.5
+   * 0 when the snake survived
    *
-   * @generated from field: double score = 7;
+   * @generated from field: uint32 death_turn = 4;
    */
-  score: number;
+  deathTurn: number;
 
   /**
-   * 95% CI half-width of the score
+   * @generated from field: bool survived = 5;
+   */
+  survived: boolean;
+};
+
+/**
+ * Describes the message snek.MatchPlacement.
+ * Use `create(MatchPlacementSchema)` to create a new message.
+ */
+export const MatchPlacementSchema: GenMessage<MatchPlacement> = /*@__PURE__*/
+  messageDesc(file_viewer, 4);
+
+/**
+ * One completed league game: the full elimination ranking of its players
+ * (from runs/<id>/eval/summary.jsonl).
+ *
+ * @generated from message snek.LeagueMatch
+ */
+export type LeagueMatch = Message<"snek.LeagueMatch"> & {
+  /**
+   * monotonic game number within the run
    *
-   * @generated from field: double score_ci95 = 8;
+   * @generated from field: uint64 seq = 1;
    */
-  scoreCi95: number;
+  seq: bigint;
 
   /**
-   * pairwise Elo(gen) - Elo(opponent_gen), this match only
+   * seat order
    *
-   * @generated from field: double elo = 9;
+   * @generated from field: repeated snek.MatchPlacement placements = 2;
    */
-  elo: number;
+  placements: MatchPlacement[];
 
   /**
-   * Elo at the CI endpoints
-   *
-   * @generated from field: double elo_lo = 10;
+   * @generated from field: uint32 turns = 3;
    */
-  eloLo: number;
+  turns: number;
 
   /**
-   * @generated from field: double elo_hi = 11;
-   */
-  eloHi: number;
-
-  /**
-   * MCTS sims per eval move
-   *
-   * @generated from field: uint32 sims = 12;
+   * @generated from field: uint32 sims = 4;
    */
   sims: number;
 
   /**
-   * snakes per eval game
-   *
-   * @generated from field: uint32 snakes = 13;
-   */
-  snakes: number;
-
-  /**
-   * @generated from field: double wall_seconds = 14;
+   * @generated from field: double wall_seconds = 5;
    */
   wallSeconds: number;
 
   /**
-   * @generated from field: int64 finished_unix_ms = 15;
+   * @generated from field: int64 finished_unix_ms = 6;
    */
   finishedUnixMs: bigint;
-
-  /**
-   * monotonic match number within the run
-   *
-   * @generated from field: uint64 seq = 16;
-   */
-  seq: bigint;
 };
 
 /**
- * Describes the message snek.EvalPoint.
- * Use `create(EvalPointSchema)` to create a new message.
+ * Describes the message snek.LeagueMatch.
+ * Use `create(LeagueMatchSchema)` to create a new message.
  */
-export const EvalPointSchema: GenMessage<EvalPoint> = /*@__PURE__*/
-  messageDesc(file_viewer, 4);
+export const LeagueMatchSchema: GenMessage<LeagueMatch> = /*@__PURE__*/
+  messageDesc(file_viewer, 5);
 
 /**
- * One net's fitted league rating (Bradley–Terry over every recorded match,
- * anchored so the earliest rated generation is Elo 0).
+ * One net's fitted league rating: Plackett–Luce maximum likelihood over every
+ * recorded game (multiplayer generalization of Bradley–Terry), anchored so
+ * the earliest rated generation is Elo 0.
  *
  * @generated from message snek.LeagueRating
  */
@@ -405,19 +387,16 @@ export type LeagueRating = Message<"snek.LeagueRating"> & {
   games: number;
 
   /**
+   * rank-1 finishes
+   *
    * @generated from field: uint32 wins = 4;
    */
   wins: number;
 
   /**
-   * @generated from field: uint32 losses = 5;
+   * @generated from field: double avg_rank = 5;
    */
-  losses: number;
-
-  /**
-   * @generated from field: uint32 draws = 6;
-   */
-  draws: number;
+  avgRank: number;
 };
 
 /**
@@ -425,7 +404,7 @@ export type LeagueRating = Message<"snek.LeagueRating"> & {
  * Use `create(LeagueRatingSchema)` to create a new message.
  */
 export const LeagueRatingSchema: GenMessage<LeagueRating> = /*@__PURE__*/
-  messageDesc(file_viewer, 5);
+  messageDesc(file_viewer, 6);
 
 /**
  * @generated from message snek.RunDetail
@@ -458,18 +437,18 @@ export type RunDetail = Message<"snek.RunDetail"> & {
   gameGens: GameGen[];
 
   /**
-   * matches, oldest first
-   *
-   * @generated from field: repeated snek.EvalPoint eval_points = 5;
-   */
-  evalPoints: EvalPoint[];
-
-  /**
    * latest fit, ascending by generation
    *
    * @generated from field: repeated snek.LeagueRating league = 6;
    */
   league: LeagueRating[];
+
+  /**
+   * league games, oldest first
+   *
+   * @generated from field: repeated snek.LeagueMatch matches = 7;
+   */
+  matches: LeagueMatch[];
 };
 
 /**
@@ -477,7 +456,7 @@ export type RunDetail = Message<"snek.RunDetail"> & {
  * Use `create(RunDetailSchema)` to create a new message.
  */
 export const RunDetailSchema: GenMessage<RunDetail> = /*@__PURE__*/
-  messageDesc(file_viewer, 6);
+  messageDesc(file_viewer, 7);
 
 /**
  * @generated from message snek.Point
@@ -499,7 +478,7 @@ export type Point = Message<"snek.Point"> & {
  * Use `create(PointSchema)` to create a new message.
  */
 export const PointSchema: GenMessage<Point> = /*@__PURE__*/
-  messageDesc(file_viewer, 7);
+  messageDesc(file_viewer, 8);
 
 /**
  * One snake's state and search readout at a single turn.
@@ -558,7 +537,7 @@ export type SnakeFrame = Message<"snek.SnakeFrame"> & {
  * Use `create(SnakeFrameSchema)` to create a new message.
  */
 export const SnakeFrameSchema: GenMessage<SnakeFrame> = /*@__PURE__*/
-  messageDesc(file_viewer, 8);
+  messageDesc(file_viewer, 9);
 
 /**
  * @generated from message snek.Frame
@@ -600,7 +579,7 @@ export type Frame = Message<"snek.Frame"> & {
  * Use `create(FrameSchema)` to create a new message.
  */
 export const FrameSchema: GenMessage<Frame> = /*@__PURE__*/
-  messageDesc(file_viewer, 9);
+  messageDesc(file_viewer, 10);
 
 /**
  * @generated from message snek.Game
@@ -629,7 +608,7 @@ export type Game = Message<"snek.Game"> & {
  * Use `create(GameSchema)` to create a new message.
  */
 export const GameSchema: GenMessage<Game> = /*@__PURE__*/
-  messageDesc(file_viewer, 10);
+  messageDesc(file_viewer, 11);
 
 /**
  * @generated from message snek.GameFile
@@ -658,5 +637,5 @@ export type GameFile = Message<"snek.GameFile"> & {
  * Use `create(GameFileSchema)` to create a new message.
  */
 export const GameFileSchema: GenMessage<GameFile> = /*@__PURE__*/
-  messageDesc(file_viewer, 11);
+  messageDesc(file_viewer, 12);
 

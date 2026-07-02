@@ -51,37 +51,40 @@ pub fn run_detail(
             .unwrap_or_default(),
         metrics: metrics(root),
         game_gens: game_gens(root),
-        eval_points: eval_points(root),
         league: league(root),
+        matches: league_matches(root),
     }
 }
 
-/// A run's league match history (eval/summary.jsonl), oldest first.
-fn eval_points(root: &Path) -> Vec<proto::EvalPoint> {
+/// A run's league game history (eval/summary.jsonl), oldest first. Legacy
+/// pairwise lines (which carry no placement ranking) are skipped — they still
+/// feed the rating fit, just not the browsable list.
+fn league_matches(root: &Path) -> Vec<proto::LeagueMatch> {
     crate::eval::read_summaries(root)
         .into_iter()
-        .map(|s| proto::EvalPoint {
-            seq: s.seq,
-            gen: s.gen,
-            opponent_gen: s.opponent_gen,
-            games: s.games,
-            wins: s.wins,
-            losses: s.losses,
-            draws: s.draws,
-            score: s.score,
-            score_ci95: s.score_ci95,
-            elo: s.elo,
-            elo_lo: s.elo_lo,
-            elo_hi: s.elo_hi,
-            sims: s.sims,
-            snakes: s.snakes,
-            wall_seconds: s.wall_seconds,
-            finished_unix_ms: s.finished_unix_ms,
+        .filter(|m| !m.placements.is_empty())
+        .map(|m| proto::LeagueMatch {
+            seq: m.seq,
+            placements: m
+                .placements
+                .iter()
+                .map(|p| proto::MatchPlacement {
+                    gen: p.gen,
+                    seat: p.seat,
+                    rank: p.rank,
+                    death_turn: p.death_turn.unwrap_or(0),
+                    survived: p.death_turn.is_none(),
+                })
+                .collect(),
+            turns: m.turns,
+            sims: m.sims,
+            wall_seconds: m.wall_seconds,
+            finished_unix_ms: m.finished_unix_ms,
         })
         .collect()
 }
 
-/// The latest Bradley–Terry league fit (eval/ratings.json), ascending by gen.
+/// The latest Plackett–Luce league fit (eval/ratings.json), ascending by gen.
 fn league(root: &Path) -> Vec<proto::LeagueRating> {
     crate::eval::read_ratings(root)
         .ratings
@@ -91,28 +94,30 @@ fn league(root: &Path) -> Vec<proto::LeagueRating> {
             elo: r.elo,
             games: r.games,
             wins: r.wins,
-            losses: r.losses,
-            draws: r.draws,
+            avg_rank: r.avg_rank,
         })
         .collect()
 }
 
-/// Load one league match's recorded games (eval/match_SSSSSS_GGGG_vs_OOOO.json,
-/// with fallbacks to the older pre-league filenames). Same schema and wire
-/// format as self-play sample games, so the frontend reuses one viewer.
-pub fn eval_game_file(
-    root: &Path,
-    seq: u64,
-    gen: u32,
-    opponent_gen: u32,
-) -> Option<proto::GameFile> {
+/// Load one league game's recording (eval/match_SSSSSS.json, tolerating older
+/// suffixed names via prefix match). Same schema and wire format as self-play
+/// sample games, so the frontend reuses one viewer.
+pub fn eval_game_file(root: &Path, seq: u64) -> Option<proto::GameFile> {
     let dir = root.join("eval");
-    let mut path = dir.join(format!("match_{seq:06}_{gen:04}_vs_{opponent_gen:04}.json"));
+    let mut path = dir.join(format!("match_{seq:06}.json"));
     if !path.exists() {
-        path = dir.join(format!("eval_{gen:04}_vs_{opponent_gen:04}.json"));
-    }
-    if !path.exists() {
-        path = dir.join(format!("eval_{gen:04}.json"));
+        // Older recordings carried the pairing in the name.
+        let prefix = format!("match_{seq:06}");
+        path = std::fs::read_dir(&dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with(&prefix) && n.ends_with(".json"))
+                    .unwrap_or(false)
+            })?;
     }
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
