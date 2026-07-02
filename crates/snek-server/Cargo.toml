@@ -17,6 +17,10 @@ path = "src/lib.rs"
 name = "snek-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "arena"
+path = "src/bin/arena.rs"
+
 [dependencies]
 snek-core = { path = "../snek-core", features = ["json"] }
 snek-search = { path = "../snek-search" }
@@ -31,6 +35,7 @@ rand_xoshiro = "0.6"
 rust-embed = "8"
 sha2 = "0.10"
 tch = "0.24"
+core_affinity = "0.8"
 
 [profile.release]
 opt-level = 3

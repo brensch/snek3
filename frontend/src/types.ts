@@ -17,18 +17,24 @@ export type RunConfig = {
   max_turns: number;
   draw_value: number;
   skip_short_draw_turns: number;
-  bootstrap_value: boolean;
   trunk_channels: number;
   trunk_blocks: number;
   gpool_every: number;
   train_steps: number;
   batch_size: number;
-  lr: number;
   recency: number;
   buffer_size: number;
   value_weight: number;
   search_threads: number;
   sample_games: number;
+  // Concurrent CPU arena eval: every eval_turns generations the trainer plays
+  // the current checkpoint against the one eval_turns back. 0 disables.
+  eval_turns: number;
+  eval_games: number;
+  eval_sims: number;
+  // Past checkpoints per eval point, exponentially spaced (1x, 2x, 4x… eval_turns back).
+  eval_opponents: number;
+  eval_cores: number;
 };
 
 // The JSON shape returned by GET /api/state. `phase` is the Phase enum value

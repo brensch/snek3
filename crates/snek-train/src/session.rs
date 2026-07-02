@@ -1,8 +1,20 @@
-//! Persist the in-progress self-play boards so a resumed run continues its games
-//! instead of discarding them. Boards are snapshotted through the engine's public
-//! fields (no serde needed in snek-core): bodies, health, alive, food, hazards and
-//! the game turn are enough to reconstruct an equivalent `Board`.
+//! Persist the whole in-progress self-play session so a paused run resumes
+//! seamlessly: the in-flight boards, their full frame histories, and every game
+//! finished so far in the current (not-yet-committed) generation.
+//!
+//! Boards are snapshotted through snek-core's public fields (the engine carries
+//! no serde); frames and finished games already serialize — they share the
+//! dashboard schema in [`crate::sample`]. Because a training sample's observation
+//! is derived from its frame, persisting frames alone is enough to reconstruct
+//! the generation's accumulated samples on resume, so nothing bulky (no raw
+//! observations) is written here.
+//!
+//! The file keeps its historical name (`selfplay.json`) and the frame/finished
+//! fields default when absent, so an older snapshot (boards + turns only) still
+//! loads — its games simply restart on the first resume.
 
+use crate::sample::{FrameJson, GameJson};
+use crate::selfplay::SelfPlayState;
 use serde::{Deserialize, Serialize};
 use snek_core::{Board, EliminatedCause, Point};
 use std::path::Path;
@@ -25,9 +37,15 @@ struct BoardSnap {
 }
 
 #[derive(Serialize, Deserialize, Default)]
-struct CarrySnap {
+struct SessionSnap {
     turns: Vec<usize>,
     boards: Vec<BoardSnap>,
+    /// In-flight per-game frame histories (parallel to `boards`).
+    #[serde(default)]
+    rec: Vec<Vec<FrameJson>>,
+    /// Games finished in the current generation, awaiting the sample target.
+    #[serde(default)]
+    finished: Vec<GameJson>,
 }
 
 fn pts(ps: &[Point]) -> Vec<[i8; 2]> {
@@ -79,11 +97,13 @@ impl BoardSnap {
     }
 }
 
-/// Write the carried boards + turn counters to `path` atomically.
-pub fn save(path: &Path, boards: &[Board], turns: &[usize]) -> anyhow::Result<()> {
-    let snap = CarrySnap {
-        turns: turns.to_vec(),
-        boards: boards.iter().map(BoardSnap::from_board).collect(),
+/// Write the whole self-play session to `path` atomically.
+pub fn save(path: &Path, state: &SelfPlayState) -> anyhow::Result<()> {
+    let snap = SessionSnap {
+        turns: state.turns.clone(),
+        boards: state.boards.iter().map(BoardSnap::from_board).collect(),
+        rec: state.rec.clone(),
+        finished: state.finished.clone(),
     };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -94,12 +114,16 @@ pub fn save(path: &Path, boards: &[Board], turns: &[usize]) -> anyhow::Result<()
     Ok(())
 }
 
-/// Load carried boards + turns, or `None` if there is no snapshot.
-pub fn load(path: &Path) -> anyhow::Result<Option<(Vec<Board>, Vec<usize>)>> {
+/// Load a saved session, or `None` if there is no snapshot.
+pub fn load(path: &Path) -> anyhow::Result<Option<SelfPlayState>> {
     if !path.exists() {
         return Ok(None);
     }
-    let snap: CarrySnap = serde_json::from_slice(&std::fs::read(path)?)?;
-    let boards = snap.boards.iter().map(BoardSnap::to_board).collect();
-    Ok(Some((boards, snap.turns)))
+    let snap: SessionSnap = serde_json::from_slice(&std::fs::read(path)?)?;
+    Ok(Some(SelfPlayState {
+        boards: snap.boards.iter().map(BoardSnap::to_board).collect(),
+        turns: snap.turns,
+        rec: snap.rec,
+        finished: snap.finished,
+    }))
 }

@@ -51,6 +51,56 @@ pub fn run_detail(
             .unwrap_or_default(),
         metrics: metrics(root),
         game_gens: game_gens(root),
+        eval_points: eval_points(root),
+    }
+}
+
+/// A run's eval history (eval/summary.jsonl), oldest first.
+fn eval_points(root: &Path) -> Vec<proto::EvalPoint> {
+    crate::eval::read_summaries(root)
+        .into_iter()
+        .map(|s| proto::EvalPoint {
+            gen: s.gen,
+            opponent_gen: s.opponent_gen,
+            games: s.games,
+            wins: s.wins,
+            losses: s.losses,
+            draws: s.draws,
+            score: s.score,
+            score_ci95: s.score_ci95,
+            elo: s.elo,
+            elo_lo: s.elo_lo,
+            elo_hi: s.elo_hi,
+            sims: s.sims,
+            snakes: s.snakes,
+            wall_seconds: s.wall_seconds,
+            finished_unix_ms: s.finished_unix_ms,
+        })
+        .collect()
+}
+
+/// Load one eval matchup's recorded games (eval/eval_GGGG_vs_OOOO.json, with a
+/// fallback to the older single-opponent eval_GGGG.json name). Same schema and
+/// wire format as self-play sample games, so the frontend reuses one viewer.
+pub fn eval_game_file(root: &Path, gen: u32, opponent_gen: u32) -> Option<proto::GameFile> {
+    let dir = root.join("eval");
+    let mut path = dir.join(format!("eval_{gen:04}_vs_{opponent_gen:04}.json"));
+    if !path.exists() {
+        path = dir.join(format!("eval_{gen:04}.json"));
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::warn!(?path, %err, "read eval game file failed");
+            return None;
+        }
+    };
+    match serde_json::from_str::<GameFileJson>(&text) {
+        Ok(parsed) => Some(convert_game_file(parsed)),
+        Err(err) => {
+            tracing::warn!(?path, %err, "parse eval game file failed");
+            None
+        }
     }
 }
 
@@ -120,6 +170,7 @@ struct MetricJson {
     games_per_sec: Option<f64>,
     gpu_busy_pct: Option<f64>,
     avg_game_turn: Option<f64>,
+    lr: Option<f64>,
 }
 
 fn metrics(root: &Path) -> Vec<proto::MetricRow> {
@@ -153,6 +204,7 @@ fn metrics(root: &Path) -> Vec<proto::MetricRow> {
                 games_per_sec: row.games_per_sec.unwrap_or(0.0),
                 gpu_busy_pct: row.gpu_busy_pct.unwrap_or(0.0),
                 avg_game_turn: row.avg_game_turn.unwrap_or(0.0),
+                lr: row.lr.unwrap_or(0.0),
             })
         })
         .collect()

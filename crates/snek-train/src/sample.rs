@@ -117,7 +117,8 @@ pub fn frame_from_board(
 }
 
 /// Write one generation's recorded games and prune old generations so the
-/// `games/` directory keeps at most `keep` files.
+/// `games/` directory keeps at most `keep` files. `keep == 0` retains every
+/// generation forever (no pruning).
 pub fn write_generation(
     games_dir: &Path,
     gen: u32,
@@ -140,6 +141,9 @@ pub fn write_generation(
 }
 
 fn prune(games_dir: &Path, keep: usize) {
+    if keep == 0 {
+        return; // retain all generations forever
+    }
     let mut files: Vec<_> = match std::fs::read_dir(games_dir) {
         Ok(rd) => rd
             .flatten()

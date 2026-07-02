@@ -13,11 +13,13 @@ use base64::Engine;
 use prost::Message;
 use serde_json::json;
 use std::convert::Infallible;
+use std::path::Path as FsPath;
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 
-pub fn router(trainer: TrainerHandle) -> Router {
-    Router::new()
+pub fn router(trainer: TrainerHandle, static_dir: Option<&FsPath>) -> Router {
+    let mut router = Router::new()
         .route("/api/stream/stats", get(stream_stats))
         .route("/api/stream/logs", get(stream_logs))
         .route("/api/state", get(state))
@@ -28,9 +30,16 @@ pub fn router(trainer: TrainerHandle) -> Router {
         .route("/api/runs/:id", get(run_detail))
         .route("/api/runs/:id/config", post(set_run_config))
         .route("/api/runs/:id/games/:gen", get(run_game))
+        .route("/api/runs/:id/eval/:gen/:opp", get(run_eval_game))
         .route("/api/metrics/history", get(history))
         .layer(CorsLayer::permissive())
-        .with_state(trainer)
+        .with_state(trainer);
+    if let Some(dir) = static_dir {
+        // SPA fallback: unknown paths get index.html so client-side routes work.
+        let serve = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
+        router = router.fallback_service(serve);
+    }
+    router
 }
 
 async fn stream_stats(
@@ -148,6 +157,18 @@ async fn run_game(
 ) -> Response {
     let game =
         viewer::resolve_run(trainer.runs_dir(), &id).and_then(|root| viewer::game_file(&root, gen));
+    match game {
+        Some(file) => Protobuf(file).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn run_eval_game(
+    State(trainer): State<TrainerHandle>,
+    Path((id, gen, opp)): Path<(String, u32, u32)>,
+) -> Response {
+    let game = viewer::resolve_run(trainer.runs_dir(), &id)
+        .and_then(|root| viewer::eval_game_file(&root, gen, opp));
     match game {
         Some(file) => Protobuf(file).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),

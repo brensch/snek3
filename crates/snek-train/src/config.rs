@@ -16,13 +16,11 @@ pub struct RunConfig {
     pub max_turns: usize,
     pub draw_value: f32,
     pub skip_short_draw_turns: usize,
-    pub bootstrap_value: bool,
     pub trunk_channels: i64,
     pub trunk_blocks: i64,
     pub gpool_every: i64,
     pub train_steps: usize,
     pub batch_size: usize,
-    pub lr: f64,
     pub recency: f64,
     pub buffer_size: usize,
     pub value_weight: f64,
@@ -30,10 +28,48 @@ pub struct RunConfig {
     /// How many self-play games to record as browsable samples each generation.
     #[serde(default = "default_sample_games")]
     pub sample_games: usize,
+    /// Run a CPU arena eval (current checkpoint vs the one this many gens back)
+    /// every this many generations, concurrent with training. 0 disables.
+    #[serde(default = "default_eval_turns")]
+    pub eval_turns: usize,
+    /// Games per eval match (played as mirrored seat-swapped pairs).
+    #[serde(default = "default_eval_games")]
+    pub eval_games: usize,
+    /// Fixed MCTS sims per eval move (deterministic, CPU).
+    #[serde(default = "default_eval_sims")]
+    pub eval_sims: usize,
+    /// Past checkpoints each eval point plays, exponentially spaced at 1×, 2×,
+    /// 4×… eval_turns generations back (clamped at gen 0, deduped). Short
+    /// horizons show "still improving?", long ones show progress over time.
+    #[serde(default = "default_eval_opponents")]
+    pub eval_opponents: usize,
+    /// CPU cores pinned to each side of the eval match.
+    #[serde(default = "default_eval_cores")]
+    pub eval_cores: usize,
 }
 
 fn default_sample_games() -> usize {
     8
+}
+
+fn default_eval_turns() -> usize {
+    5
+}
+
+fn default_eval_games() -> usize {
+    16
+}
+
+fn default_eval_sims() -> usize {
+    128
+}
+
+fn default_eval_opponents() -> usize {
+    3
+}
+
+fn default_eval_cores() -> usize {
+    2
 }
 
 /// How many GPU-batch-sized groups of games are kept in flight at once. Two is a
@@ -61,21 +97,24 @@ impl Default for RunConfig {
             gpu_batch_games: 128,
             samples_per_gen: 12_000,
             exploration_prob: 0.15,
-            max_turns: 200,
+            max_turns: 0, // 0 = uncapped (games run to a natural terminal)
             draw_value: -0.25,
             skip_short_draw_turns: 0,
-            bootstrap_value: false,
             trunk_channels: 96,
             trunk_blocks: 8,
             gpool_every: 3,
             train_steps: 128,
             batch_size: 2048,
-            lr: 1e-3,
             recency: 2.0,
             buffer_size: 500_000,
             value_weight: 1.0,
             search_threads: 0,
             sample_games: default_sample_games(),
+            eval_turns: default_eval_turns(),
+            eval_games: default_eval_games(),
+            eval_sims: default_eval_sims(),
+            eval_opponents: default_eval_opponents(),
+            eval_cores: default_eval_cores(),
         }
     }
 }

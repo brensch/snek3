@@ -47,6 +47,7 @@ message MetricRow {
   double games_per_sec = 15;
   double gpu_busy_pct = 16;
   double avg_game_turn = 17;    // mean game turn across all buffered samples
+  double lr = 18;               // learning rate trained at (0 for old runs)
 }
 
 // A generation that has recorded self-play sample games on disk.
@@ -55,11 +56,33 @@ message GameGen {
   uint32 num_games = 2;
 }
 
+// One completed eval match: the net at `gen` vs the checkpoint at
+// `opponent_gen` (from runs/<id>/eval/summary.jsonl). Win counts and the
+// score/Elo are for the newer net.
+message EvalPoint {
+  uint32 gen = 1;
+  uint32 opponent_gen = 2;
+  uint32 games = 3;
+  uint32 wins = 4;
+  uint32 losses = 5;
+  uint32 draws = 6;
+  double score = 7;        // mean score, draws counting 0.5
+  double score_ci95 = 8;   // 95% CI half-width of the score
+  double elo = 9;          // Elo(gen) - Elo(opponent_gen)
+  double elo_lo = 10;      // Elo at the CI endpoints
+  double elo_hi = 11;
+  uint32 sims = 12;        // MCTS sims per eval move
+  uint32 snakes = 13;      // snakes per eval game
+  double wall_seconds = 14;
+  int64 finished_unix_ms = 15;
+}
+
 message RunDetail {
   RunSummary summary = 1;
   string config_json = 2;          // raw config.json, shown in the knobs panel
   repeated MetricRow metrics = 3;  // full history, oldest first
   repeated GameGen game_gens = 4;  // newest first
+  repeated EvalPoint eval_points = 5; // oldest first
 }
 
 message Point {

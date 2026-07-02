@@ -2,11 +2,10 @@ use crate::config::RunConfig;
 use crate::metrics::Metrics;
 use crate::proto::Phase;
 use crate::replay::ReplayBuffer;
-use crate::selfplay::{generate, SelfPlayNet};
+use crate::selfplay::{generate, GenOutcome, SelfPlayNet, SelfPlayState};
 use crate::state::{load_trainer_state, save_trainer_state, RunPaths};
 use crate::train::{build_optimizer, train_steps};
 use serde::{Deserialize, Serialize};
-use snek_core::Board;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,7 +13,8 @@ use std::time::Instant;
 use tch::{nn, Device};
 
 /// How many generations of recorded sample games to retain on disk per run.
-const SAMPLE_GAMES_KEEP: usize = 60;
+/// `0` keeps every generation forever.
+const SAMPLE_GAMES_KEEP: usize = 0;
 
 #[derive(Clone)]
 pub struct TrainerHandle {
@@ -181,7 +181,7 @@ impl TrainerHandle {
         } else {
             snek_tch::init_orthogonal(&vs, 2f64.sqrt());
         }
-        let mut opt = build_optimizer(&vs, cfg.lr)?;
+        let mut opt = build_optimizer(&vs)?;
         let mut state = if fresh {
             Default::default()
         } else {
@@ -192,28 +192,22 @@ impl TrainerHandle {
         } else {
             ReplayBuffer::restore(&paths.replay, cfg.buffer_size, state.generation)?
         };
-        // Carry in-progress self-play games across restarts: reload the boards so a
-        // resumed run continues them instead of starting fresh. Empty here means a
-        // fresh set is created inside `generate`.
-        let (mut boards, mut turns): (Vec<Board>, Vec<usize>) = if fresh {
-            (Vec::new(), Vec::new())
+        // Reload the whole self-play session so a resumed run continues its
+        // in-flight games *and* the current generation's accumulated (finished)
+        // games from where they stopped. Empty here means `generate` starts fresh.
+        let mut sp: SelfPlayState = if fresh {
+            SelfPlayState::default()
         } else {
-            crate::carry::load(&paths.carry)?.unwrap_or_default()
+            crate::session::load(&paths.session)?.unwrap_or_default()
         };
-        // In-progress replay frames and training trajectories for each carried
-        // game, so a game spanning generation boundaries is recorded whole and its
-        // full trajectory is materialised into samples when it finishes. Kept in
-        // memory only (not persisted with the carry): a resume resumes recording
-        // and accumulating from where the carried games currently stand.
-        let mut rec_frames: Vec<Vec<crate::sample::FrameJson>> = Vec::new();
-        let mut trajs: Vec<crate::selfplay::Traj> = Vec::new();
         self.log(format!(
-            "{verb} run '{run_id}' at gen {gen}: buffer {buf} samples (avg turn {avg:.1}), {games} carried games",
+            "{verb} run '{run_id}' at gen {gen}: buffer {buf} samples (avg turn {avg:.1}), {games} in-flight games, {fin} finished games buffered",
             verb = if fresh { "starting" } else { "resuming" },
             gen = state.generation,
             buf = replay.len(),
             avg = replay.avg_turn(),
-            games = boards.len(),
+            games = sp.boards.len(),
+            fin = sp.finished.len(),
         ));
 
         while !self.stop.load(Ordering::Relaxed) {
@@ -228,24 +222,25 @@ impl TrainerHandle {
             let gen_start = Instant::now();
             let inf_before = counters.inferences.load(Ordering::Relaxed);
             let fwd_us_before = counters.gpu_forward_us.load(Ordering::Relaxed);
-            let (samples, recorded_games) = generate(
+            let outcome = generate(
                 &SelfPlayNet { net: &net, device },
                 &cfg,
                 state.seed + state.generation as u64,
                 &self.metrics,
                 &self.stop,
-                &mut boards,
-                &mut turns,
-                &mut rec_frames,
-                &mut trajs,
+                &mut sp,
             )?;
-            // Stop requested mid-generation: bail out now rather than spending a
-            // full train + checkpoint cycle on this interrupted generation. The
-            // net, trainer state, and replay shards from completed generations are
-            // already on disk / saved below, so resume loses only this partial gen.
-            if self.stop.load(Ordering::Relaxed) {
-                break;
-            }
+            // A pause interrupts the generation: snapshot the whole session (in-
+            // flight games + this generation's accumulated finished games) and bail
+            // out without training. Resume reloads it and continues the *same*
+            // generation from the same sample count — nothing is lost or retrained.
+            let (samples, display_games) = match outcome {
+                GenOutcome::Interrupted => break,
+                GenOutcome::Complete {
+                    samples,
+                    display_games,
+                } => (samples, display_games),
+            };
             let play_seconds = gen_start.elapsed().as_secs_f64();
             // Per-generation figures (not cumulative): `samples` reports this
             // generation's completed games / turns / samples directly.
@@ -259,11 +254,11 @@ impl TrainerHandle {
                 .saturating_sub(fwd_us_before) as f64
                 / 1_000_000.0;
 
-            if !recorded_games.is_empty() {
+            if !display_games.is_empty() {
                 if let Err(err) = crate::sample::write_generation(
                     &paths.games,
                     state.generation,
-                    recorded_games,
+                    display_games,
                     serde_json::to_value(&cfg).unwrap_or_default(),
                     SAMPLE_GAMES_KEEP,
                 ) {
@@ -275,12 +270,17 @@ impl TrainerHandle {
             replay.add(samples);
             let buffer_len = replay.len() as u64;
             let avg_game_turn = replay.avg_turn();
-            // Persist the carried games so a resume continues them.
-            if let Err(err) = crate::carry::save(&paths.carry, &boards, &turns) {
-                tracing::warn!(%err, "failed to save carried self-play boards");
+            // Persist the session so a resume continues the in-flight games (the
+            // finished buffer is now drained into this generation's shard).
+            if let Err(err) = crate::session::save(&paths.session, &sp) {
+                tracing::warn!(%err, "failed to save self-play session");
             }
 
             self.metrics.set_phase(Phase::Training);
+            // The LR schedule is code-owned (see `train::lr_for`); re-applied
+            // every generation so the decay advances with samples_seen.
+            let lr = crate::train::lr_for(state.samples_seen);
+            opt.set_lr(lr);
             let train_start = Instant::now();
             let losses = train_steps(
                 &net,
@@ -296,6 +296,10 @@ impl TrainerHandle {
 
             self.metrics.set_phase(Phase::Checkpoint);
             vs.save(&paths.net)?;
+            // Also archive this generation's weights, kept forever.
+            vs.save(&paths.checkpoint_net(state.generation))?;
+            // Concurrent CPU arena eval against an older checkpoint, if due.
+            crate::eval::maybe_spawn(&paths, &cfg, state.generation, self.metrics.clone());
             append_metric(
                 &paths.metrics,
                 &GenRecord {
@@ -303,6 +307,7 @@ impl TrainerHandle {
                     policy_loss: losses.policy_loss,
                     value_loss: losses.value_loss,
                     target_entropy: losses.target_entropy,
+                    lr,
                     win_rate: 0.0,
                     completed_games: gen_completed_games,
                     samples: gen_samples,
@@ -322,7 +327,7 @@ impl TrainerHandle {
                 },
             )?;
             self.log(format!(
-                "gen {gen} done: {games} games, {samples} samples, buffer {buf} (avg turn {avg:.1}), play {play:.1}s train {train:.1}s, ploss {ploss:.3} vloss {vloss:.3}",
+                "gen {gen} done: {games} games, {samples} samples, buffer {buf} (avg turn {avg:.1}), play {play:.1}s train {train:.1}s, ploss {ploss:.3} vloss {vloss:.3} lr {lr:.1e}",
                 gen = state.generation,
                 games = gen_completed_games,
                 samples = gen_samples,
@@ -338,13 +343,16 @@ impl TrainerHandle {
         }
         vs.save(&paths.net)?;
         save_trainer_state(&paths.trainer_state, &state)?;
-        if let Err(err) = crate::carry::save(&paths.carry, &boards, &turns) {
-            tracing::warn!(%err, "failed to save carried self-play boards");
+        if let Err(err) = crate::session::save(&paths.session, &sp) {
+            tracing::warn!(%err, "failed to save self-play session");
         }
         self.log(format!(
-            "stopped run '{run_id}' at gen {}: snapshot saved ({} carried games)",
-            state.generation,
-            boards.len()
+            "paused run '{run_id}' at gen {gen}: snapshot saved ({games} in-flight games, {fin} finished games, {done}/{target} samples this gen)",
+            gen = state.generation,
+            games = sp.boards.len(),
+            fin = sp.finished.len(),
+            done = sp.pending_sample_count(cfg.num_snakes),
+            target = cfg.samples_per_gen,
         ));
         Ok(())
     }
@@ -358,6 +366,8 @@ struct GenRecord {
     policy_loss: f64,
     value_loss: f64,
     target_entropy: f64,
+    /// Learning rate this generation actually trained at (after decay).
+    lr: f64,
     win_rate: f64,
     completed_games: u32,
     samples: u32,

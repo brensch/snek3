@@ -106,45 +106,52 @@ export function SeriesChart({
             <span>0</span>
           </div>
         )}
+        {/* Outer cell is not clipped, so the tooltip can spill past the plot
+            edges and stay visible; the inner box clips only the chart body. */}
         <div
-          className={`relative min-w-0 overflow-hidden rounded border border-slate-800 bg-slate-950 ${
-            showAxis ? "col-start-2" : "col-start-1"
-          }`}
+          className={`relative min-w-0 ${showAxis ? "col-start-2" : "col-start-1"}`}
           onMouseMove={onMove}
           onMouseLeave={() => setHover(null)}
         >
-          <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 h-full w-full">
-            {[0, 50, 100].map((y) => (
-              <line key={y} x1="0" x2="100" y1={y} y2={y} stroke="#1e293b" strokeWidth="0.8" vectorEffect="non-scaling-stroke" />
-            ))}
-            {lines.map((s, li) => (
-              <polyline
-                key={li}
-                points={s.values.map((v, i) => `${px(i)},${py(v, li)}`).join(" ")}
-                fill="none"
-                stroke={s.color ?? DEFAULT_COLOR}
-                strokeWidth="2"
-                strokeLinejoin="round"
-                strokeLinecap="round"
-                vectorEffect="non-scaling-stroke"
-              />
-            ))}
-            {hover != null && (
-              <>
+          <div className="absolute inset-0 overflow-hidden rounded border border-slate-800 bg-slate-950">
+            <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 h-full w-full">
+              {[0, 50, 100].map((y) => (
+                <line key={y} x1="0" x2="100" y1={y} y2={y} stroke="#1e293b" strokeWidth="0.8" vectorEffect="non-scaling-stroke" />
+              ))}
+              {lines.map((s, li) => (
+                <polyline
+                  key={li}
+                  points={s.values.map((v, i) => `${px(i)},${py(v, li)}`).join(" ")}
+                  fill="none"
+                  stroke={s.color ?? DEFAULT_COLOR}
+                  strokeWidth="2"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+              {hover != null && (
                 <line x1={px(hover)} x2={px(hover)} y1="0" y2="100" stroke="#475569" strokeWidth="0.8" vectorEffect="non-scaling-stroke" />
-                {lines.map((s, li) => {
-                  const v = s.values[hover];
-                  return v != null && Number.isFinite(v) ? (
-                    <circle key={li} cx={px(hover)} cy={py(v, li)} r="2.5" fill={s.color ?? DEFAULT_COLOR} vectorEffect="non-scaling-stroke" />
-                  ) : null;
-                })}
-              </>
-            )}
-          </svg>
+              )}
+            </svg>
+            {/* Markers as HTML so they stay round despite the stretched SVG. */}
+            {hover != null &&
+              lines.map((s, li) => {
+                const v = s.values[hover];
+                if (v == null || !Number.isFinite(v)) return null;
+                return (
+                  <span
+                    key={li}
+                    className="pointer-events-none absolute h-[7px] w-[7px] -translate-x-1/2 -translate-y-1/2 rounded-full ring-1 ring-slate-950"
+                    style={{ left: `${px(hover)}%`, top: `${py(v, li)}%`, background: s.color ?? DEFAULT_COLOR }}
+                  />
+                );
+              })}
+          </div>
           {hover != null && (
             <div
-              className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded border border-slate-700 bg-slate-950/95 px-1.5 py-0.5 font-mono text-[10px] text-slate-200"
-              style={{ left: `${Math.max(12, Math.min(88, px(hover)))}%` }}
+              className="pointer-events-none absolute top-1 z-10 whitespace-nowrap rounded border border-slate-700 bg-slate-950/95 px-1.5 py-0.5 font-mono text-[10px] text-slate-200 shadow-lg"
+              style={tooltipPos(px(hover))}
             >
               <span className="text-slate-500">
                 {xUnit} {hoverX}
@@ -173,6 +180,14 @@ export function SeriesChart({
       </div>
     </div>
   );
+}
+
+// Anchor the tooltip to the hovered x, but flip it to left/right alignment near
+// the plot edges so it never overflows out of sight.
+function tooltipPos(xPct: number): React.CSSProperties {
+  if (xPct < 25) return { left: `${xPct}%`, transform: "translateX(0)" };
+  if (xPct > 75) return { left: `${xPct}%`, transform: "translateX(-100%)" };
+  return { left: `${xPct}%`, transform: "translateX(-50%)" };
 }
 
 function niceMax(value: number): number {

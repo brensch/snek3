@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { control } from "../api/client";
 import { ConfigPanel } from "../components/ConfigPanel";
+import { EvalViewer } from "../components/EvalViewer";
 import { GameViewer } from "../components/GameViewer";
 import { LogPanel } from "../components/LogPanel";
 import { RunControls } from "../components/RunControls";
@@ -11,7 +12,7 @@ import { useLiveStats } from "../hooks/useLiveStats";
 import { useLogs } from "../hooks/useLogs";
 import { useRunDetail } from "../hooks/useRunDetail";
 import { Phase } from "../gen/snek_pb";
-import type { MetricRow } from "../gen/viewer_pb";
+import type { EvalPoint, MetricRow } from "../gen/viewer_pb";
 import type { RunConfig } from "../types";
 
 // Per-generation charts, driven off metrics.jsonl. Related metrics are grouped
@@ -118,10 +119,26 @@ export function RunView() {
   };
 
   const metrics = detail?.metrics ?? [];
+  const evalPoints = detail?.evalPoints ?? [];
+  // Each eval point plays several past checkpoints at exponentially spaced
+  // horizons (vs -5, -10, -20 gens…). One chart per horizon: short horizons
+  // show whether the net is still improving, long ones show progress over time.
+  const evalHorizons = useMemo(() => {
+    const byHorizon = new Map<number, EvalPoint[]>();
+    for (const p of evalPoints) {
+      const h = p.gen - p.opponentGen;
+      const arr = byHorizon.get(h);
+      if (arr) arr.push(p);
+      else byHorizon.set(h, [p]);
+    }
+    return [...byHorizon.entries()].sort((a, b) => a[0] - b[0]);
+  }, [evalPoints]);
   const genLeft = metrics.length ? `gen ${metrics[0].generation}` : "";
   const genRight = metrics.length ? `gen ${metrics[metrics.length - 1].generation}` : "";
   const gens = metrics.map((m) => m.generation);
   const winRates = metrics.filter((m) => m.hasWinRate);
+  // The LR schedule is code-owned (train.rs); rows predating it carry lr=0.
+  const lrRows = metrics.filter((m) => m.lr > 0);
 
   const controls = (
     <div className="flex items-center gap-2">
@@ -211,6 +228,21 @@ export function RunView() {
                 {winRates.length > 0 && (
                   <SeriesChart values={winRates.map((m) => m.winRate)} label="Win rate" color="#22c55e" fixedMax={1} digits={2} xValues={winRates.map((m) => m.generation)} />
                 )}
+                {/* Head-to-head evals, one chart per opponent horizon: >0 Elo
+                    means the current net beats the checkpoint that many gens back. */}
+                {evalHorizons.map(([h, pts], i) => (
+                  <SeriesChart
+                    key={`eval-${h}`}
+                    values={pts.map((e) => e.elo)}
+                    label={`Eval Elo vs -${h} gens`}
+                    color={["#22c55e", "#38bdf8", "#f59e0b", "#e879f9", "#f87171"][i % 5]}
+                    digits={0}
+                    xValues={pts.map((e) => e.gen)}
+                  />
+                ))}
+                {lrRows.length > 0 && (
+                  <SeriesChart values={lrRows.map((m) => m.lr)} label="Learning rate" color="#f97316" digits={5} xValues={lrRows.map((m) => m.generation)} />
+                )}
               </div>
             </section>
           )}
@@ -221,6 +253,13 @@ export function RunView() {
           <GameViewer runId={runId} gameGens={detail?.gameGens ?? []} metrics={metrics} />
         </section>
       </div>
+
+      {/* Head-to-head eval matches (current vs older checkpoint), recorded by
+          the arena and rendered with the same board primitives as self-play. */}
+      <section className="mt-4">
+        <h2 className="section-title mb-2">Evaluation games</h2>
+        <EvalViewer runId={runId} evalPoints={evalPoints} />
+      </section>
     </div>
   );
 }

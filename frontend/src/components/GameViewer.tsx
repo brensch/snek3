@@ -15,6 +15,7 @@ export function GameViewer({ runId, gameGens, metrics }: Props) {
   const [fps, setFps] = useState(12);
   const [cell, setCell] = useState(16);
   const [followLatest, setFollowLatest] = useState(true);
+  const [showConfig, setShowConfig] = useState(false);
 
   // While following, keep the selection pinned to the newest generation as new
   // ones arrive (gameGens is newest-first). Manually picking a gen turns it off.
@@ -49,9 +50,7 @@ export function GameViewer({ runId, gameGens, metrics }: Props) {
   }
 
   return (
-    <div className="grid gap-3">
-      {file?.configJson && <ConfigStrip json={file.configJson} gen={file.gen} />}
-      <div className="grid gap-4 lg:grid-cols-[12rem_minmax(0,1fr)]">
+    <div className="grid gap-4 lg:grid-cols-[12rem_minmax(0,1fr)] lg:items-start">
       <div className="rounded border border-slate-800 bg-slate-900">
         <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
           <span className="section-title">Generations</span>
@@ -106,7 +105,22 @@ export function GameViewer({ runId, gameGens, metrics }: Props) {
             Size
             <input type="range" min={8} max={30} value={cell} onChange={(e) => setCell(Number(e.target.value))} className="accent-sky-500" />
           </label>
+          {file?.configJson && (
+            <button
+              type="button"
+              aria-pressed={showConfig}
+              onClick={() => setShowConfig((v) => !v)}
+              className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:border-sky-500"
+            >
+              {showConfig ? "Hide config" : "Config"}
+            </button>
+          )}
         </div>
+        {showConfig && file?.configJson && (
+          <div className="mb-3">
+            <ConfigStrip json={file.configJson} gen={file.gen} />
+          </div>
+        )}
         {loading && games.length === 0 ? (
           <div className="text-sm text-slate-500">loading…</div>
         ) : games.length === 0 ? (
@@ -121,7 +135,6 @@ export function GameViewer({ runId, gameGens, metrics }: Props) {
             ))}
           </div>
         )}
-      </div>
       </div>
     </div>
   );

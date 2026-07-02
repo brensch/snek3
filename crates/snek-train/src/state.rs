@@ -26,10 +26,15 @@ pub struct RunPaths {
     pub config: PathBuf,
     pub trainer_state: PathBuf,
     pub net: PathBuf,
+    /// Per-generation network snapshots (`checkpoints/net_NNNN.safetensors`),
+    /// kept forever alongside the rolling `net.safetensors`.
+    pub checkpoints: PathBuf,
     pub replay: PathBuf,
     pub metrics: PathBuf,
     pub games: PathBuf,
-    pub carry: PathBuf,
+    /// The persisted self-play session (in-flight games + finished-game buffer).
+    /// Keeps the historical `selfplay.json` name for backward compatibility.
+    pub session: PathBuf,
 }
 
 impl RunPaths {
@@ -39,17 +44,25 @@ impl RunPaths {
             config: root.join("config.json"),
             trainer_state: root.join("trainer_state.json"),
             net: root.join("net.safetensors"),
+            checkpoints: root.join("checkpoints"),
             replay: root.join("buffer"),
             metrics: root.join("metrics.jsonl"),
             games: root.join("games"),
-            carry: root.join("selfplay.json"),
+            session: root.join("selfplay.json"),
             root,
         }
+    }
+
+    /// Path to the network snapshot for a given generation.
+    pub fn checkpoint_net(&self, generation: u32) -> PathBuf {
+        self.checkpoints
+            .join(format!("net_{generation:04}.safetensors"))
     }
 
     pub fn ensure(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.root)?;
         std::fs::create_dir_all(&self.replay)?;
+        std::fs::create_dir_all(&self.checkpoints)?;
         Ok(())
     }
 }
