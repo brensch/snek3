@@ -1,6 +1,8 @@
 //! Compile the CUDA-graph C++ shim (`csrc/graph_shim.cpp`) against the same
 //! libtorch this crate links via tch. Locates the venv's PyTorch by default;
-//! override with `SNEK_TORCH_DIR`.
+//! override with `SNEK_TORCH_DIR`. Against a CPU-only libtorch (no
+//! `libtorch_cuda.so`) the shim is skipped and `snek_tch::cudagraph` is
+//! compiled out (cfg `snek_cuda`), so CPU serving builds work.
 
 use std::path::PathBuf;
 
@@ -14,35 +16,57 @@ fn main() {
         });
 
     let inc = torch.join("include");
-    let api_inc = inc.join("torch/csrc/api/include");
-    // Host-compilable CUDA headers: the `nvidia-cuda-runtime` wheel ships them
-    // flat (no `crt/` subdir), so cuda_runtime.h's `#include "crt/..."` fails.
-    // Triton bundles a complete, version-matched (12.8) CUDA include tree.
-    let cuda_inc = torch.join("../triton/backends/nvidia/include");
-
-    if !inc.join("ATen/cuda/CUDAGraph.h").exists() {
+    if !inc.join("torch").exists() {
         panic!(
             "libtorch headers not found at {} (set SNEK_TORCH_DIR)",
             inc.display()
         );
     }
 
-    cc::Build::new()
-        .cpp(true)
-        .file("csrc/graph_shim.cpp")
-        .include(&inc)
-        .include(&api_inc)
-        .include(&cuda_inc)
-        .flag("-std=c++17")
-        .flag_if_supported("-Wno-unused-parameter")
-        .define("_GLIBCXX_USE_CXX11_ABI", "1")
-        .compile("snek_graph_shim");
-
     let lib = torch.join("lib");
+    println!("cargo:rustc-check-cfg=cfg(snek_cuda)");
     println!("cargo:rustc-link-search=native={}", lib.display());
-    for l in ["c10", "c10_cuda", "torch_cpu", "torch_cuda", "torch"] {
+    for l in ["c10", "torch_cpu", "torch"] {
         println!("cargo:rustc-link-lib=dylib={l}");
     }
+
+    if lib.join("libtorch_cuda.so").exists() {
+        let api_inc = inc.join("torch/csrc/api/include");
+        // Host-compilable CUDA headers: the `nvidia-cuda-runtime` wheel ships
+        // them flat (no `crt/` subdir), so cuda_runtime.h's `#include "crt/..."`
+        // fails. Triton bundles a complete, version-matched (12.8) CUDA include
+        // tree.
+        let cuda_inc = torch.join("../triton/backends/nvidia/include");
+
+        if !inc.join("ATen/cuda/CUDAGraph.h").exists() {
+            panic!(
+                "CUDA libtorch at {} is missing ATen/cuda/CUDAGraph.h",
+                torch.display()
+            );
+        }
+
+        cc::Build::new()
+            .cpp(true)
+            .file("csrc/graph_shim.cpp")
+            .include(&inc)
+            .include(&api_inc)
+            .include(&cuda_inc)
+            .flag("-std=c++17")
+            .flag_if_supported("-Wno-unused-parameter")
+            .define("_GLIBCXX_USE_CXX11_ABI", "1")
+            .compile("snek_graph_shim");
+
+        for l in ["c10_cuda", "torch_cuda"] {
+            println!("cargo:rustc-link-lib=dylib={l}");
+        }
+        println!("cargo:rustc-cfg=snek_cuda");
+    } else {
+        println!(
+            "cargo:warning=CPU-only libtorch: CUDA-graph shim skipped (snek_tch::cudagraph unavailable)"
+        );
+    }
+
     println!("cargo:rerun-if-changed=csrc/graph_shim.cpp");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=SNEK_TORCH_DIR");
 }

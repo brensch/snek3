@@ -22,12 +22,14 @@ __pycache__/
 checkpoints/
 !checkpoints/
 checkpoints/*
+# The tracked serving checkpoint baked into the API image (see deploy/).
+!checkpoints/serving.safetensors
+!checkpoints/serving.json
 runs/
 logs/
 *.pt
 *.pth.tar
 *.onnx
-!checkpoints/latest.pt
 
 # Editor / OS
 .DS_Store

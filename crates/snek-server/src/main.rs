@@ -12,6 +12,7 @@
 //!   SNEK_MODEL        safetensors model path (default ./net.safetensors)
 //!   SNEK_PORT         listen port (default 8000)
 //!   SNEK_THREADS      worker threads (default 2)
+//!   SNEK_TORCH_THREADS  intra-op libtorch threads (default: 1 on CUDA, 4 on CPU)
 //!   SNEK_MAX_SIMS     safety cap on MCTS simulations per move (default 100000)
 //!   SNEK_TIMEOUT_MS   fallback request timeout when JSON lacks game.timeout (default 500)
 //!   SNEK_DEADLINE_MARGIN_MS  response margin reserved from timeout (default 150)
@@ -85,7 +86,8 @@ fn short_sha(sha: &str) -> &str {
 }
 
 fn main() {
-    tch::set_num_threads(1);
+    let torch_threads = torch_threads();
+    tch::set_num_threads(torch_threads as i32);
     tch::set_num_interop_threads(1);
     tch::Cuda::cudnn_set_benchmark(true);
 
@@ -110,7 +112,7 @@ fn main() {
 
     let app = build_app(model.clone(), log_dir.clone(), &settings);
     eprintln!(
-        "snek-server: model={model} sha={} port={port} threads={threads} max_sims={} timeout_ms={} deadline_margin_ms={} c_puct={} draw_value={}",
+        "snek-server: model={model} sha={} port={port} threads={threads} torch_threads={torch_threads} max_sims={} timeout_ms={} deadline_margin_ms={} c_puct={} draw_value={}",
         short_sha(&app.model_sha),
         settings.cfg.max_sims,
         settings.default_timeout_ms,
@@ -516,6 +518,19 @@ fn request_timeout_ms(request: &serde_json::Value) -> Option<u64> {
     timeout
         .as_u64()
         .or_else(|| timeout.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// Intra-op libtorch threads for `Net::forward`. On CUDA the GPU does the work,
+/// so 1 CPU thread avoids pointless OMP spin. On CPU the forward *is* the move
+/// budget: measured on the deploy target (i5-1340P, 4 P + 8 E cores), 4 threads
+/// gives ~2.3x single-thread throughput while 6-12 threads regress below 4
+/// (parallel regions straggle on E-cores). Physical P-core count is the right
+/// value on hybrid chips; override with SNEK_TORCH_THREADS.
+fn torch_threads() -> usize {
+    let cpu_serving =
+        std::env::var("SNEK_CPU_ONLY").ok().as_deref() == Some("1") || !tch::Cuda::is_available();
+    let default = if cpu_serving { 4 } else { 1 };
+    env_or("SNEK_TORCH_THREADS", default).max(1)
 }
 
 fn max_sims_from_env() -> usize {

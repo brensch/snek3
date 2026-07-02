@@ -1,0 +1,10 @@
+{
+  "source_run": "snek3-2",
+  "generation": 71,
+  "exported": "2026-07-01",
+  "sha256": "d202e14fa35f2f9a8650b6b4645ceddc6ec7d1df862d2cc5f3455941aa90b1da",
+  "trunk_channels": 96,
+  "trunk_blocks": 8,
+  "gpool_every": 3,
+  "note": "policy head is the spatial pc1/pc2 read; must ship with matching crates/snek-tch"
+}

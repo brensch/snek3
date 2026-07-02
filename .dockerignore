@@ -4,10 +4,10 @@ runs
 target
 crates/**/target
 **/__pycache__
-python/dashboard/ui/node_modules
 **/node_modules
-crates/snek-server/viewer/dist/assets
+crates/snek-server/viewer/dist
+frontend
+logs
 *.pt
 *.onnx
-!model.onnx
 scratchpad

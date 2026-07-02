@@ -6,6 +6,7 @@
 
 use tch::{nn, nn::Module, Kind, Tensor};
 
+#[cfg(snek_cuda)]
 pub mod cudagraph;
 
 const GN: i64 = 8;

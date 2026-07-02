@@ -23,7 +23,7 @@ LIBTORCH_PRELOAD ?= $(TORCH_LIB)/libtorch_global_deps.so:$(TORCH_LIB)/libtorch_c
 LIBTORCH_ENV := PYTHON=$(PYTHON) LIBTORCH_USE_PYTORCH=1 LIBTORCH_BYPASS_VERSION_CHECK=1 LD_PRELOAD="$(LIBTORCH_PRELOAD)$${LD_PRELOAD:+:$$LD_PRELOAD}" LD_LIBRARY_PATH="$(TORCH_LIB):$(NVIDIA_LIBS)$$LD_LIBRARY_PATH"
 
 .DEFAULT_GOAL := help
-.PHONY: help test test-rust fmt lint train train-build frontend frontend-build api-build api clean
+.PHONY: help test test-rust fmt lint train train-build tunnel frontend frontend-build api-build api clean
 
 help: ## Show this help
 	@echo "snek3 targets:"
@@ -50,6 +50,9 @@ train: train-build ## Run the Rust trainer/API. Add START=1 to begin immediately
 	$(LIBTORCH_ENV) ./crates/snek-train/target/release/snek-train \
 		--bind $(BIND) --runs-dir $(RUNS_DIR) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(if $(START),--start,)
+
+tunnel: ## Expose the dashboard over your tailnet (needs TS_AUTHKEY on first run)
+	DASH_PORT=$(PORT) deploy/tailscale-dashboard.sh
 
 frontend: ## Run the standalone Vite frontend (proxies /api to PORT)
 	cd frontend && npm install && npm run dev
