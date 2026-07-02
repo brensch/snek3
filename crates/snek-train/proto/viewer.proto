@@ -1,0 +1,137 @@
+syntax = "proto3";
+package snek;
+
+// Contract for the run-viewer API. The Rust trainer serves these as binary
+// protobuf (application/x-protobuf); the frontend decodes them with the
+// buf-generated protobuf-es classes. Kept separate from snek.proto (the live
+// training stats/control messages) so the two concerns stay decoupled.
+
+// One row on the home page: enough to render a run card without loading detail.
+message RunSummary {
+  string run_id = 1;
+  bool live = 2;                // this run is the trainer's active run
+  bool running = 3;            // trainer is actively stepping it
+  uint32 generation = 4;       // latest generation reached
+  uint32 total_generations = 5;
+  uint32 board = 6;
+  uint32 num_snakes = 7;
+  double policy_loss = 8;       // latest metrics.jsonl row
+  double value_loss = 9;
+  double win_rate = 10;
+  bool has_win_rate = 11;       // false when the run never evaluated
+  uint32 game_gen_count = 12;   // number of generations with recorded games
+  int64 updated_unix_ms = 13;   // last-modified time, for sorting/display
+}
+
+message RunListReply {
+  repeated RunSummary runs = 1; // newest first
+}
+
+// A single metrics.jsonl row (one per generation), projected to the fields the
+// charts use. All per-gen counts are for that generation only, not cumulative.
+message MetricRow {
+  uint32 generation = 1;
+  double policy_loss = 2;
+  double value_loss = 3;
+  double win_rate = 4;
+  bool has_win_rate = 5;
+  uint32 completed_games = 6;   // games finished during this generation
+  double target_entropy = 7;
+  uint32 samples = 8;           // training samples collected this generation
+  uint32 turns = 9;             // self-play turns this generation
+  uint64 buffer = 10;           // replay buffer size after this generation
+  double gen_seconds = 11;      // wall time for the whole generation
+  double play_seconds = 12;     // self-play portion
+  double train_seconds = 13;    // training portion
+  double inferences_per_sec = 14;
+  double games_per_sec = 15;
+  double gpu_busy_pct = 16;
+  double avg_game_turn = 17;    // mean game turn across all buffered samples
+  double lr = 18;               // learning rate trained at (0 for old runs)
+}
+
+// A generation that has recorded self-play sample games on disk.
+message GameGen {
+  uint32 gen = 1;
+  uint32 num_games = 2;
+}
+
+// One completed league match: the net at `gen` (side A) vs the checkpoint at
+// `opponent_gen` (from runs/<id>/eval/summary.jsonl). Win counts and the
+// score/Elo are for side A; the per-match Elo is noisy — the fitted league
+// rating (LeagueRating) is the real signal.
+message EvalPoint {
+  uint32 gen = 1;
+  uint32 opponent_gen = 2;
+  uint32 games = 3;
+  uint32 wins = 4;
+  uint32 losses = 5;
+  uint32 draws = 6;
+  double score = 7;        // mean score, draws counting 0.5
+  double score_ci95 = 8;   // 95% CI half-width of the score
+  double elo = 9;          // pairwise Elo(gen) - Elo(opponent_gen), this match only
+  double elo_lo = 10;      // Elo at the CI endpoints
+  double elo_hi = 11;
+  uint32 sims = 12;        // MCTS sims per eval move
+  uint32 snakes = 13;      // snakes per eval game
+  double wall_seconds = 14;
+  int64 finished_unix_ms = 15;
+  uint64 seq = 16;         // monotonic match number within the run
+}
+
+// One net's fitted league rating (Bradley–Terry over every recorded match,
+// anchored so the earliest rated generation is Elo 0).
+message LeagueRating {
+  uint32 gen = 1;
+  double elo = 2;
+  uint32 games = 3;
+  uint32 wins = 4;
+  uint32 losses = 5;
+  uint32 draws = 6;
+}
+
+message RunDetail {
+  RunSummary summary = 1;
+  string config_json = 2;          // raw config.json, shown in the knobs panel
+  repeated MetricRow metrics = 3;  // full history, oldest first
+  repeated GameGen game_gens = 4;  // newest first
+  repeated EvalPoint eval_points = 5; // matches, oldest first
+  repeated LeagueRating league = 6;   // latest fit, ascending by generation
+}
+
+message Point {
+  int32 x = 1;
+  int32 y = 2;
+}
+
+// One snake's state and search readout at a single turn.
+message SnakeFrame {
+  bool alive = 1;
+  repeated Point body = 2;         // head first
+  int32 health = 3;
+  uint32 chosen_move = 4;          // 0=Up 1=Down 2=Left 3=Right
+  repeated double policy = 5;      // search visit policy over the 4 moves
+  repeated double play_policy = 6; // masked policy actually sampled from
+  double value = 7;                // value head at the root
+}
+
+message Frame {
+  uint32 turn = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  repeated Point food = 4;
+  repeated Point hazards = 5;
+  repeated SnakeFrame snakes = 6;
+}
+
+message Game {
+  repeated Frame frames = 1;
+  int32 winner = 2;   // winning snake index, -1 for a draw
+  uint32 num_turns = 3;
+}
+
+message GameFile {
+  uint32 gen = 1;
+  repeated Game games = 2;
+  string config_json = 3;   // training config in effect for this generation
+}

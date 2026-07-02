@@ -1,48 +1,66 @@
-# Battlesnake /move API server — pure-Rust, CPU-only, for a small box.
+# CPU-only Battlesnake /move API image: the tch/libtorch snek-server with the
+# tracked serving checkpoint baked in. Built from the repo root:
 #
-# Two stages: build the Rust binary, then a slim runtime that carries only the
-# binary + a CPU onnxruntime + the exported proxy model. No PyTorch, no Python in
-# the request path (Python is present only to ship the onnxruntime .so that ort
-# loads dynamically).
+#   docker build -f deploy/server.Dockerfile -t snek3-api .
 #
-# Build (from repo root, with model.onnx already exported next to this file's
-# build context — see scripts/export_model.py):
-#   docker build -f deploy/server.Dockerfile -t snek-api .
-#   docker run -p 8000:8000 snek-api
-#
-# Tunables (env): SNEK_DEPTH SNEK_ITERS SNEK_RESPONSE_TAU SNEK_DRAW_VALUE
-#                 SNEK_THREADS SNEK_PORT
+# libtorch comes from the torch==2.11.0+cpu wheel — the exact version
+# torch-sys 0.24 pins, so no version bypass is needed.
 
-# ---- viewer frontend ----
-# Build the game viewer SPA so the Rust build can embed it (rust-embed reads
-# crates/snek-server/viewer/dist at compile time). Done in its own stage so the
-# Rust toolchain image needs no Node.
-FROM node:20-slim AS viewer
+# --- viewer: the embedded /app SPA (rust-embed folds viewer/dist into the binary)
+FROM node:22-slim AS viewer
 WORKDIR /viewer
-COPY crates/snek-server/viewer/package.json crates/snek-server/viewer/package-lock.json* ./
-RUN npm install
-COPY crates/snek-server/viewer/ ./
+COPY crates/snek-server/viewer/package.json crates/snek-server/viewer/package-lock.json ./
+RUN npm ci
+COPY crates/snek-server/viewer .
 RUN npm run build
 
-# ---- build ----
-FROM rust:1-slim-bookworm AS build
+# --- builder: compile snek-server against the CPU libtorch from the torch wheel
+FROM rust:1-bookworm AS builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+# Old pips mis-handle the PyTorch index's package-name normalization
+# (typing_extensions vs typing-extensions), so upgrade pip first.
+RUN python3 -m venv /opt/torch-venv \
+    && /opt/torch-venv/bin/pip install --no-cache-dir -U pip \
+    && /opt/torch-venv/bin/pip install --no-cache-dir \
+       torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+RUN ln -s "$(/opt/torch-venv/bin/python3 -c 'import torch, os; print(os.path.dirname(torch.__file__))')" /opt/torch
+ENV PATH=/opt/torch-venv/bin:$PATH \
+    LIBTORCH_USE_PYTORCH=1 \
+    SNEK_TORCH_DIR=/opt/torch
 WORKDIR /src
-# The root workspace manifest is required because snek-core/snek-search inherit
-# `edition`/`version`/deps via `workspace = true`; without it cargo can't find a
-# workspace root and the build fails.
-COPY Cargo.toml ./Cargo.toml
-COPY crates/ ./crates/
-# Overwrite the tracked placeholder dist with the freshly built viewer bundle.
-COPY --from=viewer /viewer/dist/ ./crates/snek-server/viewer/dist/
-RUN cargo build --release --manifest-path crates/snek-server/Cargo.toml
+# snek-server is a detached workspace, but its path deps (snek-core,
+# snek-search, snek-tch) resolve through the root workspace manifest.
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY --from=viewer /viewer/dist crates/snek-server/viewer/dist
+RUN cargo build --release --manifest-path crates/snek-server/Cargo.toml --bin snek-server
+# Runtime shared libs, minus the Python bindings the binary never links.
+RUN mkdir -p /opt/torch-lib \
+    && cp /opt/torch/lib/*.so* /opt/torch-lib/ \
+    && rm -f /opt/torch-lib/libtorch_python.so
 
-# ---- runtime ----
-FROM python:3.12-slim AS runtime
-RUN pip install --no-cache-dir onnxruntime
-WORKDIR /app
-COPY --from=build /src/crates/snek-server/target/release/snek-server /app/snek-server
-COPY model.onnx /app/model.onnx
-RUN python -c "import glob, os; p=glob.glob('/usr/local/lib/python*/site-packages/onnxruntime/capi/libonnxruntime.so*')[0]; os.symlink(p, '/usr/local/lib/libonnxruntime.so')"
-ENV SNEK_MODEL=/app/model.onnx SNEK_PORT=8000 SNEK_CPU_ONLY=1 ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+# --- runtime
+FROM debian:bookworm-slim
+COPY --from=builder /opt/torch-lib /opt/torch/lib
+COPY --from=builder /src/crates/snek-server/target/release/snek-server /app/snek-server
+COPY checkpoints/serving.safetensors /app/net.safetensors
+COPY checkpoints/serving.json /app/net.json
+ENV LD_LIBRARY_PATH=/opt/torch/lib \
+    SNEK_MODEL=/app/net.safetensors \
+    SNEK_CPU_ONLY=1 \
+    SNEK_MOVE_LOG_DIR=/app/logs/api_moves \
+    SNEK_PORT=8000 \
+    # Arch of the baked checkpoint (see /app/net.json); pinned here so a future
+    # default change in the binary can't silently mismatch the weights.
+    SNEK_TRUNK_CHANNELS=96 \
+    SNEK_TRUNK_BLOCKS=8 \
+    SNEK_GPOOL_EVERY=3 \
+    # CPU serve tuning, measured on the i5-1340P deploy box: forwards want the
+    # 4 P-cores, and batch cost is ~linear so small leaf batches search better.
+    SNEK_TORCH_THREADS=4 \
+    SNEK_LEAVES_PER_SIM=2
 EXPOSE 8000
+WORKDIR /app
 CMD ["/app/snek-server"]

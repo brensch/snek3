@@ -1,18 +1,13 @@
-//! `snek-search`: fixed-depth, full-width search with a per-node Logit
-//! Equilibrium solve (Stochastic Fictitious Play) at a high fixed temperature.
+//! `snek-search`: simultaneous-move Monte-Carlo Tree Search (decoupled-PUCT) over
+//! a policy+value net — the single search used by both self-play and serving.
 //!
-//! - [`le`] — the equilibrium solver for a single normal-form game.
-//! - [`search`] — the fixed-depth tree with a two-phase batched-eval interface.
+//! - [`mcts`] — the batched DUCT-PUCT forest ([`MctsForest`]).
+//! - `search` — shared board helpers (legal candidates, terminal values).
 
-pub mod le;
 pub mod mcts;
-pub mod search;
-pub mod uct;
+mod search;
 
-pub use le::{solve as solve_le, LeSolution};
 pub use mcts::{
-    mask_obvious_immediate_deaths, obvious_immediate_death, ActionStat, ChildEdge, MctsForest,
-    NodeSnake, TreeNodeSnapshot, TreeSnapshot,
+    forced_move, mask_obvious_immediate_deaths, obvious_immediate_death, ActionStat, ChildEdge,
+    MctsForest, NodeSnake, TreeNodeSnapshot, TreeSnapshot,
 };
-pub use search::Forest;
-pub use uct::uct_actions;

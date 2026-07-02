@@ -1,4 +1,4 @@
-//! Pure-Rust AlphaZero serving: decoupled-PUCT MCTS over a single ONNX
+//! Pure-Rust AlphaZero serving: decoupled-PUCT MCTS over a single tch/libtorch
 //! policy+value net — the *same* search used in self-play (`crates/snek-search`
 //! `MctsForest`), so what we serve matches what we trained.
 //!
@@ -9,8 +9,10 @@
 use std::time::Instant;
 
 use snek_core::{obs_h, obs_w, Board, Move, NUM_CHANNELS};
-use snek_infer::Net;
-use snek_search::{MctsForest, TreeSnapshot};
+use snek_search::{forced_move, MctsForest, TreeSnapshot};
+
+mod net;
+pub use net::Net;
 
 #[derive(Clone, Debug)]
 pub struct RootActionDebug {
@@ -41,6 +43,7 @@ pub struct SearchDecision {
     pub diagnostics: SearchDiagnostics,
 }
 
+#[derive(Clone)]
 pub struct Config {
     /// Safety cap on MCTS simulations. Live serving is deadline-bound first.
     pub max_sims: usize,
@@ -48,8 +51,14 @@ pub struct Config {
     pub c_puct: f32,
     /// Terminal value of a draw at search leaves (match training).
     pub draw_value: f32,
-    /// Max leaf observations per ONNX forward pass.
+    /// Max leaf observations per net forward pass.
     pub eval_chunk: usize,
+    /// Leaves collected per batched (virtual-loss) selection round. 1 disables
+    /// batching (one leaf per forward, as in self-play's per-game lockstep).
+    pub leaves_per_sim: usize,
+    /// Virtual-loss magnitude applied along in-flight paths during batched
+    /// selection, to steer concurrent descents toward different leaves.
+    pub virtual_loss: f32,
 }
 
 pub const MOVES: [&str; 4] = ["up", "down", "left", "right"];
@@ -78,6 +87,26 @@ pub fn safe_move(board: &Board, me: usize) -> usize {
         }
     }
     Move::Up.index()
+}
+
+/// Decision for a snake with a single legal move: the search is skipped entirely
+/// (it cannot change a forced answer), so no sims and no net forwards are spent.
+fn forced_decision(move_index: usize) -> SearchDecision {
+    SearchDecision {
+        move_index,
+        diagnostics: SearchDiagnostics {
+            sims_completed: 0,
+            terminal_only_sims: 0,
+            eval_rows: 0,
+            forward_calls: 0,
+            max_depth: 0,
+            stopped_reason: "forced_move",
+            fallback_reason: None,
+            root_policy: Vec::new(),
+            root_values: Vec::new(),
+            root_actions: Vec::new(),
+        },
+    }
 }
 
 fn fallback_decision(board: &Board, me: usize, reason: &'static str) -> SearchDecision {
@@ -111,34 +140,64 @@ pub fn serve_move_until_diagnostics(
     if board.is_terminal() || !board.snakes[me].alive() {
         return fallback_decision(board, me, "terminal_or_dead");
     }
+    // Forced move: a single legal candidate can't be changed by search — skip it
+    // and spend zero sims / net forwards. (Same fast path benefits self-play's
+    // forced positions via `forced_move`.)
+    if let Some(mv) = forced_move(board, me) {
+        return forced_decision(mv);
+    }
     let (c, h, w) = (NUM_CHANNELS, obs_h(board), obs_w(board));
     let n_snakes = board.snakes.len();
     let mut forest =
         MctsForest::new_with_draw_value(std::slice::from_ref(board), cfg.c_puct, cfg.draw_value);
     let obs_size = forest.obs_size();
+    let search_start = Instant::now();
     let mut sims_completed = 0usize;
     let mut terminal_only_sims = 0usize;
     let mut eval_rows = 0usize;
     let mut forward_calls = 0usize;
     let mut stopped_reason = "max_sims";
+    let leaves_per = cfg.leaves_per_sim.max(1);
 
-    for _ in 0..cfg.max_sims {
+    while sims_completed < cfg.max_sims {
         if Instant::now() >= deadline {
             stopped_reason = "deadline";
             break;
         }
-        let pending = forest.select();
-        if pending.is_empty() {
+        // Early stop: if our leading root move has more visits than the remaining
+        // budget could possibly add to any rival, the decision is locked. Estimate
+        // the remaining sims from the rate so far (serving is deadline-bound, not
+        // sim-count-bound).
+        if sims_completed >= 64 {
+            if let Some((best, second)) = forest.root_visit_gap_first(me) {
+                let elapsed = search_start.elapsed().as_secs_f64();
+                if elapsed > 0.0 {
+                    let rate = sims_completed as f64 / elapsed;
+                    let remaining = deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_secs_f64();
+                    let est_remaining = (rate * remaining) as f32;
+                    if best - second > est_remaining {
+                        stopped_reason = "decided";
+                        break;
+                    }
+                }
+            }
+        }
+        // Batched virtual-loss selection: collect up to `leaves_per` distinct
+        // leaves, then evaluate them in one chunked forward pass.
+        let k = forest.select_batch_first(leaves_per, cfg.virtual_loss);
+        if k == 0 {
             terminal_only_sims += 1;
             sims_completed += 1;
             continue;
         }
-        // Each pending leaf needs one egocentric encoding per snake (per-snake
-        // policy/value), laid out [pending, agent]. Total rows = pending * n.
-        let rows = pending.len() * n_snakes;
+        // Each collected leaf needs one encoding per snake (per-snake
+        // policy/value), laid out [leaf, agent]. Total rows = k * n.
+        let rows = k * n_snakes;
         eval_rows += rows;
         let mut obs = vec![0.0f32; rows * obs_size];
-        forest.write_pending_obs(&pending, &mut obs);
+        forest.write_batch_obs_first(&mut obs);
 
         let mut pol = vec![0.0f32; rows * 4];
         let mut val = vec![0.0f32; rows];
@@ -155,8 +214,8 @@ pub fn serve_move_until_diagnostics(
             }
             s = e;
         }
-        forest.expand_backup(&pending, &pol, &val);
-        sims_completed += 1;
+        forest.expand_backup_batch_first(&pol, &val, cfg.virtual_loss);
+        sims_completed += k;
     }
 
     // root_targets: visit-count policy [count*N*4]; count == 1 here.
@@ -244,6 +303,14 @@ pub fn serve_move_replay(
     if board.is_terminal() || !board.snakes[me].alive() {
         return ReplayResult {
             decision: fallback_decision(board, me, "terminal_or_dead"),
+            tree: None,
+        };
+    }
+    // Match the live path: a forced move was served with zero sims, so there is
+    // no tree to reproduce.
+    if let Some(mv) = forced_move(board, me) {
+        return ReplayResult {
+            decision: forced_decision(mv),
             tree: None,
         };
     }

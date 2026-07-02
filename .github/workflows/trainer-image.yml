@@ -1,20 +1,21 @@
 name: trainer-image
 
-# Builds the precompiled trainer-server image and pushes it to GHCR so RunPod
-# or any GPU box can pull-and-run with no per-boot build.
+# Builds the CUDA trainer image (snek-train + dashboard frontend + tailscale
+# tunnel) and pushes it to GHCR so RunPod or any GPU box can pull-and-run
+# with no per-boot build. Everything — frontend build, libtorch install,
+# cargo build — happens inside deploy/trainer.Dockerfile.
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - 'deploy/Dockerfile'
-      - 'python/**'
+      - 'deploy/trainer.Dockerfile'
+      - 'deploy/trainer-entrypoint.sh'
+      - 'deploy/tailscale-dashboard.sh'
       - 'crates/**'
+      - 'frontend/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - 'Makefile'
       - '.dockerignore'
       - '.github/workflows/trainer-image.yml'
 
@@ -41,12 +42,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push trainer
+      - name: Build and push CUDA trainer
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: deploy/Dockerfile
+          file: deploy/trainer.Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/snek3:latest
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/snek3-trainer:latest
+            ghcr.io/${{ github.repository_owner }}/snek3-trainer:cuda
           cache-from: type=gha,scope=trainer
           cache-to: type=gha,mode=max,scope=trainer

@@ -1,5 +1,5 @@
-//! Battlesnake `/move` API server — pure-Rust AlphaZero serving for a small CPU
-//! box. Every `/move` runs decoupled-PUCT MCTS over the ONNX policy+value net via
+//! Battlesnake `/move` API server — pure-Rust AlphaZero serving. Every `/move`
+//! runs decoupled-PUCT MCTS over the tch policy+value net via
 //! [`snek_server::serve_move`] — the same search as self-play, so what we serve
 //! matches what we trained. Stateless per move; `/end` finalizes the game log.
 //!
@@ -9,19 +9,21 @@
 //! the end, so per-move compute is never spent on logging.
 //!
 //! Config (env vars):
-//!   SNEK_MODEL        ONNX model path (default ./model.onnx)
+//!   SNEK_MODEL        safetensors model path (default ./net.safetensors)
 //!   SNEK_PORT         listen port (default 8000)
 //!   SNEK_THREADS      worker threads (default 2)
+//!   SNEK_TORCH_THREADS  intra-op libtorch threads (default: 1 on CUDA, 4 on CPU)
 //!   SNEK_MAX_SIMS     safety cap on MCTS simulations per move (default 100000)
 //!   SNEK_TIMEOUT_MS   fallback request timeout when JSON lacks game.timeout (default 500)
 //!   SNEK_DEADLINE_MARGIN_MS  response margin reserved from timeout (default 150)
 //!   SNEK_C_PUCT       PUCT exploration constant (default 1.5)
 //!   SNEK_DRAW_VALUE   terminal value of a draw at leaves (default -0.25)
-//!   SNEK_EVAL_CHUNK   max obs rows per ONNX forward (default 4096)
+//!   SNEK_EVAL_CHUNK   max obs rows per net forward (default 4096)
 //!   SNEK_MOVE_LOG_DIR per-game compressed game log dir; empty disables (default logs/api_moves)
 //!   SNEK_GAME_IDLE_SECS  finalize a silent game as incomplete after this many seconds (default 300)
 //!   SNEK_LOG_ZSTD_LEVEL  zstd level for game logs, compressed at game end (default 19)
 
+mod orchestrator;
 mod recorder;
 mod viewer;
 
@@ -34,8 +36,7 @@ use std::time::{Duration, Instant};
 use recorder::{ActionDebug, MoveRecord, Recorder, SearchInfo, SnakeState};
 use rust_embed::RustEmbed;
 use snek_core::json::parse_move_request;
-use snek_infer::Net;
-use snek_server::{env_or, serve_move_until_diagnostics, Config, SearchDecision, MOVES};
+use snek_server::{env_or, serve_move_until_diagnostics, Config, Net, SearchDecision, MOVES};
 use tiny_http::{Header, Method, Response, Server};
 
 /// The built Vite viewer, embedded into the binary so the API ships
@@ -58,6 +59,15 @@ struct App {
     model_sha: String,
 }
 
+#[derive(Clone)]
+struct AppSettings {
+    cfg: Config,
+    default_timeout_ms: u64,
+    deadline_margin_ms: u64,
+    idle_timeout: Duration,
+    zstd_level: i32,
+}
+
 /// Hex SHA-256 of the model file, or `"unknown"` if it can't be read.
 fn model_hash(path: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -76,75 +86,56 @@ fn short_sha(sha: &str) -> &str {
 }
 
 fn main() {
-    let model = std::env::var("SNEK_MODEL").unwrap_or_else(|_| "model.onnx".into());
+    let torch_threads = torch_threads();
+    tch::set_num_threads(torch_threads as i32);
+    tch::set_num_interop_threads(1);
+    tch::Cuda::cudnn_set_benchmark(true);
+
+    let model = std::env::var("SNEK_MODEL").unwrap_or_else(|_| "net.safetensors".into());
     let port: u16 = env_or("SNEK_PORT", 8000);
     let threads: usize = env_or("SNEK_THREADS", 2usize).max(1);
-    let default_timeout_ms = env_or("SNEK_TIMEOUT_MS", 500u64);
-    let deadline_margin_ms = env_or("SNEK_DEADLINE_MARGIN_MS", 150u64);
     let log_dir = move_log_dir();
-    let idle_timeout = Duration::from_secs(env_or("SNEK_GAME_IDLE_SECS", 300u64));
-    let zstd_level: i32 = env_or("SNEK_LOG_ZSTD_LEVEL", 19i32);
-    let cfg = Config {
-        max_sims: max_sims_from_env(),
-        c_puct: env_or("SNEK_C_PUCT", 1.5f32),
-        draw_value: env_or("SNEK_DRAW_VALUE", -0.25f32),
-        eval_chunk: env_or("SNEK_EVAL_CHUNK", 4096usize),
+    let settings = AppSettings {
+        cfg: Config {
+            max_sims: max_sims_from_env(),
+            c_puct: env_or("SNEK_C_PUCT", 1.5f32),
+            draw_value: env_or("SNEK_DRAW_VALUE", -0.25f32),
+            eval_chunk: env_or("SNEK_EVAL_CHUNK", 4096usize),
+            leaves_per_sim: env_or("SNEK_LEAVES_PER_SIM", 8usize).max(1),
+            virtual_loss: env_or("SNEK_VIRTUAL_LOSS", 1.0f32),
+        },
+        default_timeout_ms: env_or("SNEK_TIMEOUT_MS", 500u64),
+        deadline_margin_ms: env_or("SNEK_DEADLINE_MARGIN_MS", 150u64),
+        idle_timeout: Duration::from_secs(env_or("SNEK_GAME_IDLE_SECS", 300u64)),
+        zstd_level: env_or("SNEK_LOG_ZSTD_LEVEL", 19i32),
     };
 
-    let net =
-        Net::load(&model).unwrap_or_else(|e| panic!("failed to load ONNX model '{model}': {e}"));
-    // Content hash of the loaded weights, recorded with each game so the viewer
-    // can tell whether a replay used the same model the game was played with
-    // (the weights file, e.g. `latest.onnx`, can be overwritten by training).
-    let model_sha = model_hash(&model);
+    let app = build_app(model.clone(), log_dir.clone(), &settings);
     eprintln!(
-        "snek-server: model={model} sha={} port={port} threads={threads} max_sims={} timeout_ms={} deadline_margin_ms={} c_puct={} draw_value={}",
-        short_sha(&model_sha),
-        cfg.max_sims,
-        default_timeout_ms,
-        deadline_margin_ms,
-        cfg.c_puct,
-        cfg.draw_value
+        "snek-server: model={model} sha={} port={port} threads={threads} torch_threads={torch_threads} max_sims={} timeout_ms={} deadline_margin_ms={} c_puct={} draw_value={}",
+        short_sha(&app.model_sha),
+        settings.cfg.max_sims,
+        settings.default_timeout_ms,
+        settings.deadline_margin_ms,
+        settings.cfg.c_puct,
+        settings.cfg.draw_value
     );
-
-    let recorder_cfg = serde_json::json!({
-        "max_sims": cfg.max_sims,
-        "c_puct": cfg.c_puct,
-        "draw_value": cfg.draw_value,
-        "eval_chunk": cfg.eval_chunk,
-        "default_timeout_ms": default_timeout_ms,
-        "deadline_margin_ms": deadline_margin_ms,
-        "model_sha": model_sha,
-    });
-    let recorder = Recorder::spawn(
-        log_dir.clone(),
-        model,
-        recorder_cfg,
-        idle_timeout,
-        zstd_level,
-    );
-    if recorder.is_some() {
+    if app.recorder.is_some() {
         eprintln!(
             "snek-server: recording games to {} (idle_timeout={}s, zstd={})",
             log_dir
                 .as_ref()
                 .map(|d| d.display().to_string())
                 .unwrap_or_default(),
-            idle_timeout.as_secs(),
-            zstd_level
+            settings.idle_timeout.as_secs(),
+            settings.zstd_level
         );
     }
 
-    let app = Arc::new(App {
-        net: Mutex::new(net),
-        cfg,
-        default_timeout_ms,
-        deadline_margin_ms,
-        log_dir,
-        parse_err_lock: Mutex::new(()),
-        recorder,
-        model_sha,
-    });
+    if let Some(arena) = orchestrator::ArenaConfig::from_env(&model, log_dir.clone(), &settings) {
+        let arena_settings = settings.clone();
+        std::thread::spawn(move || orchestrator::run(arena, arena_settings));
+    }
 
     let server = Arc::new(Server::http(("0.0.0.0", port)).expect("bind"));
     let mut handles = Vec::new();
@@ -156,6 +147,40 @@ fn main() {
     for h in handles {
         let _ = h.join();
     }
+}
+
+fn build_app(model: String, log_dir: Option<PathBuf>, settings: &AppSettings) -> Arc<App> {
+    let net = Net::load(&model).unwrap_or_else(|e| panic!("failed to load model '{model}': {e}"));
+    // Content hash of the loaded weights, recorded with each game so the viewer
+    // can tell whether a replay used the same model the game was played with
+    // (the weights file can be overwritten by training).
+    let model_sha = model_hash(&model);
+    let recorder_cfg = serde_json::json!({
+        "max_sims": settings.cfg.max_sims,
+        "c_puct": settings.cfg.c_puct,
+        "draw_value": settings.cfg.draw_value,
+        "eval_chunk": settings.cfg.eval_chunk,
+        "default_timeout_ms": settings.default_timeout_ms,
+        "deadline_margin_ms": settings.deadline_margin_ms,
+        "model_sha": model_sha,
+    });
+    let recorder = Recorder::spawn(
+        log_dir.clone(),
+        model,
+        recorder_cfg,
+        settings.idle_timeout,
+        settings.zstd_level,
+    );
+    Arc::new(App {
+        net: Mutex::new(net),
+        cfg: settings.cfg.clone(),
+        default_timeout_ms: settings.default_timeout_ms,
+        deadline_margin_ms: settings.deadline_margin_ms,
+        log_dir,
+        parse_err_lock: Mutex::new(()),
+        recorder,
+        model_sha,
+    })
 }
 
 fn worker(server: &Server, app: &App) {
@@ -493,6 +518,19 @@ fn request_timeout_ms(request: &serde_json::Value) -> Option<u64> {
     timeout
         .as_u64()
         .or_else(|| timeout.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// Intra-op libtorch threads for `Net::forward`. On CUDA the GPU does the work,
+/// so 1 CPU thread avoids pointless OMP spin. On CPU the forward *is* the move
+/// budget: measured on the deploy target (i5-1340P, 4 P + 8 E cores), 4 threads
+/// gives ~2.3x single-thread throughput while 6-12 threads regress below 4
+/// (parallel regions straggle on E-cores). Physical P-core count is the right
+/// value on hybrid chips; override with SNEK_TORCH_THREADS.
+fn torch_threads() -> usize {
+    let cpu_serving =
+        std::env::var("SNEK_CPU_ONLY").ok().as_deref() == Some("1") || !tch::Cuda::is_available();
+    let default = if cpu_serving { 4 } else { 1 };
+    env_or("SNEK_TORCH_THREADS", default).max(1)
 }
 
 fn max_sims_from_env() -> usize {

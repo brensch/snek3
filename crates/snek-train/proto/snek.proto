@@ -1,0 +1,39 @@
+syntax = "proto3";
+package snek;
+
+enum Phase {
+  IDLE = 0;
+  PLAYING = 1;
+  TRAINING = 2;
+  CHECKPOINT = 3;
+  STOPPING = 4;
+  STOPPED = 5;
+}
+
+message StatsFrame {
+  uint64 t_unix_ms = 1;
+  uint32 generation = 2;
+  Phase phase = 3;
+  double inferences_per_sec = 4;
+  double games_per_sec = 5;
+  uint64 completed_games_total = 6;
+  uint32 samples_collected = 7;
+  uint32 samples_target = 8;
+  double gpu_busy_pct = 9;
+  uint32 batch_avg_rows = 10;
+  double policy_loss = 11;
+  double value_loss = 12;
+  double target_entropy = 13;
+  double gpu_rows_per_sec = 14;
+  uint32 train_step = 15;
+  uint32 train_steps_total = 16;
+  // Mean length (turns) of games completing during self-play, windowed EMA.
+  double avg_game_turn = 17;
+}
+
+message RunState {
+  Phase phase = 1;
+  uint32 generation = 2;
+  string run_id = 3;
+  bool running = 4;
+}

@@ -1,105 +1,74 @@
-# Serving the Battlesnake `/move` API (Albatross-faithful, pure Rust)
+# Serving the Battlesnake `/move` API
 
-This is the production play path: a small Rust binary (`crates/snek-server`) that
-runs the **most Albatross-faithful** serving procedure on CPU, with no PyTorch and
-no Python in the request loop.
+`crates/snek-server` serves Battlesnake moves with the same Rust MCTS and
+`snek-tch` policy/value network used by training. It loads `net.safetensors`
+checkpoints written by `snek-train`; there is no ONNX export or ONNX Runtime path.
 
-## What it does on every `/move`
-
-1. **Models the opponent online (temperature MLE).** It accumulates, per opponent
-   and per candidate temperature on a log grid (`geomspace(0.25, 20, 24)`, the same
-   `TAU_GRID` as training), the log-likelihood of that opponent's actual moves under
-   the proxy net's policy head. A weak/predictable opponent scores a low `tau`. Only
-   the newest move is scored each turn (the LL is additive), so it stays cheap as the
-   game lengthens. Opponents are tracked by snake **id**, so other snakes dying (which
-   shifts board indices) doesn't corrupt the estimate.
-2. **Best-responds (heterogeneous-temperature equilibrium search).** It runs the
-   fixed-depth logit-equilibrium search with **our** snake pinned at a high rational
-   temperature (`SNEK_RESPONSE_TAU`) and each opponent pinned at its estimated `tau`.
-   Leaves are evaluated by the proxy net in one batched ONNX forward, conditioned on
-   the opponents' rationality regime. The equilibrium that comes back is our
-   exploitative best response; we play its argmax.
-
-This mirrors the earlier Albatross-style training design — opponent tau
-estimation plus hetero-tau response policy — reimplemented over
-`snek-infer`/ONNX. The **proxy** net is what serves (it does both the MLE and the
-leaf eval); the *response* net is a not-yet-used distillation, so faithful serving
-needs only the proxy + the search.
-
-> First move(s) of a game have no opponent history yet, so each opponent starts at the
-> grid's geometric-mean `tau` (~2.24) and the estimate sharpens as the game proceeds.
-
-## Quick start (local)
+## Quick Start
 
 ```sh
-make export-model          # runs/albatross-resp0/state.pt -> model.onnx (proxy net)
-make api                   # builds + runs on :8000 using the venv's onnxruntime
-# in another shell:
+make api MODEL=runs/<run-id>/net.safetensors
 curl localhost:8000/
-curl -X POST localhost:8000/move -d '{"game":{"id":"g"},"turn":0,"board":{"width":11,"height":11,"food":[],"snakes":[{"id":"me","health":99,"body":[{"x":1,"y":1},{"x":1,"y":2}]},{"id":"o","health":99,"body":[{"x":9,"y":9},{"x":9,"y":8}]}]},"you":{"id":"me","health":99,"body":[{"x":1,"y":1},{"x":1,"y":2}]}}'
 ```
 
-Export a different checkpoint with `make export-model CHECKPOINT=runs/<id>/state.pt`.
+The Makefile applies the same libtorch environment as `make train`.
 
-## Deploy (CPU box, Docker)
-
-```sh
-make export-model          # produce ./model.onnx
-make api-docker            # -> image snek-api  (CPU onnxruntime baked in)
-docker run -p 8000:8000 snek-api
-```
-
-CI also builds and pushes `ghcr.io/brensch/snek3-api:latest` and
-`ghcr.io/brensch/snek3-api:cpu` via `.github/workflows/api-image.yml`.
-
-The image is a Rust binary + a CPU `onnxruntime` + `model.onnx` — no torch, no
-CUDA in the runtime image. Point your Battlesnake at the box's `:8000`.
-
-## Tuning (env vars)
+## Runtime Config
 
 | var | default | effect |
-|-----|---------|--------|
-| `SNEK_MODEL` | `model.onnx` | proxy ONNX path |
+| --- | --- | --- |
+| `SNEK_MODEL` | `net.safetensors` | tch checkpoint path |
 | `SNEK_PORT` | `8000` | listen port |
-| `SNEK_THREADS` | `2` | request worker threads (inference is mutexed) |
-| `SNEK_DEPTH` | `2` | search plies. Leaf count ≈ (legal^N)^depth; depth 3 is the practical ceiling |
-| `SNEK_ITERS` | `120` | SFP iterations per node (equilibrium quality) |
-| `SNEK_RESPONSE_TAU` | `12.0` | our rationality (higher = sharper best response) |
-| `SNEK_DRAW_VALUE` | `-0.9` | leaf value of a draw (negative discourages mutual-suicide draws) |
-| `SNEK_EVAL_CHUNK` | `4096` | max obs rows per ONNX forward |
+| `SNEK_THREADS` | `2` | request worker threads; inference is mutexed |
+| `SNEK_TORCH_THREADS` | `1` CUDA / `4` CPU | intra-op libtorch threads; set to physical P-core count on CPU |
+| `SNEK_MAX_SIMS` | `100000` | safety cap on sims/move; serving is deadline-bound first |
+| `SNEK_LEAVES_PER_SIM` | `8` | leaves batched per selection round with virtual loss |
+| `SNEK_VIRTUAL_LOSS` | `1.0` | virtual-loss magnitude |
+| `SNEK_C_PUCT` | `1.5` | PUCT exploration constant |
+| `SNEK_TIMEOUT_MS` | `500` | fallback deadline when request JSON omits `game.timeout` |
+| `SNEK_DEADLINE_MARGIN_MS` | `150` | response margin reserved from timeout |
+| `SNEK_DRAW_VALUE` | `-0.25` | leaf value of a draw |
+| `SNEK_EVAL_CHUNK` | `4096` | max obs rows per net forward |
+| `SNEK_TRUNK_CHANNELS` | `96` | network width; must match checkpoint |
+| `SNEK_TRUNK_BLOCKS` | `8` | network depth; must match checkpoint |
+| `SNEK_GPOOL_EVERY` | `3` | global-pool cadence; must match checkpoint |
+| `SNEK_CPU_ONLY` | unset | set to `1` to force CPU serving |
 
-Latency budget is ~500ms/move. If a CPU box is tight, lower `SNEK_DEPTH` (biggest lever)
-or `SNEK_ITERS`; if you have headroom, raise `SNEK_DEPTH` to 3 for stronger tactics.
+## Docker image (GitHub deploy)
 
-## Game viewer
+`.github/workflows/api-image.yml` builds `deploy/server.Dockerfile` on every
+push to `main` that touches `crates/**`, the Dockerfile, or the serving
+checkpoint, and pushes `ghcr.io/brensch/snek3-api:latest`. The image is
+CPU-only (torch 2.11.0+cpu wheel) and bakes in:
 
-The server ships an embedded web viewer for the games it records (the compressed
-`<game_id>.json.zst` logs under `SNEK_MOVE_LOG_DIR`). It is built from
-`crates/snek-server/viewer/` and bundled into the binary via `rust-embed`
-(`make api-build` and the Docker image build the frontend first; bare
-`cargo build` uses a tracked placeholder).
+- the tracked serving checkpoint `checkpoints/serving.safetensors`
+  (provenance in `checkpoints/serving.json`) — **its architecture must match
+  `crates/snek-tch` in the same commit** or the container panics at startup;
+  when the net architecture changes, commit a matching checkpoint with it
+- the embedded viewer (built in a node stage)
+- CPU serve tuning measured on the deploy box (i5-1340P):
+  `SNEK_TORCH_THREADS=4`, `SNEK_LEAVES_PER_SIM=2`
 
-- **UI:** `GET /app/` — pick a game, scrub/auto-play it, and read the per-turn
-  search: value head, Up/Down/Left/Right policy + priors + visit counts + Q, the
-  played move, sims/forward/eval/depth. Share a deep link with
-  `/app/?game=<id>&turn=<n>`.
-- **API** (namespaced under `/viewer/*`, separate from the Battlesnake routes):
-  - `GET /viewer/games` — list recorded game ids
-  - `GET /viewer/games/{id}` — the decompressed game JSON
-  - `GET /viewer/games/{id}/tree?turn=N[&sims=M]` — replay turn `N` and return
-    the full exploration tree (per-node PUCT decomposition Q + c·P·√ΣN/(1+N)).
+GitHub only publishes the image; the box pulls it manually:
 
-Replay is a faithful reproduction: serving search is deterministic, so re-running
-with the turn's recorded `sims_completed` rebuilds the in-game tree node-for-node
-— **provided the loaded model matches the one that recorded the game**. Each game
-stores a SHA-256 of the model; the tree response reports `model_match`, and the UI
-warns when a replay used different weights (e.g. the model was re-exported since).
-For an in-process replay (the same server that recorded the game) this always
-matches. `SNEK_VIEWER_DIR` overrides the embedded assets with an on-disk dir for
-iterating on the frontend without rebuilding the server.
+```sh
+docker pull ghcr.io/brensch/snek3-api:latest
+docker rm -f snek-api
+docker run -d --name snek-api --restart unless-stopped -p 8000:8000 \
+  -v /home/brensch/snek-api-logs:/app/logs/api_moves \
+  ghcr.io/brensch/snek3-api:latest
+```
 
-## Re-exporting after more training
+## Viewer
 
-The serving model is a snapshot. After the live run improves, re-run `make export-model`
-(and rebuild the image) to ship the newer proxy. Architecture is read from the
-checkpoint's `net_cfg`, so it always matches the weights.
+The server ships an embedded viewer for compressed game logs under
+`SNEK_MOVE_LOG_DIR`.
+
+- `GET /app/` serves the UI.
+- `GET /viewer/games` lists recorded games.
+- `GET /viewer/games/{id}` returns one decompressed game.
+- `GET /viewer/games/{id}/tree?turn=N[&sims=M]` replays a turn and returns the
+  search tree.
+
+Each recorded game stores a SHA-256 of the model file. Tree replay reports
+whether the current model matches the one used for the recorded game.

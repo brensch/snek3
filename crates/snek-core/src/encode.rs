@@ -10,7 +10,7 @@
 //! and per-opponent scalars (health, length-vs-me) are written at each
 //! opponent's head cell. 1v1 / 3-player / 4-player FFA all share this layout.
 //!
-//! Channel layout — KEEP IN SYNC with `python/azsnek/obs_schema.py` (v1):
+//! Channel layout — schema v1, previously mirrored by archived `azsnek/obs_schema.py`:
 //!   0  my_head
 //!   1  my_body              (segments excluding the head)
 //!   2  my_tail_countdown    (body cells, i/len head-first: ~1 near the tail)
@@ -178,6 +178,12 @@ mod tests {
         assert!(out[plane(8) + oi].abs() < 1e-6); // equal length -> 0
 
         // mask (13) marks every cell.
-        assert_eq!(out[plane(13)..plane(14)].iter().filter(|&&v| v != 0.0).count(), 121);
+        assert_eq!(
+            out[plane(13)..plane(14)]
+                .iter()
+                .filter(|&&v| v != 0.0)
+                .count(),
+            121
+        );
     }
 }

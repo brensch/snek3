@@ -478,7 +478,7 @@ mod tests {
         let config = json!({"max_sims": 100000});
         write_game(
             &dir,
-            "model.onnx",
+            "net.safetensors",
             &config,
             "game-abc",
             &log,
