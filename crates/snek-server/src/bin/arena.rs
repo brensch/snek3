@@ -126,7 +126,9 @@ usage: arena --nets <m1,m2[,m3,m4…]> [options]
        arena --a <model> --b <model> [options]   (two-net shorthand)
 
 nets & seats:
-  --nets LIST         comma-separated model weights, one player per entry
+  --nets LIST         comma-separated model weights, one player per entry;
+                      the literal entry 'heuristic' (or 'floodfill') seats the
+                      built-in flood-fill MCTS baseline instead of a net
   --a / --b PATH      shorthand for --nets a,b
   --names LIST        display names (default: model file stem / parent dir)
   --seats N           snakes per game; seat s plays net (s+game)%N, so two
@@ -306,6 +308,9 @@ fn parse_args() -> Args {
 }
 
 fn default_name(path: &str, index: usize) -> String {
+    if snek_heuristic::is_heuristic_spec(path) {
+        return snek_heuristic::DISPLAY_NAME.to_string();
+    }
     Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -397,6 +402,42 @@ fn spawn_worker(
                 if !core_affinity::set_for_current(core_affinity::CoreId { id }) {
                     eprintln!("arena: warning: failed to pin {label} to core {id}");
                 }
+            }
+            // A "heuristic"/"floodfill" model spec plays the fixed flood-fill
+            // MCTS baseline (snek-heuristic) — no weights, no libtorch. Its
+            // sims are ~100× cheaper than a net forward, so in fixed-sims mode
+            // it keeps its own static budget (~200ms/move, still
+            // deterministic) instead of the nets' --sims; in time mode the
+            // shared per-move deadline binds it like everyone else.
+            if snek_heuristic::is_heuristic_spec(&model) {
+                let hcfg = snek_heuristic::HeuristicConfig {
+                    max_sims: match budget {
+                        Budget::Sims(_) => {
+                            snek_heuristic::HeuristicConfig::default().max_sims
+                        }
+                        Budget::TimeMs(_) => usize::MAX,
+                    },
+                    draw_value: cfg.draw_value,
+                    ..Default::default()
+                };
+                while let Ok(job) = job_rx.recv() {
+                    let deadline = match budget {
+                        Budget::Sims(_) => Instant::now() + SIMS_DEADLINE,
+                        Budget::TimeMs(ms) => Instant::now() + Duration::from_millis(ms),
+                    };
+                    let d = snek_heuristic::heuristic_move_until(
+                        &hcfg,
+                        &job.board,
+                        job.me,
+                        deadline,
+                    );
+                    let _ = job.reply.send(MoveInfo {
+                        move_index: d.move_index,
+                        policy: d.policy,
+                        value: d.value,
+                    });
+                }
+                return;
             }
             let mut net = Net::load(&model)
                 .unwrap_or_else(|e| panic!("arena: {label}: failed to load {model}: {e}"));

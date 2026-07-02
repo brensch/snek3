@@ -715,6 +715,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "snek-heuristic"
+version = "0.1.0"
+dependencies = [
+ "snek-core",
+]
+
+[[package]]
 name = "snek-search"
 version = "0.1.0"
 dependencies = [
@@ -736,6 +743,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "snek-core",
+ "snek-heuristic",
  "snek-search",
  "snek-tch",
  "tch",

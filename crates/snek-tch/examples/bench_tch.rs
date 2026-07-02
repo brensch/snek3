@@ -14,7 +14,7 @@ fn main() {
     // cuDNN benchmark/TF32 like the training stack (allow_tf32 is on there).
     tch::Cuda::cudnn_set_benchmark(true);
     let vs = nn::VarStore::new(dev);
-    let net = AZNet::new(&vs.root(), 14, 96, 8, 3);
+    let net = AZNet::new(&vs.root(), 14, 96, 8);
 
     let (c, h, w) = (14i64, 11i64, 11i64);
     let batches: Vec<i64> = std::env::args()

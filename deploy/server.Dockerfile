@@ -56,7 +56,6 @@ ENV LD_LIBRARY_PATH=/opt/torch/lib \
     # default change in the binary can't silently mismatch the weights.
     SNEK_TRUNK_CHANNELS=96 \
     SNEK_TRUNK_BLOCKS=8 \
-    SNEK_GPOOL_EVERY=3 \
     # CPU serve tuning, measured on the i5-1340P deploy box: forwards want the
     # 4 P-cores, and batch cost is ~linear so small leaf batches search better.
     SNEK_TORCH_THREADS=4 \

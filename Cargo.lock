@@ -526,6 +526,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "snek-heuristic"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "rand_xoshiro",
+ "snek-core",
+]
+
+[[package]]
 name = "snek-search"
 version = "0.1.0"
 dependencies = [

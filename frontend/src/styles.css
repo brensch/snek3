@@ -2,24 +2,63 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  html {
+    @apply bg-page text-ink-2 antialiased;
+  }
+
+  /* Thin, dark scrollbars everywhere: a slim rounded thumb in the axis gray on
+     a transparent track, brightening slightly on hover. */
+  * {
+    scrollbar-width: thin; /* Firefox */
+    scrollbar-color: #383835 transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #383835;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #52514e;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
 @layer components {
+  /* The one card treatment: surface plane, hairline ring, soft corners. */
+  .card {
+    @apply rounded-lg border border-white/10 bg-surface;
+  }
+
+  .card-title {
+    @apply text-[11px] font-semibold uppercase tracking-wider text-ink-3;
+  }
+
   .btn {
-    @apply rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 hover:border-sky-500 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply rounded-md border border-white/10 bg-inset px-3 py-1.5 text-sm text-ink-2 transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-primary {
+    @apply rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40;
   }
 
   .btn-danger {
-    @apply rounded border border-red-900 bg-red-950 px-3 py-2 text-sm text-red-100 hover:border-red-500 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply rounded-md border border-bad/40 bg-inset px-3 py-1.5 text-sm text-bad transition-colors hover:border-bad disabled:cursor-not-allowed disabled:opacity-40;
   }
 
   .input {
-    @apply rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-sm text-slate-100;
+    @apply rounded-md border border-white/10 bg-inset px-2 py-1.5 font-mono text-sm text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none;
   }
 
-  .panel {
-    @apply rounded border border-slate-800 bg-slate-900 p-4;
-  }
-
-  .section-title {
-    @apply text-xs font-semibold uppercase tracking-wide text-slate-400;
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full bg-inset px-2 py-0.5 text-[11px] font-medium text-ink-2;
   }
 }

@@ -71,6 +71,12 @@ impl TrainerHandle {
             anyhow::bail!("a GPU benchmark is running — wait for it to finish");
         }
         if self.running.swap(true, Ordering::SeqCst) {
+            // A start while the previous loop is still draining its stop would
+            // be silently swallowed (the loop exits and nothing restarts) —
+            // refuse it instead so the caller can retry once fully stopped.
+            if self.stop.load(Ordering::SeqCst) {
+                anyhow::bail!("previous run is still stopping — retry in a moment");
+            }
             return self
                 .active_run
                 .lock()
@@ -175,6 +181,10 @@ impl TrainerHandle {
     }
 
     fn run_loop(&self, run_id: &str, fresh: bool) -> anyhow::Result<()> {
+        // Signal life immediately: restoring a large replay buffer below can
+        // take tens of seconds, and until the first generation starts the
+        // phase would otherwise sit at Stopped and make a resume look ignored.
+        self.metrics.set_phase(Phase::Playing);
         let paths = RunPaths::new(&self.runs_dir, run_id);
         paths.ensure()?;
         let mut cfg = if !fresh && paths.config.exists() {
@@ -212,6 +222,9 @@ impl TrainerHandle {
         } else {
             load_trainer_state(&paths.trainer_state)?
         };
+        if !fresh {
+            self.log(format!("resuming run '{run_id}': restoring replay buffer…"));
+        }
         let mut replay = if fresh {
             ReplayBuffer::new(cfg.buffer_size)
         } else {

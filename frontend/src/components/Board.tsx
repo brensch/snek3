@@ -1,4 +1,4 @@
-import { snakeColor } from "../lib/moves";
+import { snakeColor } from "../lib/palette";
 
 export type Coord = { x: number; y: number };
 
@@ -49,7 +49,7 @@ export function Board({
           y={sy(y)}
           width={cell}
           height={cell}
-          fill={(x + y) % 2 ? "#0b1220" : "#0e1729"}
+          fill={(x + y) % 2 ? "#121211" : "#171716"}
         />,
       );
     }
@@ -59,15 +59,15 @@ export function Board({
     <svg
       viewBox={`0 0 ${W} ${H}`}
       width="100%"
-      className="max-w-[560px] rounded border border-slate-800 bg-slate-950"
+      className="max-w-[560px] rounded border border-white/10 bg-inset"
       shapeRendering="crispEdges"
     >
       {cells}
       {hazards.map((p, i) => (
-        <rect key={`h${i}`} x={sx(p.x)} y={sy(p.y)} width={cell} height={cell} fill="#7c2d1240" />
+        <rect key={`h${i}`} x={sx(p.x)} y={sy(p.y)} width={cell} height={cell} fill="#d03b3b33" />
       ))}
       {food.map((p, i) => (
-        <circle key={`f${i}`} cx={cx(p.x)} cy={cy(p.y)} r={cell * 0.22} fill="#f43f5e" />
+        <circle key={`f${i}`} cx={cx(p.x)} cy={cy(p.y)} r={cell * 0.22} fill="#e66767" />
       ))}
       {snakes.map((s, i) => {
         if (!s.body?.length) return null;
@@ -97,7 +97,7 @@ export function Board({
               cy={cy(head.y)}
               r={cell * 0.3}
               fill={color}
-              stroke={emphasized ? "#fff" : "#0b0f17"}
+              stroke={emphasized ? "#fff" : "#141413"}
               strokeWidth={emphasized ? 2.5 : 1.5}
             />
           </g>

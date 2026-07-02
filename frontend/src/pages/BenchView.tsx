@@ -81,8 +81,8 @@ export function BenchView() {
     <div className="mx-auto max-w-3xl px-5 py-6">
       <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-lg font-semibold text-slate-100">GPU batch-size benchmark</h1>
-          <p className="text-sm text-slate-500">
+          <h1 className="text-lg font-semibold text-ink">GPU batch-size benchmark</h1>
+          <p className="text-sm text-ink-3">
             Times a forward pass (H2D → net → D2H) at each batch size on the current GPU to find the
             highest inference throughput.
           </p>
@@ -98,7 +98,7 @@ export function BenchView() {
       </header>
 
       {(device || trunk) && (
-        <div className="mb-4 flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-500">
+        <div className="mb-4 flex flex-wrap gap-x-6 gap-y-1 text-xs text-ink-3">
           {device && <span>device {device}</span>}
           {trunk && <span>trunk {trunk.channels}×{trunk.blocks}</span>}
           {seconds > 0 && <span>{seconds}s per batch</span>}
@@ -106,14 +106,14 @@ export function BenchView() {
       )}
 
       {status === "error" && (
-        <div className="mb-4 rounded border border-red-900 bg-red-950 p-3 text-sm text-red-200">
+        <div className="mb-4 card border-bad/40 p-3 text-sm text-bad">
           {error ?? "Benchmark failed."}
         </div>
       )}
 
       {inProgress && (
         <div className="mb-4">
-          <div className="mb-1 flex items-center justify-between text-xs text-slate-400">
+          <div className="mb-1 flex items-center justify-between text-xs text-ink-3">
             <span>
               {measuring
                 ? `Measuring batch ${number(measuring.batch)}…`
@@ -123,9 +123,9 @@ export function BenchView() {
               {done}/{total || "?"}
             </span>
           </div>
-          <div className="h-1.5 w-full overflow-hidden rounded bg-slate-800">
+          <div className="h-1.5 w-full overflow-hidden rounded bg-inset">
             <div
-              className="h-full bg-sky-500 transition-all"
+              className="h-full bg-accent transition-all"
               style={{ width: total ? `${(done / total) * 100}%` : "8%" }}
             />
           </div>
@@ -133,10 +133,10 @@ export function BenchView() {
       )}
 
       {(rows.length > 0 || inProgress) && (
-        <div className="overflow-x-auto rounded-lg border border-slate-800">
+        <div className="card overflow-x-auto">
           <table className="w-full border-collapse text-sm">
             <thead>
-              <tr className="border-b border-slate-800 bg-slate-900/60 text-left text-[10px] uppercase tracking-wide text-slate-500">
+              <tr className="border-b border-white/10 bg-inset text-left text-[10px] uppercase tracking-wide text-ink-3">
                 <th className="px-3 py-2 text-right font-medium">Batch size</th>
                 <th className="px-3 py-2 text-right font-medium">Inf/s (rows)</th>
                 <th className="px-3 py-2 text-right font-medium">Forwards/s</th>
@@ -149,14 +149,14 @@ export function BenchView() {
                 return (
                   <tr
                     key={row.batch}
-                    className={`border-b border-slate-800/60 last:border-0 ${
-                      isBest ? "bg-green-500/15 text-green-300" : "text-slate-200"
+                    className={`border-b border-white/5 last:border-0 ${
+                      isBest ? "bg-good/10 text-good" : "text-ink-2"
                     }`}
                   >
                     <td className="px-3 py-2 text-right font-mono">
                       {number(row.batch)}
                       {isBest && (
-                        <span className="ml-2 rounded-full bg-green-500/20 px-2 py-0.5 text-[10px] font-medium text-green-400">
+                        <span className="ml-2 rounded-full bg-good/15 px-2 py-0.5 text-[10px] font-medium text-good">
                           best
                         </span>
                       )}
@@ -168,7 +168,7 @@ export function BenchView() {
                 );
               })}
               {inProgress && measuring && !rows.some((r) => r.batch === measuring.batch) && (
-                <tr className="border-b border-slate-800/60 text-slate-500 last:border-0">
+                <tr className="border-b border-white/5 text-ink-3 last:border-0">
                   <td className="px-3 py-2 text-right font-mono">{number(measuring.batch)}</td>
                   <td className="px-3 py-2 text-right font-mono" colSpan={3}>
                     measuring…

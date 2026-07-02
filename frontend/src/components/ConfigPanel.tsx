@@ -28,7 +28,7 @@ export function ConfigPanel({ config, onSave, readOnly }: Props) {
   }, [config, dirty]);
 
   if (!config || !draft) {
-    return <section className="panel text-sm text-slate-400">No config on disk.</section>;
+    return <section className="card p-4 text-sm text-ink-3">No config on disk.</section>;
   }
 
   const setField = (key: keyof RunConfig, value: number | boolean) =>
@@ -45,20 +45,20 @@ export function ConfigPanel({ config, onSave, readOnly }: Props) {
   }
 
   return (
-    <section className="panel">
+    <section className="card p-4">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <span className="section-title">Training knobs</span>
-        <span className="text-xs text-slate-500">
+        <span className="card-title">Training knobs</span>
+        <span className="text-xs text-ink-3">
           {readOnly ? "read-only (run not live)" : "applied at generation boundaries"}
         </span>
         {dirty && (
           <div className="ml-auto flex items-center gap-2">
-            <span className="text-xs text-amber-400">unsaved changes</span>
+            <span className="text-xs text-warn">unsaved changes</span>
             <button className="btn" disabled={busy} onClick={() => setDraft(config)}>
               Discard
             </button>
             <button
-              className="rounded bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
+              className="btn-primary"
               disabled={busy}
               onClick={save}
             >

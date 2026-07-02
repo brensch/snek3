@@ -5,7 +5,7 @@ import { RunsHome } from "./pages/RunsHome";
 
 export default function App() {
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200">
+    <div className="min-h-screen">
       <Routes>
         <Route path="/" element={<RunsHome />} />
         <Route path="/bench" element={<BenchView />} />

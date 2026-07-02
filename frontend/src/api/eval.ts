@@ -1,5 +1,5 @@
-// Live evaluation-league SSE: the trainer publishes the in-flight arena game
-// (its players with fitted Elos, current board frames) about once a second.
+// Live evaluation-league payloads (delivered over the shared event stream in
+// ./events — one message per board turn while a league game is in flight).
 export type LiveFrameSnake = {
   alive: boolean;
   body: [number, number][]; // head first
@@ -32,15 +32,3 @@ export type LiveEval = {
   games: LiveEvalGame[];
   updated_unix_ms: number;
 };
-
-export function openEvalStream(onStatus: (status: LiveEval) => void): EventSource {
-  const events = new EventSource("/api/stream/eval");
-  events.addEventListener("eval", (event) => {
-    try {
-      onStatus(JSON.parse((event as MessageEvent).data) as LiveEval);
-    } catch {
-      /* ignore malformed frames */
-    }
-  });
-  return events;
-}

@@ -31,7 +31,6 @@ The Makefile applies the same libtorch environment as `make train`.
 | `SNEK_EVAL_CHUNK` | `4096` | max obs rows per net forward |
 | `SNEK_TRUNK_CHANNELS` | `96` | network width; must match checkpoint |
 | `SNEK_TRUNK_BLOCKS` | `8` | network depth; must match checkpoint |
-| `SNEK_GPOOL_EVERY` | `3` | global-pool cadence; must match checkpoint |
 | `SNEK_CPU_ONLY` | unset | set to `1` to force CPU serving |
 
 ## Docker image (GitHub deploy)

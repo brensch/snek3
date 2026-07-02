@@ -4,20 +4,13 @@ name: trainer-image
 # tunnel) and pushes it to GHCR so RunPod or any GPU box can pull-and-run
 # with no per-boot build. Everything — frontend build, libtorch install,
 # cargo build — happens inside deploy/trainer.Dockerfile.
+#
+# Runs when a version tag (v*) is pushed; the image is tagged with the git tag
+# and `latest`. `workflow_dispatch` builds from any ref and updates `latest`.
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-    paths:
-      - 'deploy/trainer.Dockerfile'
-      - 'deploy/trainer-entrypoint.sh'
-      - 'deploy/tailscale-dashboard.sh'
-      - 'crates/**'
-      - 'frontend/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.dockerignore'
-      - '.github/workflows/trainer-image.yml'
+    tags: ['v*']
 
 jobs:
   build:
@@ -42,14 +35,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/snek3-trainer
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+
       - name: Build and push CUDA trainer
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/trainer.Dockerfile
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/snek3-trainer:latest
-            ghcr.io/${{ github.repository_owner }}/snek3-trainer:cuda
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha,scope=trainer
           cache-to: type=gha,mode=max,scope=trainer

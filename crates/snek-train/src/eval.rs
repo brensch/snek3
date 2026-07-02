@@ -39,6 +39,25 @@ use std::time::Duration;
 /// Recorded match game files kept on disk (newest first); logs likewise.
 const KEEP_MATCH_FILES: usize = 60;
 
+/// League identity of the fixed flood-fill MCTS baseline (`snek-heuristic`,
+/// seated by the arena's literal net spec "heuristic"). It never learns, so
+/// its fitted Elo is a stable reference every net is constantly measured
+/// against. `u32::MAX` can never collide with a checkpoint generation.
+pub const HEURISTIC_GEN: u32 = u32::MAX;
+
+/// Chance a league game is forced to include the flood-fill baseline (it can
+/// also be drawn by the normal information-gain sampling on top of this).
+const HEURISTIC_PLAY_PROB: f64 = 1.0 / 3.0;
+
+/// Display name for a league player id.
+pub fn player_name(gen: u32) -> String {
+    if gen == HEURISTIC_GEN {
+        "floodfill".to_string()
+    } else {
+        format!("gen_{gen:04}")
+    }
+}
+
 /// One league thread per process; a second run start waits for the old one.
 static LEAGUE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -174,10 +193,46 @@ pub fn live() -> LiveEval {
     LIVE.lock().unwrap().clone()
 }
 
+/// Every live-state change is also broadcast, so the SSE endpoint pushes a
+/// frame per turn instead of polling on a timer.
+static LIVE_TX: std::sync::OnceLock<tokio::sync::broadcast::Sender<LiveEval>> =
+    std::sync::OnceLock::new();
+
+fn live_tx() -> &'static tokio::sync::broadcast::Sender<LiveEval> {
+    LIVE_TX.get_or_init(|| tokio::sync::broadcast::channel(64).0)
+}
+
+/// Subscribe to live-state changes (one message per board turn while a league
+/// game is in flight).
+pub fn live_rx() -> tokio::sync::broadcast::Receiver<LiveEval> {
+    live_tx().subscribe()
+}
+
+/// Fold one of the arena's per-turn events into the live view (and broadcast
+/// it). Called from the stdout reader thread, so a turn is visible the moment
+/// the arena reports it.
+fn apply_turn(ev: GameEvent) {
+    set_live(|l| {
+        match l.games.iter_mut().find(|g| g.index == ev.index) {
+            Some(game) => {
+                game.turn = ev.turn;
+                game.frame = ev.frame;
+            }
+            None => l.games.push(LiveGame {
+                index: ev.index,
+                turn: ev.turn,
+                frame: ev.frame,
+            }),
+        }
+        l.games.sort_by_key(|g| g.index);
+    });
+}
+
 fn set_live(update: impl FnOnce(&mut LiveEval)) {
     let mut live = LIVE.lock().unwrap();
     update(&mut live);
     live.updated_unix_ms = chrono::Utc::now().timestamp_millis();
+    let _ = live_tx().send(live.clone());
 }
 
 /// Start the league thread for the active run. Returns immediately; the thread
@@ -220,14 +275,17 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
             sleep_unless_stopped(stop, 30);
             continue;
         }
-        let pool = pool_members(paths, cfg.league_entrant_gens);
+        // The flood-fill baseline always holds a pool slot, so games (and a
+        // meaningful Elo) start from the very first checkpoint.
+        let mut pool = pool_members(paths, cfg.league_entrant_gens);
+        pool.push(HEURISTIC_GEN);
         if pool.len() < 2 {
             sleep_unless_stopped(stop, 15);
             continue;
         }
         if !announced {
             metrics.log(format!(
-                "eval league: running — pool of {} nets (entrant every {} gens), {} distinct nets per game, {} sims",
+                "eval league: running — pool of {} players incl. floodfill baseline (entrant every {} gens), {} distinct nets per game, {} sims",
                 pool.len(),
                 cfg.league_entrant_gens,
                 cfg.num_snakes.min(pool.len()),
@@ -274,7 +332,7 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
                     "eval league #{seq}: {ranking} ({turns} turns) — {rated} nets rated",
                     ranking = order
                         .iter()
-                        .map(|p| format!("gen_{:04}", p.gen))
+                        .map(|p| player_name(p.gen))
                         .collect::<Vec<_>>()
                         .join(" > "),
                     turns = record.turns,
@@ -327,9 +385,16 @@ fn run_match(
     let log_path = eval_dir.join(format!("arena_{seq:06}.log"));
     let nets: Vec<String> = players
         .iter()
-        .map(|&g| paths.checkpoint_net(g).display().to_string())
+        .map(|&g| {
+            if g == HEURISTIC_GEN {
+                // The arena's literal spec for the built-in flood-fill agent.
+                "heuristic".to_string()
+            } else {
+                paths.checkpoint_net(g).display().to_string()
+            }
+        })
         .collect();
-    let names: Vec<String> = players.iter().map(|&g| format!("gen_{g:04}")).collect();
+    let names: Vec<String> = players.iter().map(|&g| player_name(g)).collect();
     let cores = league_cores(players.len(), cfg.eval_cores);
 
     let mut command = std::process::Command::new(bin);
@@ -345,7 +410,13 @@ fn run_match(
         .args(["--seed", &seq.wrapping_mul(1_000_003).to_string()])
         .args([
             "--record-gen",
-            &players.iter().copied().max().unwrap_or(0).to_string(),
+            &players
+                .iter()
+                .copied()
+                .filter(|&g| g != HEURISTIC_GEN)
+                .max()
+                .unwrap_or(0)
+                .to_string(),
         ])
         .arg("--record")
         .arg(&record_path)
@@ -394,7 +465,13 @@ fn run_match(
             use std::io::BufRead;
             for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
                 if let Ok(ev) = serde_json::from_str::<GameEvent>(&line) {
-                    if event_tx.send(ev).is_err() {
+                    // Turn events update (and broadcast) the live view the
+                    // moment they arrive — the SSE stream ticks per turn, not
+                    // on the wait loop's poll cadence. Everything else goes to
+                    // the wait loop for match bookkeeping.
+                    if ev.event == "turn" {
+                        apply_turn(ev);
+                    } else if event_tx.send(ev).is_err() {
                         break;
                     }
                 }
@@ -402,22 +479,11 @@ fn run_match(
         })
     });
     let mut result: Option<MatchRecord> = None;
-    let apply = |ev: GameEvent, result: &mut Option<MatchRecord>| match ev.event.as_str() {
-        "turn" => set_live(|l| {
-            match l.games.iter_mut().find(|g| g.index == ev.index) {
-                Some(game) => {
-                    game.turn = ev.turn;
-                    game.frame = ev.frame;
-                }
-                None => l.games.push(LiveGame {
-                    index: ev.index,
-                    turn: ev.turn,
-                    frame: ev.frame,
-                }),
-            }
-            l.games.sort_by_key(|g| g.index);
-        }),
-        "game" => {
+    let apply = |ev: GameEvent, result: &mut Option<MatchRecord>| {
+        if ev.event != "game" {
+            return;
+        }
+        {
             let placements = ev
                 .placements
                 .iter()
@@ -443,7 +509,6 @@ fn run_match(
             });
             set_live(|l| l.games.retain(|g| g.index != ev.index));
         }
-        _ => {}
     };
     let status = loop {
         if stop.load(Ordering::Relaxed) {
@@ -564,8 +629,16 @@ fn pick_players(
 
     let k = seats.min(pool.len()).max(2);
     let mut selected = Vec::with_capacity(k);
-    let weights: Vec<f64> = pool.iter().map(|&g| uncertainty(g)).collect();
-    selected.push(sample(&mut rng, pool, &weights));
+    // Regularly force the flood-fill baseline in (it also flows through the
+    // normal sampling below), so nets are constantly compared against the one
+    // player that never changes.
+    if pool.contains(&HEURISTIC_GEN) && rng.gen_bool(HEURISTIC_PLAY_PROB) {
+        selected.push(HEURISTIC_GEN);
+    }
+    if selected.is_empty() {
+        let weights: Vec<f64> = pool.iter().map(|&g| uncertainty(g)).collect();
+        selected.push(sample(&mut rng, pool, &weights));
+    }
     while selected.len() < k {
         let cands: Vec<u32> = pool
             .iter()
@@ -986,6 +1059,25 @@ mod tests {
         assert!(
             with_new > 12,
             "unrated entrant only drawn {with_new}/20 times"
+        );
+    }
+
+    #[test]
+    fn heuristic_baseline_plays_regularly() {
+        let pool = vec![0, 5, 10, 15, HEURISTIC_GEN];
+        // Give everyone (including the baseline) some history so the forced
+        // inclusion — not just new-player uncertainty — is what keeps it in.
+        let mut records: Vec<MatchRecord> = (0..5).map(|s| game(s, &[15, 10, 5, 0])).collect();
+        records.extend((5..10).map(|s| game(s, &[15, HEURISTIC_GEN, 5, 0])));
+        let ratings = fit_ratings(&pool, &records);
+        let with_baseline = (0..60)
+            .filter(|&seq| {
+                pick_players(&pool, &records, &ratings, 4, seq).contains(&HEURISTIC_GEN)
+            })
+            .count();
+        assert!(
+            with_baseline > 15,
+            "floodfill baseline only drawn {with_baseline}/60 times"
         );
     }
 

@@ -4,17 +4,13 @@ name: api-image
 # with the tracked serving checkpoint (checkpoints/serving.safetensors) baked
 # in. Everything — viewer build, libtorch install, cargo build — happens inside
 # deploy/server.Dockerfile.
+#
+# Runs when a version tag (v*) is pushed; the image is tagged with the git tag
+# and `latest`. `workflow_dispatch` builds from any ref and updates `latest`.
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-    paths:
-      - 'deploy/server.Dockerfile'
-      - 'crates/**'
-      - 'checkpoints/serving.safetensors'
-      - 'checkpoints/serving.json'
-      - '.dockerignore'
-      - '.github/workflows/api-image.yml'
+    tags: ['v*']
 
 jobs:
   build:
@@ -33,14 +29,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/snek3-api
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+
       - name: Build and push CPU API
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/server.Dockerfile
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/snek3-api:latest
-            ghcr.io/${{ github.repository_owner }}/snek3-api:cpu
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api

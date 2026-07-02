@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { openEvalStream } from "../api/eval";
+import { subscribeEvents } from "../api/events";
 import type { LiveEval } from "../api/eval";
 
-// Subscribe to the evaluation league's live-match stream while `enabled`
-// (i.e. when viewing the trainer's active run — the league only plays there).
+// Live league-game updates from the shared event stream (one per board turn),
+// while `enabled` (i.e. viewing the trainer's active run).
 export function useEvalLive(enabled: boolean) {
   const [status, setStatus] = useState<LiveEval | null>(null);
   useEffect(() => {
@@ -11,8 +11,7 @@ export function useEvalLive(enabled: boolean) {
       setStatus(null);
       return;
     }
-    const stream = openEvalStream(setStatus);
-    return () => stream.close();
+    return subscribeEvents({ eval: setStatus });
   }, [enabled]);
   return status;
 }

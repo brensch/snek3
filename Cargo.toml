@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/snek-core",
+    "crates/snek-heuristic",
     "crates/snek-search",
     # Libtorch crates are standalone so plain `cargo test` does not require
     # libtorch/CUDA loader setup.
@@ -15,6 +16,7 @@ authors = ["brensch"]
 
 [workspace.dependencies]
 snek-core = { path = "crates/snek-core" }
+snek-heuristic = { path = "crates/snek-heuristic" }
 snek-search = { path = "crates/snek-search" }
 arrayvec = "0.7"
 rand = "0.8"

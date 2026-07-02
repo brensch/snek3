@@ -34,7 +34,7 @@ fn main() {
     let (c, h, w) = (14i64, 11i64, 11i64);
 
     let vs = nn::VarStore::new(dev);
-    let net = AZNet::new(&vs.root(), c, 96, 8, 3);
+    let net = AZNet::new(&vs.root(), c, 96, 8);
 
     // The "games": one fixed batch, generated once, then kept in host memory and
     // reused forever. Values are irrelevant to timing (conv cost is shape-bound),

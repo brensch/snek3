@@ -20,9 +20,7 @@ use tower_http::services::{ServeDir, ServeFile};
 
 pub fn router(trainer: TrainerHandle, static_dir: Option<&FsPath>) -> Router {
     let mut router = Router::new()
-        .route("/api/stream/stats", get(stream_stats))
-        .route("/api/stream/logs", get(stream_logs))
-        .route("/api/stream/eval", get(stream_eval))
+        .route("/api/stream/events", get(stream_events))
         .route("/api/state", get(state))
         .route("/api/config", get(config))
         .route("/api/control/start", post(start))
@@ -44,55 +42,47 @@ pub fn router(trainer: TrainerHandle, static_dir: Option<&FsPath>) -> Router {
     router
 }
 
-async fn stream_stats(
+/// The dashboard's one event stream: stats frames (base64 protobuf), trainer
+/// log lines (JSON), and live league-game updates (JSON, one per board turn)
+/// multiplexed over a single SSE connection. One connection per tab matters:
+/// browsers cap HTTP/1.1 connections per host, and three separate streams per
+/// tab starved every other API call as soon as a second tab opened.
+async fn stream_events(
     State(trainer): State<TrainerHandle>,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
-    let mut rx = trainer.metrics().stats_rx();
+    let mut stats = trainer.metrics().stats_rx();
+    let mut logs = trainer.metrics().log_rx();
+    let mut eval = crate::eval::live_rx();
     let stream = async_stream::stream! {
-        loop {
-            match rx.recv().await {
-                Ok(frame) => yield Ok(proto_event("stats", frame)),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
+        // A fresh subscriber gets the current league snapshot immediately.
+        if let Ok(data) = serde_json::to_string(&crate::eval::live()) {
+            yield Ok(Event::default().event("eval").data(data));
         }
-    };
-    Sse::new(stream)
-        .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
-}
-
-async fn stream_logs(
-    State(trainer): State<TrainerHandle>,
-) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
-    let mut rx = trainer.metrics().log_rx();
-    let stream = async_stream::stream! {
         loop {
-            match rx.recv().await {
-                Ok(entry) => match serde_json::to_string(&entry) {
-                    Ok(data) => yield Ok(Event::default().event("log").data(data)),
-                    Err(_) => continue,
+            use tokio::sync::broadcast::error::RecvError;
+            tokio::select! {
+                frame = stats.recv() => match frame {
+                    Ok(frame) => yield Ok(proto_event("stats", frame)),
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
                 },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                entry = logs.recv() => match entry {
+                    Ok(entry) => match serde_json::to_string(&entry) {
+                        Ok(data) => yield Ok(Event::default().event("log").data(data)),
+                        Err(_) => continue,
+                    },
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                },
+                live = eval.recv() => match live {
+                    Ok(live) => match serde_json::to_string(&live) {
+                        Ok(data) => yield Ok(Event::default().event("eval").data(data)),
+                        Err(_) => continue,
+                    },
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                },
             }
-        }
-    };
-    Sse::new(stream)
-        .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
-}
-
-/// Live view of the evaluation league's in-flight match (who is playing whom,
-/// which turn each game is up to). Poll-based: the league updates a shared
-/// snapshot as arena events stream in; we emit it once a second.
-async fn stream_eval(
-    State(_trainer): State<TrainerHandle>,
-) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
-    let stream = async_stream::stream! {
-        loop {
-            if let Ok(data) = serde_json::to_string(&crate::eval::live()) {
-                yield Ok(Event::default().event("eval").data(data));
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     };
     Sse::new(stream)

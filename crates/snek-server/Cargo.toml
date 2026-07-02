@@ -23,6 +23,7 @@ path = "src/bin/arena.rs"
 
 [dependencies]
 snek-core = { path = "../snek-core", features = ["json"] }
+snek-heuristic = { path = "../snek-heuristic" }
 snek-search = { path = "../snek-search" }
 snek-tch = { path = "../snek-tch" }
 anyhow = "1"
