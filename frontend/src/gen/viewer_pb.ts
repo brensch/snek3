@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file viewer.proto.
  */
 export const file_viewer: GenFile = /*@__PURE__*/
-  fileDesc("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");
+  fileDesc("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");
 
 /**
  * One row on the home page: enough to render a run card without loading detail.
@@ -272,9 +272,10 @@ export const GameGenSchema: GenMessage<GameGen> = /*@__PURE__*/
   messageDesc(file_viewer, 3);
 
 /**
- * One completed eval match: the net at `gen` vs the checkpoint at
+ * One completed league match: the net at `gen` (side A) vs the checkpoint at
  * `opponent_gen` (from runs/<id>/eval/summary.jsonl). Win counts and the
- * score/Elo are for the newer net.
+ * score/Elo are for side A; the per-match Elo is noisy — the fitted league
+ * rating (LeagueRating) is the real signal.
  *
  * @generated from message snek.EvalPoint
  */
@@ -324,7 +325,7 @@ export type EvalPoint = Message<"snek.EvalPoint"> & {
   scoreCi95: number;
 
   /**
-   * Elo(gen) - Elo(opponent_gen)
+   * pairwise Elo(gen) - Elo(opponent_gen), this match only
    *
    * @generated from field: double elo = 9;
    */
@@ -365,6 +366,13 @@ export type EvalPoint = Message<"snek.EvalPoint"> & {
    * @generated from field: int64 finished_unix_ms = 15;
    */
   finishedUnixMs: bigint;
+
+  /**
+   * monotonic match number within the run
+   *
+   * @generated from field: uint64 seq = 16;
+   */
+  seq: bigint;
 };
 
 /**
@@ -373,6 +381,51 @@ export type EvalPoint = Message<"snek.EvalPoint"> & {
  */
 export const EvalPointSchema: GenMessage<EvalPoint> = /*@__PURE__*/
   messageDesc(file_viewer, 4);
+
+/**
+ * One net's fitted league rating (Bradley–Terry over every recorded match,
+ * anchored so the earliest rated generation is Elo 0).
+ *
+ * @generated from message snek.LeagueRating
+ */
+export type LeagueRating = Message<"snek.LeagueRating"> & {
+  /**
+   * @generated from field: uint32 gen = 1;
+   */
+  gen: number;
+
+  /**
+   * @generated from field: double elo = 2;
+   */
+  elo: number;
+
+  /**
+   * @generated from field: uint32 games = 3;
+   */
+  games: number;
+
+  /**
+   * @generated from field: uint32 wins = 4;
+   */
+  wins: number;
+
+  /**
+   * @generated from field: uint32 losses = 5;
+   */
+  losses: number;
+
+  /**
+   * @generated from field: uint32 draws = 6;
+   */
+  draws: number;
+};
+
+/**
+ * Describes the message snek.LeagueRating.
+ * Use `create(LeagueRatingSchema)` to create a new message.
+ */
+export const LeagueRatingSchema: GenMessage<LeagueRating> = /*@__PURE__*/
+  messageDesc(file_viewer, 5);
 
 /**
  * @generated from message snek.RunDetail
@@ -405,11 +458,18 @@ export type RunDetail = Message<"snek.RunDetail"> & {
   gameGens: GameGen[];
 
   /**
-   * oldest first
+   * matches, oldest first
    *
    * @generated from field: repeated snek.EvalPoint eval_points = 5;
    */
   evalPoints: EvalPoint[];
+
+  /**
+   * latest fit, ascending by generation
+   *
+   * @generated from field: repeated snek.LeagueRating league = 6;
+   */
+  league: LeagueRating[];
 };
 
 /**
@@ -417,7 +477,7 @@ export type RunDetail = Message<"snek.RunDetail"> & {
  * Use `create(RunDetailSchema)` to create a new message.
  */
 export const RunDetailSchema: GenMessage<RunDetail> = /*@__PURE__*/
-  messageDesc(file_viewer, 5);
+  messageDesc(file_viewer, 6);
 
 /**
  * @generated from message snek.Point
@@ -439,7 +499,7 @@ export type Point = Message<"snek.Point"> & {
  * Use `create(PointSchema)` to create a new message.
  */
 export const PointSchema: GenMessage<Point> = /*@__PURE__*/
-  messageDesc(file_viewer, 6);
+  messageDesc(file_viewer, 7);
 
 /**
  * One snake's state and search readout at a single turn.
@@ -498,7 +558,7 @@ export type SnakeFrame = Message<"snek.SnakeFrame"> & {
  * Use `create(SnakeFrameSchema)` to create a new message.
  */
 export const SnakeFrameSchema: GenMessage<SnakeFrame> = /*@__PURE__*/
-  messageDesc(file_viewer, 7);
+  messageDesc(file_viewer, 8);
 
 /**
  * @generated from message snek.Frame
@@ -540,7 +600,7 @@ export type Frame = Message<"snek.Frame"> & {
  * Use `create(FrameSchema)` to create a new message.
  */
 export const FrameSchema: GenMessage<Frame> = /*@__PURE__*/
-  messageDesc(file_viewer, 8);
+  messageDesc(file_viewer, 9);
 
 /**
  * @generated from message snek.Game
@@ -569,7 +629,7 @@ export type Game = Message<"snek.Game"> & {
  * Use `create(GameSchema)` to create a new message.
  */
 export const GameSchema: GenMessage<Game> = /*@__PURE__*/
-  messageDesc(file_viewer, 9);
+  messageDesc(file_viewer, 10);
 
 /**
  * @generated from message snek.GameFile
@@ -598,5 +658,5 @@ export type GameFile = Message<"snek.GameFile"> & {
  * Use `create(GameFileSchema)` to create a new message.
  */
 export const GameFileSchema: GenMessage<GameFile> = /*@__PURE__*/
-  messageDesc(file_viewer, 10);
+  messageDesc(file_viewer, 11);
 

@@ -9,15 +9,16 @@ type Props = { runId: string; evalPoints: EvalPoint[] };
 // seat parity the new net played and which side won, in game order.
 type EvalGameMeta = { a_first?: boolean; winner?: "A" | "B" | null };
 
-// Browse recorded eval matches. Every eval_turns generations the trainer plays
-// the current checkpoint against an older one on pinned CPU cores; all games
-// are recorded in the same schema as self-play samples, so the tiles (board,
-// scrubber, policy popover, value bars) are the same GameTile primitives.
+// Browse the league's recorded matches. A checkpoint joins the league every
+// league_entrant_gens generations and game pairs between pool members run
+// back-to-back on pinned CPU cores; all games are recorded in the same schema
+// as self-play samples, so the tiles (board, scrubber, policy popover, value
+// bars) are the same GameTile primitives.
 export function EvalViewer({ runId, evalPoints }: Props) {
   // API order is oldest first; browse newest first like the sample games list.
-  // Each entry is one matchup (gen vs one opponent), keyed by both gens.
+  // Each entry is one league match, keyed by its match number.
   const points = useMemo(() => [...evalPoints].reverse(), [evalPoints]);
-  const [sel, setSel] = useState<{ gen: number; opp: number } | null>(null);
+  const [sel, setSel] = useState<{ seq: bigint; gen: number; opp: number } | null>(null);
   const [file, setFile] = useState<GameFile | null>(null);
   const [loading, setLoading] = useState(false);
   const [fps, setFps] = useState(12);
@@ -26,14 +27,14 @@ export function EvalViewer({ runId, evalPoints }: Props) {
 
   useEffect(() => {
     if (followLatest && points.length)
-      setSel({ gen: points[0].gen, opp: points[0].opponentGen });
+      setSel({ seq: points[0].seq, gen: points[0].gen, opp: points[0].opponentGen });
   }, [followLatest, points]);
 
   useEffect(() => {
     if (sel == null) return;
     let alive = true;
     setLoading(true);
-    getEvalGameFile(runId, sel.gen, sel.opp)
+    getEvalGameFile(runId, sel.seq, sel.gen, sel.opp)
       .then((next) => alive && setFile(next))
       .catch(() => alive && setFile(null))
       .finally(() => alive && setLoading(false));
@@ -43,7 +44,9 @@ export function EvalViewer({ runId, evalPoints }: Props) {
   }, [runId, sel]);
 
   const selected =
-    points.find((p) => p.gen === sel?.gen && p.opponentGen === sel?.opp) ?? null;
+    points.find(
+      (p) => p.seq === sel?.seq && p.gen === sel?.gen && p.opponentGen === sel?.opp,
+    ) ?? null;
   const games = file?.games ?? [];
   // Per-game seat/winner metadata rides along in the file's config slot.
   const gameMeta = useMemo<EvalGameMeta[]>(() => {
@@ -60,8 +63,10 @@ export function EvalViewer({ runId, evalPoints }: Props) {
   if (points.length === 0) {
     return (
       <div className="rounded border border-slate-800 bg-slate-900 p-4 text-sm text-slate-400">
-        No evaluations yet. Set <span className="font-mono">eval_turns</span> in the run config to play the
-        current net against an older checkpoint every N generations (CPU, concurrent with training).
+        No completed league matches yet. The league needs two checkpoints in the pool (the first joins at
+        gen <span className="font-mono">league_entrant_gens</span>), then plays game pairs back-to-back on CPU —
+        the first result lands a few minutes after that. Set{" "}
+        <span className="font-mono">league_entrant_gens</span> to 0 in the run config to disable it.
       </div>
     );
   }
@@ -83,14 +88,15 @@ export function EvalViewer({ runId, evalPoints }: Props) {
         </div>
         <div className="max-h-[34rem] overflow-y-auto">
           {points.map((p) => {
-            const active = p.gen === sel?.gen && p.opponentGen === sel?.opp;
+            const active =
+              p.seq === sel?.seq && p.gen === sel?.gen && p.opponentGen === sel?.opp;
             const decisive = p.wins + p.losses;
             return (
               <button
-                key={`${p.gen}-${p.opponentGen}`}
+                key={`${p.seq}-${p.gen}-${p.opponentGen}`}
                 onClick={() => {
                   setFollowLatest(false);
-                  setSel({ gen: p.gen, opp: p.opponentGen });
+                  setSel({ seq: p.seq, gen: p.gen, opp: p.opponentGen });
                 }}
                 className={`flex w-full flex-col gap-0.5 border-b border-slate-800/60 px-3 py-2 text-left ${active ? "bg-sky-950/60" : "hover:bg-slate-800/50"}`}
               >
@@ -98,12 +104,8 @@ export function EvalViewer({ runId, evalPoints }: Props) {
                   gen {p.gen} <span className="font-normal text-slate-500">vs {p.opponentGen}</span>
                 </span>
                 <span className="font-mono text-[10px] text-slate-500">
-                  {p.wins}-{p.losses}
-                  {p.draws > 0 ? `-${p.draws}d` : ""} · elo{" "}
-                  <span className={p.elo >= 0 ? "text-emerald-400" : "text-red-400"}>
-                    {p.elo >= 0 ? "+" : ""}
-                    {p.elo.toFixed(0)}
-                  </span>
+                  #{String(p.seq)} · {p.wins}-{p.losses}
+                  {p.draws > 0 ? `-${p.draws}d` : ""}
                   {decisive === 0 ? " · all draws" : ""}
                 </span>
               </button>

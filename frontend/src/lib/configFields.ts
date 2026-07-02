@@ -24,10 +24,9 @@ export const configFields: Array<{ key: keyof RunConfig; label: string; hint?: s
   { key: "value_weight", label: "Value weight" },
   { key: "search_threads", label: "Threads" },
   { key: "sample_games", label: "Sample games", hint: "recorded per gen" },
-  // Concurrent CPU arena eval (current vs eval_turns-old checkpoint).
-  { key: "eval_turns", label: "Eval every", hint: "gens · 0 disables" },
-  { key: "eval_games", label: "Eval games", hint: "per eval point" },
-  { key: "eval_sims", label: "Eval sims", hint: "per move, CPU" },
-  { key: "eval_opponents", label: "Eval opponents", hint: "1x,2x,4x… turns back" },
-  { key: "eval_cores", label: "Eval cores", hint: "per side" },
+  // Continuous CPU evaluation league (checkpoint-vs-checkpoint arena matches
+  // running back-to-back while the run is active).
+  { key: "league_entrant_gens", label: "League entrant", hint: "every N gens · 0 off" },
+  { key: "eval_sims", label: "League sims", hint: "per move, CPU" },
+  { key: "eval_cores", label: "League cores", hint: "per side" },
 ];

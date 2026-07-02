@@ -28,22 +28,16 @@ pub struct RunConfig {
     /// How many self-play games to record as browsable samples each generation.
     #[serde(default = "default_sample_games")]
     pub sample_games: usize,
-    /// Run a CPU arena eval (current checkpoint vs the one this many gens back)
-    /// every this many generations, concurrent with training. 0 disables.
-    #[serde(default = "default_eval_turns")]
-    pub eval_turns: usize,
-    /// Games per eval match (played as mirrored seat-swapped pairs).
-    #[serde(default = "default_eval_games")]
-    pub eval_games: usize,
+    /// A new checkpoint joins the evaluation league every this many
+    /// generations; league matches between pool members then run back-to-back
+    /// on CPU for as long as the run is active. 0 disables the league.
+    /// (`alias`: pre-league configs called this eval_turns.)
+    #[serde(default = "default_league_entrant_gens", alias = "eval_turns")]
+    pub league_entrant_gens: usize,
     /// Fixed MCTS sims per eval move (deterministic, CPU).
     #[serde(default = "default_eval_sims")]
     pub eval_sims: usize,
-    /// Past checkpoints each eval point plays, exponentially spaced at 1×, 2×,
-    /// 4×… eval_turns generations back (clamped at gen 0, deduped). Short
-    /// horizons show "still improving?", long ones show progress over time.
-    #[serde(default = "default_eval_opponents")]
-    pub eval_opponents: usize,
-    /// CPU cores pinned to each side of the eval match.
+    /// CPU cores pinned to each side of a league match.
     #[serde(default = "default_eval_cores")]
     pub eval_cores: usize,
 }
@@ -52,20 +46,12 @@ fn default_sample_games() -> usize {
     8
 }
 
-fn default_eval_turns() -> usize {
+fn default_league_entrant_gens() -> usize {
     5
-}
-
-fn default_eval_games() -> usize {
-    16
 }
 
 fn default_eval_sims() -> usize {
     128
-}
-
-fn default_eval_opponents() -> usize {
-    3
 }
 
 fn default_eval_cores() -> usize {
@@ -110,10 +96,8 @@ impl Default for RunConfig {
             value_weight: 1.0,
             search_threads: 0,
             sample_games: default_sample_games(),
-            eval_turns: default_eval_turns(),
-            eval_games: default_eval_games(),
+            league_entrant_gens: default_league_entrant_gens(),
             eval_sims: default_eval_sims(),
-            eval_opponents: default_eval_opponents(),
             eval_cores: default_eval_cores(),
         }
     }

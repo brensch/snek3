@@ -12,7 +12,7 @@ import { useLiveStats } from "../hooks/useLiveStats";
 import { useLogs } from "../hooks/useLogs";
 import { useRunDetail } from "../hooks/useRunDetail";
 import { Phase } from "../gen/snek_pb";
-import type { EvalPoint, MetricRow } from "../gen/viewer_pb";
+import type { MetricRow } from "../gen/viewer_pb";
 import type { RunConfig } from "../types";
 
 // Per-generation charts, driven off metrics.jsonl. Related metrics are grouped
@@ -120,19 +120,10 @@ export function RunView() {
 
   const metrics = detail?.metrics ?? [];
   const evalPoints = detail?.evalPoints ?? [];
-  // Each eval point plays several past checkpoints at exponentially spaced
-  // horizons (vs -5, -10, -20 gens…). One chart per horizon: short horizons
-  // show whether the net is still improving, long ones show progress over time.
-  const evalHorizons = useMemo(() => {
-    const byHorizon = new Map<number, EvalPoint[]>();
-    for (const p of evalPoints) {
-      const h = p.gen - p.opponentGen;
-      const arr = byHorizon.get(h);
-      if (arr) arr.push(p);
-      else byHorizon.set(h, [p]);
-    }
-    return [...byHorizon.entries()].sort((a, b) => a[0] - b[0]);
-  }, [evalPoints]);
+  // Bradley–Terry ratings from the continuous evaluation league, ascending by
+  // generation and anchored at the earliest rated net (Elo 0) — the run's
+  // head-to-head progress curve.
+  const league = detail?.league ?? [];
   const genLeft = metrics.length ? `gen ${metrics[0].generation}` : "";
   const genRight = metrics.length ? `gen ${metrics[metrics.length - 1].generation}` : "";
   const gens = metrics.map((m) => m.generation);
@@ -228,18 +219,17 @@ export function RunView() {
                 {winRates.length > 0 && (
                   <SeriesChart values={winRates.map((m) => m.winRate)} label="Win rate" color="#22c55e" fixedMax={1} digits={2} xValues={winRates.map((m) => m.generation)} />
                 )}
-                {/* Head-to-head evals, one chart per opponent horizon: >0 Elo
-                    means the current net beats the checkpoint that many gens back. */}
-                {evalHorizons.map(([h, pts], i) => (
+                {/* The league's fitted Elo per checkpoint (anchored at the
+                    earliest rated gen = 0): the head-to-head progress curve. */}
+                {league.length > 1 && (
                   <SeriesChart
-                    key={`eval-${h}`}
-                    values={pts.map((e) => e.elo)}
-                    label={`Eval Elo vs -${h} gens`}
-                    color={["#22c55e", "#38bdf8", "#f59e0b", "#e879f9", "#f87171"][i % 5]}
+                    values={league.map((r) => r.elo)}
+                    label="League Elo"
+                    color="#22c55e"
                     digits={0}
-                    xValues={pts.map((e) => e.gen)}
+                    xValues={league.map((r) => r.gen)}
                   />
-                ))}
+                )}
                 {lrRows.length > 0 && (
                   <SeriesChart values={lrRows.map((m) => m.lr)} label="Learning rate" color="#f97316" digits={5} xValues={lrRows.map((m) => m.generation)} />
                 )}

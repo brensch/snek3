@@ -209,6 +209,10 @@ impl TrainerHandle {
             games = sp.boards.len(),
             fin = sp.finished.len(),
         ));
+        // Continuous CPU evaluation league: plays checkpoint-vs-checkpoint arena
+        // matches on pinned cores for as long as the run is active, maintaining
+        // Bradley–Terry Elo ratings in runs/<id>/eval/. Stops when we stop.
+        crate::eval::start_league(paths.clone(), self.clone(), self.stop.clone());
 
         while !self.stop.load(Ordering::Relaxed) {
             let cfg = self.config();
@@ -298,8 +302,6 @@ impl TrainerHandle {
             vs.save(&paths.net)?;
             // Also archive this generation's weights, kept forever.
             vs.save(&paths.checkpoint_net(state.generation))?;
-            // Concurrent CPU arena eval against an older checkpoint, if due.
-            crate::eval::maybe_spawn(&paths, &cfg, state.generation, self.metrics.clone());
             append_metric(
                 &paths.metrics,
                 &GenRecord {

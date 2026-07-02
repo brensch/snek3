@@ -27,13 +27,10 @@ export type RunConfig = {
   value_weight: number;
   search_threads: number;
   sample_games: number;
-  // Concurrent CPU arena eval: every eval_turns generations the trainer plays
-  // the current checkpoint against the one eval_turns back. 0 disables.
-  eval_turns: number;
-  eval_games: number;
+  // Continuous CPU evaluation league: a checkpoint joins the pool every this
+  // many gens; game pairs run back-to-back while the run is active. 0 disables.
+  league_entrant_gens: number;
   eval_sims: number;
-  // Past checkpoints per eval point, exponentially spaced (1x, 2x, 4x… eval_turns back).
-  eval_opponents: number;
   eval_cores: number;
 };
 

@@ -772,6 +772,24 @@ fn main() {
             out.turns,
             out.wall_ms as f64 / 1000.0,
         );
+        // Machine-readable per-game event for whoever drives us as a child
+        // process (the trainer's league updates Elo after every game). stdout
+        // is block-buffered when piped, so flush each line.
+        {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            let _ = writeln!(
+                stdout,
+                "{}",
+                json!({
+                    "event": "game",
+                    "index": out.game_index,
+                    "winner": out.winner.map(Side::label),
+                    "turns": out.turns,
+                })
+            );
+            let _ = stdout.flush();
+        }
         games.push(out);
     }
     for r in runners {

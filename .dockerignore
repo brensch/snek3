@@ -6,7 +6,7 @@ crates/**/target
 **/__pycache__
 **/node_modules
 crates/snek-server/viewer/dist
-frontend
+frontend/dist
 logs
 *.pt
 *.onnx

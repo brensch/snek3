@@ -52,14 +52,16 @@ pub fn run_detail(
         metrics: metrics(root),
         game_gens: game_gens(root),
         eval_points: eval_points(root),
+        league: league(root),
     }
 }
 
-/// A run's eval history (eval/summary.jsonl), oldest first.
+/// A run's league match history (eval/summary.jsonl), oldest first.
 fn eval_points(root: &Path) -> Vec<proto::EvalPoint> {
     crate::eval::read_summaries(root)
         .into_iter()
         .map(|s| proto::EvalPoint {
+            seq: s.seq,
             gen: s.gen,
             opponent_gen: s.opponent_gen,
             games: s.games,
@@ -79,12 +81,36 @@ fn eval_points(root: &Path) -> Vec<proto::EvalPoint> {
         .collect()
 }
 
-/// Load one eval matchup's recorded games (eval/eval_GGGG_vs_OOOO.json, with a
-/// fallback to the older single-opponent eval_GGGG.json name). Same schema and
-/// wire format as self-play sample games, so the frontend reuses one viewer.
-pub fn eval_game_file(root: &Path, gen: u32, opponent_gen: u32) -> Option<proto::GameFile> {
+/// The latest Bradley–Terry league fit (eval/ratings.json), ascending by gen.
+fn league(root: &Path) -> Vec<proto::LeagueRating> {
+    crate::eval::read_ratings(root)
+        .ratings
+        .into_iter()
+        .map(|r| proto::LeagueRating {
+            gen: r.gen,
+            elo: r.elo,
+            games: r.games,
+            wins: r.wins,
+            losses: r.losses,
+            draws: r.draws,
+        })
+        .collect()
+}
+
+/// Load one league match's recorded games (eval/match_SSSSSS_GGGG_vs_OOOO.json,
+/// with fallbacks to the older pre-league filenames). Same schema and wire
+/// format as self-play sample games, so the frontend reuses one viewer.
+pub fn eval_game_file(
+    root: &Path,
+    seq: u64,
+    gen: u32,
+    opponent_gen: u32,
+) -> Option<proto::GameFile> {
     let dir = root.join("eval");
-    let mut path = dir.join(format!("eval_{gen:04}_vs_{opponent_gen:04}.json"));
+    let mut path = dir.join(format!("match_{seq:06}_{gen:04}_vs_{opponent_gen:04}.json"));
+    if !path.exists() {
+        path = dir.join(format!("eval_{gen:04}_vs_{opponent_gen:04}.json"));
+    }
     if !path.exists() {
         path = dir.join(format!("eval_{gen:04}.json"));
     }

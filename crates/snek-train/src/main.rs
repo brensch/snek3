@@ -55,10 +55,16 @@ async fn main() -> anyhow::Result<()> {
             config: None,
         })?;
     }
-    let static_dir = args.static_dir.join("index.html").is_file().then_some(args.static_dir.as_path());
+    let static_dir = args
+        .static_dir
+        .join("index.html")
+        .is_file()
+        .then_some(args.static_dir.as_path());
     match static_dir {
         Some(dir) => tracing::info!(dir = %dir.display(), "serving frontend"),
-        None => tracing::warn!(dir = %args.static_dir.display(), "no built frontend found; serving API only"),
+        None => {
+            tracing::warn!(dir = %args.static_dir.display(), "no built frontend found; serving API only")
+        }
     }
     let app = api::router(trainer, static_dir);
     tracing::info!(bind = %args.bind, "snek-train API listening");
