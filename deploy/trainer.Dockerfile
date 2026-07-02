@@ -50,6 +50,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/crates/snek-train/target \
     cargo build --release --manifest-path crates/snek-train/Cargo.toml \
     && cp crates/snek-train/target/release/snek-train /usr/local/bin/snek-train
+# The eval league spawns the arena binary (snek-server crate) for its
+# net-vs-net games. Building just --bin arena skips the server's RustEmbed'd
+# viewer assets (crates/snek-server/viewer/dist is dockerignored).
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/crates/snek-server/target \
+    cargo build --release --manifest-path crates/snek-server/Cargo.toml --bin arena \
+    && cp crates/snek-server/target/release/arena /usr/local/bin/arena
 
 # --- runtime
 FROM debian:bookworm-slim
@@ -66,10 +73,12 @@ RUN set -eu; \
             --wildcards '*/tailscale' '*/tailscaled'
 COPY --from=builder /opt/libtorch/lib /opt/libtorch/lib
 COPY --from=builder /usr/local/bin/snek-train /app/snek-train
+COPY --from=builder /usr/local/bin/arena /app/arena
 COPY --from=frontend /frontend/dist /app/frontend/dist
 COPY deploy/tailscale-dashboard.sh deploy/trainer-entrypoint.sh /app/
 ENV LD_LIBRARY_PATH=/opt/libtorch/lib \
-    RUNS_DIR=/runs
+    RUNS_DIR=/runs \
+    SNEK_ARENA_BIN=/app/arena
 # The dashboard binds 127.0.0.1 by default (tailnet-only via the tunnel).
 # Set BIND=0.0.0.0:8050 to reach it through a mapped port instead.
 EXPOSE 8050
