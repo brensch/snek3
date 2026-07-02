@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
+import type { LiveEval } from "../api/eval";
 import { getEvalGameFile } from "../api/proto";
 import type { EvalPoint, GameFile } from "../gen/viewer_pb";
+import { useEvalLive } from "../hooks/useEvalLive";
 import { GameTile } from "./GameTile";
 
-type Props = { runId: string; evalPoints: EvalPoint[] };
+type Props = { runId: string; evalPoints: EvalPoint[]; live: boolean };
 
 // Per-game metadata the arena stores in the eval file's config slot: which
 // seat parity the new net played and which side won, in game order.
@@ -14,7 +16,8 @@ type EvalGameMeta = { a_first?: boolean; winner?: "A" | "B" | null };
 // back-to-back on pinned CPU cores; all games are recorded in the same schema
 // as self-play samples, so the tiles (board, scrubber, policy popover, value
 // bars) are the same GameTile primitives.
-export function EvalViewer({ runId, evalPoints }: Props) {
+export function EvalViewer({ runId, evalPoints, live }: Props) {
+  const liveMatch = useEvalLive(live);
   // API order is oldest first; browse newest first like the sample games list.
   // Each entry is one league match, keyed by its match number.
   const points = useMemo(() => [...evalPoints].reverse(), [evalPoints]);
@@ -62,17 +65,22 @@ export function EvalViewer({ runId, evalPoints }: Props) {
 
   if (points.length === 0) {
     return (
-      <div className="rounded border border-slate-800 bg-slate-900 p-4 text-sm text-slate-400">
-        No completed league matches yet. The league needs two checkpoints in the pool (the first joins at
-        gen <span className="font-mono">league_entrant_gens</span>), then plays game pairs back-to-back on CPU —
-        the first result lands a few minutes after that. Set{" "}
-        <span className="font-mono">league_entrant_gens</span> to 0 in the run config to disable it.
+      <div className="grid gap-3">
+        <LiveMatchBanner live={liveMatch} />
+        <div className="rounded border border-slate-800 bg-slate-900 p-4 text-sm text-slate-400">
+          No completed league matches yet. The league needs two checkpoints in the pool (the first joins at
+          gen <span className="font-mono">league_entrant_gens</span>), then plays game pairs back-to-back on CPU —
+          the first result lands a few minutes after that. Set{" "}
+          <span className="font-mono">league_entrant_gens</span> to 0 in the run config to disable it.
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[14rem_minmax(0,1fr)] lg:items-start">
+    <div className="grid gap-3">
+      <LiveMatchBanner live={liveMatch} />
+      <div className="grid gap-4 lg:grid-cols-[14rem_minmax(0,1fr)] lg:items-start">
       <div className="rounded border border-slate-800 bg-slate-900">
         <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
           <span className="section-title">Eval points</span>
@@ -148,7 +156,34 @@ export function EvalViewer({ runId, evalPoints }: Props) {
             ))}
           </div>
         )}
+        </div>
       </div>
+    </div>
+  );
+}
+
+// The league match being played right now (streamed over SSE): the pairing,
+// the running tally, and which turn each in-flight game is up to.
+function LiveMatchBanner({ live }: { live: LiveEval | null }) {
+  if (!live?.active) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-emerald-900/60 bg-emerald-950/30 px-3 py-2 text-xs text-slate-300">
+      <span className="flex items-center gap-1.5 font-semibold text-emerald-400">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+        live match #{live.seq}
+      </span>
+      <span className="font-mono">
+        gen_{String(live.gen_a).padStart(4, "0")} vs gen_{String(live.gen_b).padStart(4, "0")}
+      </span>
+      <span>
+        {live.wins + live.losses + live.draws}/{live.games_total} done · {live.wins}-{live.losses}
+        {live.draws > 0 ? `-${live.draws}d` : ""}
+      </span>
+      {live.games.map((g) => (
+        <span key={g.index} className="font-mono text-slate-400">
+          game {g.index}: turn {g.turn}
+        </span>
+      ))}
     </div>
   );
 }

@@ -32,11 +32,14 @@ fn main() {
 
     if lib.join("libtorch_cuda.so").exists() {
         let api_inc = inc.join("torch/csrc/api/include");
-        // Host-compilable CUDA headers: the `nvidia-cuda-runtime` wheel ships
-        // them flat (no `crt/` subdir), so cuda_runtime.h's `#include "crt/..."`
-        // fails. Triton bundles a complete, version-matched (12.8) CUDA include
-        // tree.
-        let cuda_inc = torch.join("../triton/backends/nvidia/include");
+        // Host-compilable CUDA headers: `SNEK_CUDA_INC` if set (e.g. a CUDA
+        // toolkit's include dir in the docker build). Default to triton's
+        // bundled, version-matched (12.8) include tree — the venv's
+        // `nvidia-cuda-runtime` wheel ships its headers flat (no `crt/`
+        // subdir), so cuda_runtime.h's `#include "crt/..."` fails there.
+        let cuda_inc = std::env::var("SNEK_CUDA_INC")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| torch.join("../triton/backends/nvidia/include"));
 
         if !inc.join("ATen/cuda/CUDAGraph.h").exists() {
             panic!(
@@ -69,4 +72,5 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/graph_shim.cpp");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=SNEK_TORCH_DIR");
+    println!("cargo:rerun-if-env-changed=SNEK_CUDA_INC");
 }

@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -335,7 +335,7 @@ fn run(
 /// write. Keeps the recorder thread free to keep appending records for other
 /// in-flight games while one game compresses (zstd-19 can take a while).
 fn finalize(
-    dir: &PathBuf,
+    dir: &Path,
     model: &str,
     config: &Value,
     game_id: String,
@@ -343,14 +343,14 @@ fn finalize(
     how: Finish,
     zstd_level: i32,
 ) {
-    let (dir, model, config) = (dir.clone(), model.to_string(), config.clone());
+    let (dir, model, config) = (dir.to_path_buf(), model.to_string(), config.clone());
     std::thread::spawn(move || {
         write_game(&dir, &model, &config, &game_id, &log, how, zstd_level);
     });
 }
 
 fn write_game(
-    dir: &PathBuf,
+    dir: &Path,
     model: &str,
     config: &Value,
     game_id: &str,
@@ -422,6 +422,22 @@ fn write_game(
             final_path.display()
         );
         let _ = fs::remove_file(&tmp_path);
+    }
+}
+
+fn safe_log_stem(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().max(1));
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown_game".into()
+    } else {
+        out
     }
 }
 
@@ -533,21 +549,5 @@ mod tests {
         // No meta seen → ruleset omitted.
         assert!(doc.get("ruleset").is_none());
         let _ = fs::remove_file(dir.join("game-inc.json.zst"));
-    }
-}
-
-fn safe_log_stem(s: &str) -> String {
-    let mut out = String::with_capacity(s.len().max(1));
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-            out.push(c);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.is_empty() {
-        "unknown_game".into()
-    } else {
-        out
     }
 }

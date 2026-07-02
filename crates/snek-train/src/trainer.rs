@@ -25,6 +25,10 @@ pub struct TrainerHandle {
     running: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     cuda_active: Arc<AtomicBool>,
+    /// Set while a GPU batch-size benchmark is sweeping. Bench and a training run
+    /// both want exclusive use of the GPU, so each refuses to start while the
+    /// other holds this / `running`.
+    bench_active: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +50,7 @@ impl TrainerHandle {
             running: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
             cuda_active: Arc::new(AtomicBool::new(false)),
+            bench_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -62,6 +67,9 @@ impl TrainerHandle {
     }
 
     pub fn start(&self, req: StartRequest) -> anyhow::Result<String> {
+        if self.bench_active.load(Ordering::SeqCst) {
+            anyhow::bail!("a GPU benchmark is running — wait for it to finish");
+        }
         if self.running.swap(true, Ordering::SeqCst) {
             return self
                 .active_run
@@ -104,6 +112,24 @@ impl TrainerHandle {
 
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
+    }
+
+    /// Claim the GPU for a benchmark sweep. Fails if a training run is active or a
+    /// benchmark is already in flight; the caller must pair success with
+    /// [`end_bench`]. Returns an error whose message explains the refusal.
+    pub fn try_begin_bench(&self) -> anyhow::Result<()> {
+        if self.running.load(Ordering::SeqCst) {
+            anyhow::bail!("a training run is active — stop it before benchmarking");
+        }
+        if self.bench_active.swap(true, Ordering::SeqCst) {
+            anyhow::bail!("a GPU benchmark is already running");
+        }
+        Ok(())
+    }
+
+    /// Release the GPU claimed by [`try_begin_bench`].
+    pub fn end_bench(&self) {
+        self.bench_active.store(false, Ordering::SeqCst);
     }
 
     /// Emit a trainer event to the terminal and the frontend log stream.
@@ -174,7 +200,6 @@ impl TrainerHandle {
             snek_core::NUM_CHANNELS as i64,
             cfg.trunk_channels,
             cfg.trunk_blocks,
-            cfg.gpool_every,
         );
         if !fresh && paths.net.exists() {
             vs.load(&paths.net)?;
@@ -301,7 +326,7 @@ impl TrainerHandle {
             self.metrics.set_phase(Phase::Checkpoint);
             vs.save(&paths.net)?;
             // Also archive this generation's weights, kept forever.
-            vs.save(&paths.checkpoint_net(state.generation))?;
+            vs.save(paths.checkpoint_net(state.generation))?;
             append_metric(
                 &paths.metrics,
                 &GenRecord {

@@ -82,6 +82,18 @@ struct Args {
     out: Option<String>,
     record: Option<String>,
     record_gen: u32,
+    events: bool,
+}
+
+/// One machine-readable JSON line on stdout, for a parent process driving us
+/// (per-game results always; per-turn progress with --events). stdout is
+/// block-buffered when piped, so flush each line; `stdout().lock()` inside
+/// `writeln!` keeps concurrent runners' lines whole.
+fn emit_event(value: serde_json::Value) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout();
+    let _ = writeln!(stdout, "{value}");
+    let _ = stdout.flush();
 }
 
 /// On-disk mirror of the recorded-game schema in `snek-train`'s `sample.rs`
@@ -162,7 +174,9 @@ output:
   --record PATH       record every game (frames + search readout) as a
                       viewer-compatible games file (same schema as the
                       trainer's games/gen_NNNN.json)
-  --record-gen N      the generation label stamped into --record (0)"
+  --record-gen N      the generation label stamped into --record (0)
+  --events            stream per-turn progress as JSON lines on stdout (for
+                      a parent process; per-game results always stream)"
     );
     std::process::exit(2);
 }
@@ -192,6 +206,7 @@ fn parse_args() -> Args {
     let mut out = None;
     let mut record = None;
     let mut record_gen = 0u32;
+    let mut events = false;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -231,6 +246,7 @@ fn parse_args() -> Args {
             "--out" => out = Some(val("--out")),
             "--record" => record = Some(val("--record")),
             "--record-gen" => record_gen = parse_num(&val("--record-gen"), "--record-gen"),
+            "--events" => events = true,
             "--help" | "-h" => usage(),
             other => {
                 eprintln!("arena: unknown argument {other}");
@@ -277,6 +293,7 @@ fn parse_args() -> Args {
         out,
         record,
         record_gen,
+        events,
     }
 }
 
@@ -474,6 +491,7 @@ fn play_game(
     board_size: i8,
     max_turns: u32,
     record: bool,
+    events: bool,
     a: &Worker,
     b: &Worker,
 ) -> GameOutcome {
@@ -533,6 +551,14 @@ fn play_game(
             frames.push(frame_from_board(&board, &moves, &infos));
         }
         board.step_and_spawn(&moves, &mut rng);
+        if events {
+            emit_event(json!({
+                "event": "turn",
+                "index": game_index,
+                "turn": board.turn,
+                "alive": board.alive_count(),
+            }));
+        }
     }
     let (a_alive, b_alive) = alive_sides(&board);
     let winner = match (a_alive, b_alive) {
@@ -723,6 +749,7 @@ fn main() {
         );
         let tx = result_tx.clone();
         let record = args.record.is_some();
+        let events = args.events;
         let (games, base_seed, snakes, board, max_turns) = (
             args.games,
             args.seed,
@@ -740,8 +767,8 @@ fn main() {
                         break;
                     }
                     let out = play_game(
-                        game_index, seed, a_first, snakes, board, max_turns, record, &worker_a,
-                        &worker_b,
+                        game_index, seed, a_first, snakes, board, max_turns, record, events,
+                        &worker_a, &worker_b,
                     );
                     if tx.send(out).is_err() {
                         return;
@@ -772,24 +799,14 @@ fn main() {
             out.turns,
             out.wall_ms as f64 / 1000.0,
         );
-        // Machine-readable per-game event for whoever drives us as a child
-        // process (the trainer's league updates Elo after every game). stdout
-        // is block-buffered when piped, so flush each line.
-        {
-            use std::io::Write;
-            let mut stdout = std::io::stdout();
-            let _ = writeln!(
-                stdout,
-                "{}",
-                json!({
-                    "event": "game",
-                    "index": out.game_index,
-                    "winner": out.winner.map(Side::label),
-                    "turns": out.turns,
-                })
-            );
-            let _ = stdout.flush();
-        }
+        // Per-game event for whoever drives us as a child process (the
+        // trainer's league updates Elo after every game).
+        emit_event(json!({
+            "event": "game",
+            "index": out.game_index,
+            "winner": out.winner.map(Side::label),
+            "turns": out.turns,
+        }));
         games.push(out);
     }
     for r in runners {

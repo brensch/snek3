@@ -3,8 +3,9 @@
 #
 #   docker build -f deploy/server.Dockerfile -t snek3-api .
 #
-# libtorch comes from the torch==2.11.0+cpu wheel — the exact version
-# torch-sys 0.24 pins, so no version bypass is needed.
+# libtorch comes from PyTorch's official python-free C++ bundle
+# (libtorch-shared-with-deps, cpu) — the exact 2.11.0 torch-sys 0.24 pins.
+# No Python in any stage.
 
 # --- viewer: the embedded /app SPA (rust-embed folds viewer/dist into the binary)
 FROM node:22-slim AS viewer
@@ -14,37 +15,36 @@ RUN npm ci
 COPY crates/snek-server/viewer .
 RUN npm run build
 
-# --- builder: compile snek-server against the CPU libtorch from the torch wheel
+# --- builder: compile snek-server against the CPU libtorch bundle
 FROM rust:1-bookworm AS builder
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3-venv \
+    && apt-get install -y --no-install-recommends unzip \
     && rm -rf /var/lib/apt/lists/*
-# Old pips mis-handle the PyTorch index's package-name normalization
-# (typing_extensions vs typing-extensions), so upgrade pip first.
-RUN python3 -m venv /opt/torch-venv \
-    && /opt/torch-venv/bin/pip install --no-cache-dir -U pip \
-    && /opt/torch-venv/bin/pip install --no-cache-dir \
-       torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
-RUN ln -s "$(/opt/torch-venv/bin/python3 -c 'import torch, os; print(os.path.dirname(torch.__file__))')" /opt/torch
-ENV PATH=/opt/torch-venv/bin:$PATH \
-    LIBTORCH_USE_PYTORCH=1 \
-    SNEK_TORCH_DIR=/opt/torch
+# No libtorch_cuda.so in the CPU bundle, so the snek-tch CUDA-graph shim is
+# compiled out (no CUDA headers needed). Python bindings dropped up front.
+RUN curl -fsSL -o /tmp/libtorch.zip \
+        "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-2.11.0%2Bcpu.zip" \
+    && unzip -q /tmp/libtorch.zip -d /opt \
+    && rm /tmp/libtorch.zip /opt/libtorch/lib/libtorch_python.so
+ENV LIBTORCH=/opt/libtorch \
+    SNEK_TORCH_DIR=/opt/libtorch
 WORKDIR /src
 # snek-server is a detached workspace, but its path deps (snek-core,
 # snek-search, snek-tch) resolve through the root workspace manifest.
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY --from=viewer /viewer/dist crates/snek-server/viewer/dist
-RUN cargo build --release --manifest-path crates/snek-server/Cargo.toml --bin snek-server
-# Runtime shared libs, minus the Python bindings the binary never links.
-RUN mkdir -p /opt/torch-lib \
-    && cp /opt/torch/lib/*.so* /opt/torch-lib/ \
-    && rm -f /opt/torch-lib/libtorch_python.so
+# Cache mounts keep the dep graph compiled across builds; only changed crates
+# rebuild. The binary is copied out because the target dir isn't in the layer.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/crates/snek-server/target \
+    cargo build --release --manifest-path crates/snek-server/Cargo.toml --bin snek-server \
+    && cp crates/snek-server/target/release/snek-server /usr/local/bin/snek-server
 
 # --- runtime
 FROM debian:bookworm-slim
-COPY --from=builder /opt/torch-lib /opt/torch/lib
-COPY --from=builder /src/crates/snek-server/target/release/snek-server /app/snek-server
+COPY --from=builder /opt/libtorch/lib /opt/torch/lib
+COPY --from=builder /usr/local/bin/snek-server /app/snek-server
 COPY checkpoints/serving.safetensors /app/net.safetensors
 COPY checkpoints/serving.json /app/net.json
 ENV LD_LIBRARY_PATH=/opt/torch/lib \

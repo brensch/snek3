@@ -22,10 +22,12 @@ pub fn router(trainer: TrainerHandle, static_dir: Option<&FsPath>) -> Router {
     let mut router = Router::new()
         .route("/api/stream/stats", get(stream_stats))
         .route("/api/stream/logs", get(stream_logs))
+        .route("/api/stream/eval", get(stream_eval))
         .route("/api/state", get(state))
         .route("/api/config", get(config))
         .route("/api/control/start", post(start))
         .route("/api/control/stop", post(stop))
+        .route("/api/bench/stream", get(bench_stream))
         .route("/api/runs", get(runs))
         .route("/api/runs/:id", get(run_detail))
         .route("/api/runs/:id/config", post(set_run_config))
@@ -72,6 +74,60 @@ async fn stream_logs(
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
+}
+
+/// Live view of the evaluation league's in-flight match (who is playing whom,
+/// which turn each game is up to). Poll-based: the league updates a shared
+/// snapshot as arena events stream in; we emit it once a second.
+async fn stream_eval(
+    State(_trainer): State<TrainerHandle>,
+) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+    let stream = async_stream::stream! {
+        loop {
+            if let Ok(data) = serde_json::to_string(&crate::eval::live()) {
+                yield Ok(Event::default().event("eval").data(data));
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
+}
+
+/// Run a GPU batch-size throughput sweep, streaming progress as JSON events (same
+/// SSE contract as the log stream). Refuses — via a single `error` event — if a
+/// training run is active, since the sweep needs the GPU to itself. The sweep runs
+/// on a dedicated thread; the channel closing ends the stream.
+async fn bench_stream(
+    State(trainer): State<TrainerHandle>,
+) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::bench::BenchEvent>();
+    match trainer.try_begin_bench() {
+        Ok(()) => {
+            let cfg = trainer.config();
+            let handle = trainer.clone();
+            std::thread::spawn(move || {
+                crate::bench::run_sweep(&cfg, &tx);
+                handle.end_bench();
+            });
+        }
+        Err(err) => {
+            // Emit one error event, then let the channel close to end the stream.
+            let _ = tx.send(crate::bench::BenchEvent::Error {
+                detail: err.to_string(),
+            });
+        }
+    }
+    let stream = async_stream::stream! {
+        while let Some(ev) = rx.recv().await {
+            match serde_json::to_string(&ev) {
+                Ok(data) => yield Ok(Event::default().event("bench").data(data)),
+                Err(_) => continue,
             }
         }
     };

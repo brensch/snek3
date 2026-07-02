@@ -11,6 +11,12 @@ pub mod cudagraph;
 
 const GN: i64 = 8;
 
+/// Insert a global-pool context block every Nth residual block (see
+/// [`GPoolBlock`]). A fixed architecture choice matching the archived
+/// `azsnek/net.py`, not a training knob — changing it makes existing checkpoints
+/// weight-incompatible.
+const GPOOL_EVERY: i64 = 3;
+
 /// Observation channel holding the one-hot `my_head` plane (schema v1, see
 /// snek-core `encode.rs`). The policy readout locates the head through it.
 const HEAD_PLANE: i64 = 0;
@@ -153,19 +159,13 @@ pub struct AZNet {
 }
 
 impl AZNet {
-    pub fn new(
-        p: &nn::Path,
-        in_ch: i64,
-        trunk_ch: i64,
-        trunk_blocks: i64,
-        gpool_every: i64,
-    ) -> Self {
+    pub fn new(p: &nn::Path, in_ch: i64, trunk_ch: i64, trunk_blocks: i64) -> Self {
         let blocks = (0..trunk_blocks)
             .map(|i| {
                 GPoolBlock::new(
                     &(p / format!("block{i}")),
                     trunk_ch,
-                    (i + 1) % gpool_every == 0,
+                    (i + 1) % GPOOL_EVERY == 0,
                 )
             })
             .collect();
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn forward_shapes() {
         let vs = nn::VarStore::new(tch::Device::Cpu);
-        let net = AZNet::new(&vs.root(), 14, 32, 2, 2);
+        let net = AZNet::new(&vs.root(), 14, 32, 2);
         init_orthogonal(&vs, 2f64.sqrt());
         let x = Tensor::zeros([6, 14, 11, 11], (Kind::Float, tch::Device::Cpu));
         let (p, v) = net.forward(&x);

@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Recorded match game files kept on disk (newest first); logs/outs likewise.
@@ -91,12 +91,66 @@ pub struct LeagueRating {
     pub draws: u32,
 }
 
-/// A per-game event line the arena prints to stdout as each game finishes.
+/// An event line the arena prints to stdout: "turn" (per-turn progress, with
+/// --events) or "game" (a finished game).
 #[derive(Deserialize)]
 struct GameEvent {
     event: String,
-    /// "A", "B", or null for a draw.
+    #[serde(default)]
+    index: u32,
+    #[serde(default)]
+    turn: u32,
+    /// "A", "B", or null for a draw (game events only).
+    #[serde(default)]
     winner: Option<String>,
+}
+
+/// Real-time state of the in-flight league match, published to the frontend
+/// via the `/api/stream/eval` SSE endpoint. `active: false` between matches.
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveEval {
+    pub active: bool,
+    pub seq: u64,
+    pub gen_a: u32,
+    pub gen_b: u32,
+    pub games_total: u32,
+    /// Cumulative tally for this match; wins count for gen_a.
+    pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
+    /// In-flight games (index within the match, current turn), ascending.
+    pub games: Vec<LiveGame>,
+    pub updated_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveGame {
+    pub index: u32,
+    pub turn: u32,
+}
+
+static LIVE: Mutex<LiveEval> = Mutex::new(LiveEval {
+    active: false,
+    seq: 0,
+    gen_a: 0,
+    gen_b: 0,
+    games_total: 0,
+    wins: 0,
+    losses: 0,
+    draws: 0,
+    games: Vec::new(),
+    updated_unix_ms: 0,
+});
+
+/// Snapshot of the in-flight match state (for the SSE endpoint).
+pub fn live() -> LiveEval {
+    LIVE.lock().unwrap().clone()
+}
+
+fn set_live(update: impl FnOnce(&mut LiveEval)) {
+    let mut live = LIVE.lock().unwrap();
+    update(&mut live);
+    live.updated_unix_ms = chrono::Utc::now().timestamp_millis();
 }
 
 /// The slice of the arena's `--out` JSON we consume.
@@ -310,6 +364,7 @@ fn run_match(
         .arg(&record_path)
         .arg("--out")
         .arg(&out_path)
+        .arg("--events")
         .stdout(std::process::Stdio::piped());
     match std::fs::File::create(&log_path) {
         Ok(log) => {
@@ -324,15 +379,42 @@ fn run_match(
         Ok(child) => child,
         Err(err) => return MatchResult::Failed(format!("spawn: {err}")),
     };
-    // Per-game events arrive on the child's stdout; a reader thread forwards
-    // them so the wait loop below can consume without blocking.
+    // Publish the in-flight match to the live SSE view, and guarantee the
+    // "active" flag drops on every exit path.
+    set_live(|l| {
+        *l = LiveEval {
+            active: true,
+            seq,
+            gen_a,
+            gen_b,
+            games_total: GAMES_PER_MATCH as u32,
+            wins: 0,
+            losses: 0,
+            draws: 0,
+            games: Vec::new(),
+            updated_unix_ms: 0,
+        };
+    });
+    struct LiveClear;
+    impl Drop for LiveClear {
+        fn drop(&mut self) {
+            set_live(|l| {
+                l.active = false;
+                l.games.clear();
+            });
+        }
+    }
+    let _live_clear = LiveClear;
+
+    // Events arrive on the child's stdout; a reader thread forwards them so
+    // the wait loop below can consume without blocking.
     let (event_tx, event_rx) = std::sync::mpsc::channel::<GameEvent>();
     let reader = child.stdout.take().map(|out| {
         std::thread::spawn(move || {
             use std::io::BufRead;
             for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
                 if let Ok(ev) = serde_json::from_str::<GameEvent>(&line) {
-                    if ev.event == "game" && event_tx.send(ev).is_err() {
+                    if event_tx.send(ev).is_err() {
                         break;
                     }
                 }
@@ -340,14 +422,44 @@ fn run_match(
         })
     });
     let (mut wins, mut losses, mut draws) = (0u32, 0u32, 0u32);
-    let mut consume = |ev: GameEvent, wins: &mut u32, losses: &mut u32, draws: &mut u32| match ev
-        .winner
-        .as_deref()
-    {
-        Some("A") => *wins += 1,
-        Some("B") => *losses += 1,
-        _ => *draws += 1,
-    };
+    // "turn" events update the live view; "game" events also advance the tally
+    // and trigger the per-game ratings refit.
+    fn apply_event(
+        ev: GameEvent,
+        wins: &mut u32,
+        losses: &mut u32,
+        draws: &mut u32,
+        on_game: &mut dyn FnMut(u32, u32, u32),
+    ) {
+        match ev.event.as_str() {
+            "turn" => set_live(|l| {
+                match l.games.iter_mut().find(|g| g.index == ev.index) {
+                    Some(game) => game.turn = ev.turn,
+                    None => l.games.push(LiveGame {
+                        index: ev.index,
+                        turn: ev.turn,
+                    }),
+                }
+                l.games.sort_by_key(|g| g.index);
+            }),
+            "game" => {
+                match ev.winner.as_deref() {
+                    Some("A") => *wins += 1,
+                    Some("B") => *losses += 1,
+                    _ => *draws += 1,
+                }
+                let (w, l, d) = (*wins, *losses, *draws);
+                set_live(|live| {
+                    live.wins = w;
+                    live.losses = l;
+                    live.draws = d;
+                    live.games.retain(|g| g.index != ev.index);
+                });
+                on_game(w, l, d);
+            }
+            _ => {}
+        }
+    }
     let status = loop {
         if stop.load(Ordering::Relaxed) {
             let _ = child.kill();
@@ -358,8 +470,7 @@ fn run_match(
             return MatchResult::Stopped;
         }
         while let Ok(ev) = event_rx.try_recv() {
-            consume(ev, &mut wins, &mut losses, &mut draws);
-            on_game(wins, losses, draws);
+            apply_event(ev, &mut wins, &mut losses, &mut draws, on_game);
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -372,8 +483,7 @@ fn run_match(
     }
     // Drain events that landed between the last poll and child exit.
     while let Ok(ev) = event_rx.try_recv() {
-        consume(ev, &mut wins, &mut losses, &mut draws);
-        on_game(wins, losses, draws);
+        apply_event(ev, &mut wins, &mut losses, &mut draws, on_game);
     }
     if !status.success() {
         return MatchResult::Failed(format!(

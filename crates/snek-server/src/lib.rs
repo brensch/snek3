@@ -439,6 +439,17 @@ fn choose_root_action(policy_slots: &[f32], actions: &[RootActionDebug]) -> usiz
     best_idx
 }
 
+/// Fixed-budget wrapper for tests/tools that do not have a request deadline.
+pub fn serve_move(net: &mut Net, cfg: &Config, board: &Board, me: usize) -> usize {
+    serve_move_until(
+        net,
+        cfg,
+        board,
+        me,
+        Instant::now() + std::time::Duration::from_secs(3600),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,15 +486,4 @@ mod tests {
     fn choose_root_action_falls_back_to_policy_without_debug_actions() {
         assert_eq!(choose_root_action(&[0.1, 0.2, 0.7, 0.0], &[]), 2);
     }
-}
-
-/// Fixed-budget wrapper for tests/tools that do not have a request deadline.
-pub fn serve_move(net: &mut Net, cfg: &Config, board: &Board, me: usize) -> usize {
-    serve_move_until(
-        net,
-        cfg,
-        board,
-        me,
-        Instant::now() + std::time::Duration::from_secs(3600),
-    )
 }

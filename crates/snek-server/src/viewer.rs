@@ -294,7 +294,7 @@ struct TreeResponse {
 }
 
 /// Find the recorded move with `turn == turn`.
-fn find_turn<'a>(doc: &'a Value, turn: u64) -> Option<&'a Value> {
+fn find_turn(doc: &Value, turn: u64) -> Option<&Value> {
     doc.get("moves")
         .and_then(Value::as_array)?
         .iter()

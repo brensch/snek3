@@ -31,6 +31,10 @@ export function RunsHome() {
   const setField = (key: keyof RunConfig, value: number | boolean) =>
     setConfig((prev) => (prev ? { ...prev, [key]: value } : prev));
 
+  // The GPU benchmark needs exclusive use of the GPU, so it is only offered when
+  // no run is live (the server enforces this too).
+  const anyRunning = runs.some((run) => run.running);
+
   async function startFresh() {
     setBusy(true);
     try {
@@ -65,6 +69,15 @@ export function RunsHome() {
             onClick={() => setShowKnobs((v) => !v)}
           >
             {showKnobs ? "Hide knobs" : "Configure"}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={anyRunning}
+            title={anyRunning ? "Stop the active run to benchmark the GPU" : undefined}
+            onClick={() => navigate("/bench")}
+          >
+            Benchmark GPU
           </button>
           <button className="btn" disabled={busy} onClick={startFresh}>
             Start fresh run

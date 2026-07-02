@@ -37,9 +37,7 @@ impl ArenaConfig {
         if games == 0 {
             return None;
         }
-        let snakes = env_or("SNEK_ARENA_SNAKES", 2usize)
-            .max(1)
-            .min(snek_core::MAX_SNAKES);
+        let snakes = env_or("SNEK_ARENA_SNAKES", 2usize).clamp(1, snek_core::MAX_SNAKES);
         let models = split_env("SNEK_ARENA_MODELS")
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec![default_model.to_string()]);

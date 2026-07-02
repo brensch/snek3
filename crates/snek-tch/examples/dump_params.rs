@@ -4,7 +4,7 @@ use tch::{nn, Device, Kind, Tensor};
 
 fn main() {
     let vs = nn::VarStore::new(Device::Cpu);
-    let net = AZNet::new(&vs.root(), 14, 96, 8, 3);
+    let net = AZNet::new(&vs.root(), 14, 96, 8);
     init_orthogonal(&vs, 2f64.sqrt());
 
     let mut vars: Vec<(String, Vec<i64>)> = vs

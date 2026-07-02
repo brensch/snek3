@@ -248,7 +248,7 @@ export function RunView() {
           the arena and rendered with the same board primitives as self-play. */}
       <section className="mt-4">
         <h2 className="section-title mb-2">Evaluation games</h2>
-        <EvalViewer runId={runId} evalPoints={evalPoints} />
+        <EvalViewer runId={runId} evalPoints={evalPoints} live={isLive} />
       </section>
     </div>
   );

@@ -20,7 +20,7 @@ fn main() {
     tch::set_num_interop_threads(1);
     tch::Cuda::cudnn_set_benchmark(true);
     let vs = nn::VarStore::new(dev);
-    let net = AZNet::new(&vs.root(), c, 96, 8, 3);
+    let net = AZNet::new(&vs.root(), c, 96, 8);
     snek_tch::init_orthogonal(&vs, 2f64.sqrt());
 
     let n = (batch * c * h * w) as usize;

@@ -21,9 +21,14 @@ entrypoint brings up the tunnel and execs the trainer, so a pod only needs:
 
 ```sh
 docker run --gpus all -v /your/volume:/runs \
+  -v snek3-ts-state:/root/.snek-tailscale \
   -e TS_AUTHKEY=tskey-auth-... -e START=1 -e RUN_ID=main \
   ghcr.io/brensch/snek3-trainer:latest
 ```
+
+The state volume keeps the tailscale identity across container restarts, so
+the auth key is only consumed on first boot (still make it **reusable** —
+fresh pods have fresh volumes).
 
 `RUN_ID` fixed + `START=1` means restarts resume the same run instead of
 minting a new one. Without `TS_AUTHKEY` the container still trains; the

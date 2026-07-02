@@ -17,14 +17,12 @@ impl Net {
         };
         let trunk_channels = env_or("SNEK_TRUNK_CHANNELS", 96i64);
         let trunk_blocks = env_or("SNEK_TRUNK_BLOCKS", 8i64);
-        let gpool_every = env_or("SNEK_GPOOL_EVERY", 3i64);
         let mut vs = nn::VarStore::new(device);
         let net = snek_tch::AZNet::new(
             &vs.root(),
             snek_core::NUM_CHANNELS as i64,
             trunk_channels,
             trunk_blocks,
-            gpool_every,
         );
         vs.load(path)?;
         Ok(Self {

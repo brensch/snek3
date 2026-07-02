@@ -1,4 +1,5 @@
 mod api;
+mod bench;
 mod config;
 mod eval;
 mod metrics;
