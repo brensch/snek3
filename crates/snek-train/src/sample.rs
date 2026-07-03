@@ -127,14 +127,14 @@ pub fn write_generation(
     keep: usize,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(games_dir)?;
-    let path = games_dir.join(format!("gen_{gen:04}.json"));
+    let path = games_dir.join(format!("gen_{gen:04}.json.zst"));
     let payload = GameFileJson {
         gen,
         config: Some(config),
         games,
     };
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(&payload)?)?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, zstd::encode_all(&*serde_json::to_vec(&payload)?, 3)?)?;
     std::fs::rename(&tmp, &path)?;
     prune(games_dir, keep);
     Ok(())
@@ -149,11 +149,10 @@ fn prune(games_dir: &Path, keep: usize) {
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
-                p.extension().map(|e| e == "json").unwrap_or(false)
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.starts_with("gen_"))
-                        .unwrap_or(false)
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("gen_") && n.ends_with(".json.zst"))
+                    .unwrap_or(false)
             })
             .collect(),
         Err(_) => return,

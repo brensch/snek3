@@ -15,6 +15,7 @@ use serde_json::json;
 use std::convert::Infallible;
 use std::path::Path as FsPath;
 use std::time::Duration;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -32,6 +33,9 @@ pub fn router(trainer: TrainerHandle, static_dir: Option<&FsPath>) -> Router {
         .route("/api/runs/:id/games/:gen", get(run_game))
         .route("/api/runs/:id/eval/:seq", get(run_eval_game))
         .route("/api/metrics/history", get(history))
+        // Compress API responses (the multi-MB protobuf game files especially);
+        // the default predicate skips SSE streams.
+        .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(trainer);
     if let Some(dir) = static_dir {

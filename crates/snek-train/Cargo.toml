@@ -26,9 +26,10 @@ snek-core = { path = "../snek-core" }
 snek-tch = { path = "../snek-tch" }
 tch = "0.24"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-tower-http = { version = "0.5", features = ["cors", "fs"] }
+tower-http = { version = "0.5", features = ["compression-gzip", "compression-zstd", "cors", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+zstd = "0.13"
 
 [build-dependencies]
 prost-build = "0.13"

@@ -105,11 +105,34 @@ impl ReplayBuffer {
         // filename), and leaving the stale file would double-count it on the next
         // restore.
         remove_shards_for_gen(dir, gen);
-        let final_path = dir.join(format!("gen_{gen:06}_n{}.json", samples.len()));
-        let tmp = final_path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(samples)?)?;
+        let final_path = dir.join(format!("gen_{gen:06}_n{}.json.zst", samples.len()));
+        let tmp = final_path.with_extension("tmp");
+        std::fs::write(&tmp, zstd::encode_all(&*serde_json::to_vec(samples)?, 3)?)?;
         std::fs::rename(tmp, final_path)?;
+        self.prune_evicted(dir);
         Ok(())
+    }
+
+    /// Delete on-disk shards that have slid out of the sample window, mirroring
+    /// the in-memory eviction rule in `add`: drop from the oldest end while the
+    /// total exceeds capacity and more than one shard remains.
+    fn prune_evicted(&self, dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut shards: Vec<(u32, usize, std::path::PathBuf)> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter_map(|p| shard_meta(&p).map(|(gen, n)| (gen, n, p)))
+            .collect();
+        shards.sort();
+        let mut total: usize = shards.iter().map(|(_, n, _)| n).sum();
+        let mut evict = 0;
+        while total > self.capacity && shards.len() - evict > 1 {
+            total -= shards[evict].1;
+            let _ = std::fs::remove_file(&shards[evict].2);
+            evict += 1;
+        }
     }
 
     /// Rebuild the buffer from on-disk shards, keeping only committed generations.
@@ -125,14 +148,14 @@ impl ReplayBuffer {
         let mut files = std::fs::read_dir(dir)?
             .filter_map(Result::ok)
             .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("zst"))
             .collect::<Vec<_>>();
         files.sort();
         for path in files {
             if shard_gen(&path).is_some_and(|gen| gen >= up_to_gen) {
                 continue;
             }
-            let samples: Samples = serde_json::from_slice(&std::fs::read(path)?)?;
+            let samples: Samples = serde_json::from_slice(&zstd::decode_all(&*std::fs::read(path)?)?)?;
             out.add(samples);
         }
         Ok(out)
@@ -157,15 +180,16 @@ impl ReplayBuffer {
     }
 }
 
-/// Parse the generation number out of a `gen_{gen:06}_n{len}.json` shard path.
-fn shard_gen(path: &Path) -> Option<u32> {
+/// Parse a `gen_{gen:06}_n{len}.json.zst` shard path into (generation, sample count).
+fn shard_meta(path: &Path) -> Option<(u32, usize)> {
     let name = path.file_name()?.to_str()?;
-    let digits: String = name
-        .strip_prefix("gen_")?
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    digits.parse().ok()
+    let rest = name.strip_prefix("gen_")?.strip_suffix(".json.zst")?;
+    let (gen, len) = rest.split_once("_n")?;
+    Some((gen.parse().ok()?, len.parse().ok()?))
+}
+
+fn shard_gen(path: &Path) -> Option<u32> {
+    shard_meta(path).map(|(gen, _)| gen)
 }
 
 /// Delete every shard file for a given generation (there is normally at most one,
@@ -243,4 +267,50 @@ fn move_perm(t: usize) -> [usize; 4] {
         out[i] = OFF.iter().position(|&o| o == (y, x)).unwrap();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn samples(n: usize, turn0: u32) -> Samples {
+        Samples {
+            obs: vec![0.0; n * 4],
+            pol: vec![0.25; n * 4],
+            z: vec![0.5; n],
+            turn: (turn0..turn0 + n as u32).collect(),
+            obs_shape: [1, 2, 2],
+            turns: n,
+            games: 1,
+        }
+    }
+
+    #[test]
+    fn save_restore_prune_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("snek-replay-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Capacity 25 keeps at most two 10-sample shards; older ones must be
+        // pruned from disk as they are evicted.
+        let buf = ReplayBuffer::new(25);
+        for gen in 0..4 {
+            buf.save_shard(&dir, gen, &samples(10, gen * 100)).unwrap();
+        }
+        let names: Vec<String> = {
+            let mut v: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            names,
+            ["gen_000002_n10.json.zst", "gen_000003_n10.json.zst"]
+        );
+        // Resuming at gen 3 skips the in-flight gen-3 shard, leaving only gen 2.
+        let restored = ReplayBuffer::restore(&dir, 15, 3).unwrap();
+        assert_eq!(restored.len(), 10);
+        assert_eq!(restored.shards.front().unwrap().turn[0], 200);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

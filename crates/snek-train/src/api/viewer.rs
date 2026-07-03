@@ -143,15 +143,15 @@ pub fn eval_game_file(root: &Path, seq: u64) -> Option<proto::GameFile> {
 
 /// Load one generation's recorded games and convert to the wire format.
 pub fn game_file(root: &Path, gen: u32) -> Option<proto::GameFile> {
-    let path = root.join("games").join(format!("gen_{gen:04}.json"));
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+    let path = root.join("games").join(format!("gen_{gen:04}.json.zst"));
+    let bytes = match std::fs::read(&path).and_then(|raw| zstd::decode_all(&*raw)) {
+        Ok(bytes) => bytes,
         Err(err) => {
             tracing::warn!(?path, %err, "read game file failed");
             return None;
         }
     };
-    let parsed: GameFileJson = match serde_json::from_str(&text) {
+    let parsed: GameFileJson = match serde_json::from_slice(&bytes) {
         Ok(parsed) => parsed,
         Err(err) => {
             tracing::warn!(?path, %err, "parse game file failed");
@@ -266,7 +266,7 @@ fn game_gens(root: &Path) -> Vec<proto::GameGen> {
 
 fn gen_from_name(name: &str) -> Option<u32> {
     name.strip_prefix("gen_")?
-        .strip_suffix(".json")?
+        .strip_suffix(".json.zst")?
         .parse()
         .ok()
 }
