@@ -5,6 +5,7 @@
 use super::{EPS, MAXC};
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::Rng;
+use rand_distr::Dirichlet;
 use snek_core::{Board, Move, MAX_SNAKES};
 
 /// Legal candidate move indices (0..4) for snake `i`, plus their count. Drops
@@ -154,20 +155,74 @@ pub(super) fn terminal_value(
     }
 }
 
-/// Sample a move from the play policy, mixing in a uniform exploration floor over
-/// the legal (non-zero) moves.
-pub(super) fn sample_move<R: Rng>(policy: &[f32], exploration_prob: f32, rng: &mut R) -> Move {
-    let mut p = [0.0f32; 4];
-    let legal = policy.iter().filter(|&&v| v > 0.0).count().max(1);
+/// Mix exploration noise into a masked play policy in place, matching the
+/// archived Python trainer (a65fea4, added to break an all-draws plateau):
+/// Dirichlet noise over the legal (non-zero) moves first, then a uniform floor
+/// over them. Only what gets played (and the recorded play_policy) is
+/// perturbed — the stored training target stays the clean search policy.
+pub(super) fn add_exploration_noise<R: Rng>(
+    policy: &mut [f32; 4],
+    dirichlet_frac: f32,
+    dirichlet_alpha: f32,
+    uniform_prob: f32,
+    rng: &mut R,
+) {
+    let mut legal = [0usize; 4];
+    let mut k = 0;
     for i in 0..4 {
-        p[i] = if policy[i] > 0.0 {
-            (1.0 - exploration_prob) * policy[i] + exploration_prob / legal as f32
-        } else {
-            0.0
-        };
+        if policy[i] > 0.0 {
+            legal[k] = i;
+            k += 1;
+        }
     }
-    let idx = WeightedIndex::new(p)
+    if dirichlet_frac > 0.0 && k >= 2 {
+        if let Ok(dir) = Dirichlet::new_with_size(dirichlet_alpha, k) {
+            let noise = dir.sample(rng);
+            for (j, &i) in legal[..k].iter().enumerate() {
+                policy[i] = (1.0 - dirichlet_frac) * policy[i] + dirichlet_frac * noise[j];
+            }
+        }
+    }
+    if uniform_prob > 0.0 && k > 0 {
+        let u = uniform_prob / k as f32;
+        for &i in &legal[..k] {
+            policy[i] = (1.0 - uniform_prob) * policy[i] + u;
+        }
+    }
+}
+
+/// Sample a move from the play policy.
+pub(super) fn sample_move<R: Rng>(policy: &[f32], rng: &mut R) -> Move {
+    let idx = WeightedIndex::new(policy)
         .map(|d| d.sample(rng))
         .unwrap_or_else(|_| rng.gen_range(0..4));
     Move::from_index(idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256PlusPlus;
+
+    #[test]
+    fn exploration_noise_respects_legality_and_normalization() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(7);
+        for _ in 0..100 {
+            let mut p = [0.7, 0.0, 0.2, 0.1]; // move 1 illegal
+            add_exploration_noise(&mut p, 0.25, 0.3, 0.25, &mut rng);
+            assert_eq!(p[1], 0.0, "illegal move must stay zero");
+            let sum: f32 = p.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-5, "stays a distribution, got {sum}");
+            assert!(p.iter().all(|&v| v >= 0.0));
+        }
+    }
+
+    #[test]
+    fn exploration_noise_disabled_is_identity() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(7);
+        let mut p = [0.7, 0.0, 0.2, 0.1];
+        add_exploration_noise(&mut p, 0.0, 0.3, 0.0, &mut rng);
+        assert_eq!(p, [0.7, 0.0, 0.2, 0.1]);
+    }
 }

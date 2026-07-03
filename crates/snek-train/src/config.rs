@@ -13,6 +13,16 @@ pub struct RunConfig {
     pub gpu_batch_games: usize,
     pub samples_per_gen: usize,
     pub exploration_prob: f32,
+    /// Dirichlet exploration noise on the played policy (the training target
+    /// stays the clean search policy): play = (1-frac)*policy + frac*Dir(alpha)
+    /// over the legal moves, applied before the uniform `exploration_prob`
+    /// floor. Ported from the archived Python trainer, where it was added to
+    /// break an all-draws plateau (a65fea4); the Rust rewrite dropped it.
+    /// 0 disables.
+    #[serde(default = "default_dirichlet_frac")]
+    pub dirichlet_frac: f32,
+    #[serde(default = "default_dirichlet_alpha")]
+    pub dirichlet_alpha: f32,
     pub max_turns: usize,
     pub draw_value: f32,
     pub skip_short_draw_turns: usize,
@@ -47,6 +57,14 @@ pub struct RunConfig {
     /// re-added without corrupting history.
     #[serde(default)]
     pub league_api_players: Vec<String>,
+}
+
+fn default_dirichlet_frac() -> f32 {
+    0.25
+}
+
+fn default_dirichlet_alpha() -> f32 {
+    0.3
 }
 
 fn default_sample_games() -> usize {
@@ -89,7 +107,9 @@ impl Default for RunConfig {
             c_puct: 1.5,
             gpu_batch_games: 128,
             samples_per_gen: 12_000,
-            exploration_prob: 0.15,
+            exploration_prob: 0.25,
+            dirichlet_frac: default_dirichlet_frac(),
+            dirichlet_alpha: default_dirichlet_alpha(),
             max_turns: 0, // 0 = uncapped (games run to a natural terminal)
             draw_value: -0.25,
             skip_short_draw_turns: 0,
