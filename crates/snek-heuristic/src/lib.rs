@@ -1,10 +1,21 @@
-//! A cheap, fixed-strength baseline agent: decoupled-UCT MCTS over the exact
-//! `snek-core` rules, with leaf positions scored by a flood-fill heuristic
-//! (Voronoi area control + health + relative length) instead of a neural net.
+//! Cheap, fixed-strength baseline agents: decoupled-UCT MCTS over the exact
+//! `snek-core` rules, with leaf positions scored by a heuristic instead of a
+//! neural net.
 //!
-//! It exists to anchor the evaluation league: nets drift as training runs, but
-//! this player never learns, so its fitted Elo is a stable reference point
-//! ("is the newest checkpoint actually better, or did the pool just shift?").
+//! They exist to anchor the evaluation league: nets drift as training runs,
+//! but these players never learn, so their fitted Elo is a stable reference
+//! point ("is the newest checkpoint actually better, or did the pool just
+//! shift?").
+//!
+//! Two agents share one search engine and differ only in evaluation and move
+//! pruning:
+//!
+//! - [`Baseline::Floodfill`] — the original: static Voronoi area control +
+//!   health + relative length.
+//! - [`Baseline::Voronoi`] — the strongest heuristic we know how to build
+//!   (see `voronoi.rs`): time-expanded Voronoi ownership with tail decay and
+//!   head-to-head dominance, starvation awareness, trap detection, and
+//!   guaranteed-loss move pruning.
 //!
 //! The search mirrors the shape of the real serving search (per-snake
 //! decoupled selection over joint moves, deterministic argmax readout, the
@@ -16,17 +27,80 @@ use std::time::Instant;
 
 use snek_core::{Board, Move, MAX_SNAKES};
 
-/// The `--nets` token that selects this agent in the arena (also accepted:
-/// "floodfill").
-pub const NET_TOKEN: &str = "heuristic";
+mod voronoi;
 
-/// Display name for scoreboards.
-pub const DISPLAY_NAME: &str = "floodfill";
+/// A built-in heuristic agent an arena `--nets` entry can name instead of a
+/// weights file. Parsing is the single registry of accepted spec tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Baseline {
+    /// Flood-fill MCTS: static Voronoi area + health + length leaf eval.
+    Floodfill,
+    /// Time-expanded Voronoi MCTS with dominance, hunger and trap terms.
+    Voronoi,
+}
 
-/// True if an arena model spec names the heuristic agent instead of a weights
-/// file.
+impl Baseline {
+    pub const ALL: [Baseline; 2] = [Baseline::Floodfill, Baseline::Voronoi];
+
+    /// The agent an arena model spec names, if any ("heuristic"/"floodfill"
+    /// for the original, "voronoi" for the stronger agent).
+    pub fn parse(spec: &str) -> Option<Baseline> {
+        let s = spec.trim();
+        if s.eq_ignore_ascii_case("heuristic") || s.eq_ignore_ascii_case("floodfill") {
+            Some(Baseline::Floodfill)
+        } else if s.eq_ignore_ascii_case("voronoi") {
+            Some(Baseline::Voronoi)
+        } else {
+            None
+        }
+    }
+
+    /// Canonical `--nets` token.
+    pub fn token(self) -> &'static str {
+        match self {
+            Baseline::Floodfill => "heuristic",
+            Baseline::Voronoi => "voronoi",
+        }
+    }
+
+    /// Display name for scoreboards.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Baseline::Floodfill => "floodfill",
+            Baseline::Voronoi => "voronoi",
+        }
+    }
+
+    /// How the shared engine is specialized for this agent.
+    fn engine(self) -> Engine {
+        match self {
+            Baseline::Floodfill => Engine {
+                eval: evaluate,
+                prune_headon: false,
+            },
+            Baseline::Voronoi => Engine {
+                eval: voronoi::evaluate,
+                prune_headon: true,
+            },
+        }
+    }
+}
+
+/// True if an arena model spec names a built-in heuristic agent instead of a
+/// weights file.
 pub fn is_heuristic_spec(spec: &str) -> bool {
-    spec.eq_ignore_ascii_case(NET_TOKEN) || spec.eq_ignore_ascii_case(DISPLAY_NAME)
+    Baseline::parse(spec).is_some()
+}
+
+/// A leaf evaluation: per-snake values in [-1, 1].
+type EvalFn = fn(&Board, f32) -> [f32; MAX_SNAKES];
+
+/// The two knobs that differentiate the baseline agents on the shared search.
+struct Engine {
+    eval: EvalFn,
+    /// Prune candidate moves that step into a square a longer (or equal)
+    /// opponent head can also reach — a lost/mutual head-to-head.
+    prune_headon: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -84,10 +158,16 @@ struct Node {
 }
 
 impl Node {
-    fn new(board: Board) -> Self {
+    fn new(board: Board, prune_headon: bool) -> Self {
         let terminal = board.is_terminal();
         let cands: Vec<Vec<Move>> = (0..board.snakes.len())
-            .map(|i| candidates(&board, i))
+            .map(|i| {
+                if prune_headon {
+                    voronoi::safe_candidates(&board, i)
+                } else {
+                    candidates(&board, i)
+                }
+            })
             .collect();
         let visits = cands.iter().map(|c| vec![0.0; c.len()]).collect();
         let values = cands.iter().map(|c| vec![0.0; c.len()]).collect();
@@ -130,8 +210,9 @@ impl Node {
 
 /// Candidate moves for one snake: drop reversing onto the neck and stepping
 /// off the board; a trapped snake keeps all moves; eliminated snakes get a
-/// single dummy. (Same rule as `snek-search`.)
-fn candidates(board: &Board, i: usize) -> Vec<Move> {
+/// single dummy. (Same rule as `snek-search`.) Public so the arena can pick a
+/// sane fallback move when an external HTTP player fails to answer.
+pub fn candidates(board: &Board, i: usize) -> Vec<Move> {
     let s = &board.snakes[i];
     if !s.alive() {
         return vec![Move::Up];
@@ -156,22 +237,31 @@ fn candidates(board: &Board, i: usize) -> Vec<Move> {
     v
 }
 
-/// Per-snake leaf value in [-1, 1]. Terminal boards score exactly like the net
-/// search (winner +1, losers −1, draw `draw_value`); live boards blend Voronoi
-/// area control, health, and length relative to the longest opponent.
-fn evaluate(board: &Board, draw_value: f32) -> [f32; MAX_SNAKES] {
+/// Terminal scoring shared by every leaf eval: winner +1, losers −1, draw
+/// `draw_value` (matches the net search's convention). None for live boards.
+pub(crate) fn terminal_values(board: &Board, draw_value: f32) -> Option<[f32; MAX_SNAKES]> {
+    if !board.is_terminal() {
+        return None;
+    }
     let mut vals = [-1.0f32; MAX_SNAKES];
-    if board.is_terminal() {
-        match board.winner() {
-            Some(w) => vals[w] = 1.0,
-            None => {
-                for v in vals.iter_mut().take(board.snakes.len()) {
-                    *v = draw_value;
-                }
+    match board.winner() {
+        Some(w) => vals[w] = 1.0,
+        None => {
+            for v in vals.iter_mut().take(board.snakes.len()) {
+                *v = draw_value;
             }
         }
+    }
+    Some(vals)
+}
+
+/// Per-snake leaf value in [-1, 1] for the flood-fill agent: live boards blend
+/// Voronoi area control, health, and length relative to the longest opponent.
+fn evaluate(board: &Board, draw_value: f32) -> [f32; MAX_SNAKES] {
+    if let Some(vals) = terminal_values(board, draw_value) {
         return vals;
     }
+    let mut vals = [-1.0f32; MAX_SNAKES];
 
     let w = board.width as usize;
     let h = board.height as usize;
@@ -257,15 +347,28 @@ fn evaluate(board: &Board, draw_value: f32) -> [f32; MAX_SNAKES] {
     vals
 }
 
-/// One move for snake `me`: run decoupled-UCT until `cfg.max_sims` or the
-/// deadline, then play the most-visited root candidate. Deterministic for a
-/// fixed sim budget (no randomness anywhere in the search).
+/// One move for snake `me` from the flood-fill agent (kept as the historic
+/// entry point; equivalent to `baseline_move_until(Baseline::Floodfill, …)`).
 pub fn heuristic_move_until(
     cfg: &HeuristicConfig,
     board: &Board,
     me: usize,
     deadline: Instant,
 ) -> HeuristicDecision {
+    baseline_move_until(Baseline::Floodfill, cfg, board, me, deadline)
+}
+
+/// One move for snake `me`: run decoupled-UCT until `cfg.max_sims` or the
+/// deadline, then play the most-visited root candidate. Deterministic for a
+/// fixed sim budget (no randomness anywhere in the search).
+pub fn baseline_move_until(
+    kind: Baseline,
+    cfg: &HeuristicConfig,
+    board: &Board,
+    me: usize,
+    deadline: Instant,
+) -> HeuristicDecision {
+    let engine = kind.engine();
     let mut policy = [0.0f32; 4];
     if board.is_terminal() || me >= board.snakes.len() || !board.snakes[me].alive() {
         policy[Move::Up.index()] = 1.0;
@@ -276,7 +379,11 @@ pub fn heuristic_move_until(
             sims: 0,
         };
     }
-    let root_cands = candidates(board, me);
+    let root_cands = if engine.prune_headon {
+        voronoi::safe_candidates(board, me)
+    } else {
+        candidates(board, me)
+    };
     if root_cands.len() == 1 {
         let mv = root_cands[0].index();
         policy[mv] = 1.0;
@@ -288,7 +395,7 @@ pub fn heuristic_move_until(
         };
     }
 
-    let mut nodes = vec![Node::new(board.clone())];
+    let mut nodes = vec![Node::new(board.clone(), engine.prune_headon)];
     let mut sims = 0usize;
     let mut path: Vec<(usize, [usize; MAX_SNAKES])> = Vec::with_capacity(64);
     while sims < cfg.max_sims {
@@ -299,7 +406,7 @@ pub fn heuristic_move_until(
         let mut cur = 0usize;
         let leaf_vals = loop {
             if nodes[cur].terminal {
-                break evaluate(&nodes[cur].board, cfg.draw_value);
+                break (engine.eval)(&nodes[cur].board, cfg.draw_value);
             }
             let n = nodes[cur].board.snakes.len();
             let mut cidx = [0usize; MAX_SNAKES];
@@ -317,9 +424,9 @@ pub fn heuristic_move_until(
                     let moves: Vec<Move> =
                         (0..n).map(|i| nodes[cur].cands[i][cidx[i]]).collect();
                     child_board.step(&moves);
-                    let vals = evaluate(&child_board, cfg.draw_value);
+                    let vals = (engine.eval)(&child_board, cfg.draw_value);
                     let id = nodes.len();
-                    nodes.push(Node::new(child_board));
+                    nodes.push(Node::new(child_board, engine.prune_headon));
                     nodes[cur].children.insert(key, id);
                     break vals;
                 }

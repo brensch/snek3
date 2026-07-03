@@ -39,6 +39,14 @@ pub struct RunConfig {
     /// CPU cores (worker threads) pinned to each net in a league game.
     #[serde(default = "default_eval_cores")]
     pub eval_cores: usize,
+    /// External API players holding permanent league seats, as "name=url"
+    /// entries. The url is the base of a Battlesnake-protocol HTTP server
+    /// (the arena POSTs {url}/move). The name is the player's stable league
+    /// identity: its rating id is assigned on first sight and persisted in
+    /// eval/players.json, so entries can be reordered or removed and later
+    /// re-added without corrupting history.
+    #[serde(default)]
+    pub league_api_players: Vec<String>,
 }
 
 fn default_sample_games() -> usize {
@@ -97,6 +105,7 @@ impl Default for RunConfig {
             league_entrant_gens: default_league_entrant_gens(),
             eval_sims: default_eval_sims(),
             eval_cores: default_eval_cores(),
+            league_api_players: Vec::new(),
         }
     }
 }

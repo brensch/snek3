@@ -39,22 +39,165 @@ use std::time::Duration;
 /// Recorded match game files kept on disk (newest first); logs likewise.
 const KEEP_MATCH_FILES: usize = 60;
 
-/// League identity of the fixed flood-fill MCTS baseline (`snek-heuristic`,
-/// seated by the arena's literal net spec "heuristic"). It never learns, so
-/// its fitted Elo is a stable reference every net is constantly measured
-/// against. `u32::MAX` can never collide with a checkpoint generation.
+/// External (non-checkpoint) league players live at ids counting down from
+/// `u32::MAX`, far above any real checkpoint generation. Fixed built-in ids:
+/// the flood-fill MCTS baseline and the stronger time-expanded-Voronoi MCTS
+/// baseline (both `snek-heuristic`, seated by literal arena net specs). They
+/// never learn, so their fitted Elo is a stable reference every net is
+/// constantly measured against.
 pub const HEURISTIC_GEN: u32 = u32::MAX;
+pub const VORONOI_GEN: u32 = u32::MAX - 1;
 
-/// Chance a league game is forced to include the flood-fill baseline (it can
-/// also be drawn by the normal information-gain sampling on top of this).
-const HEURISTIC_PLAY_PROB: f64 = 1.0 / 3.0;
+/// Configured API players are assigned ids from here downward (persisted in
+/// eval/players.json so a player's id survives config edits and restarts).
+const API_GEN_START: u32 = u32::MAX - 16;
 
-/// Display name for a league player id.
+/// Every id at or above this is an external player, not a checkpoint.
+pub const EXTERNAL_GEN_MIN: u32 = u32::MAX - 255;
+
+pub fn is_external(gen: u32) -> bool {
+    gen >= EXTERNAL_GEN_MIN
+}
+
+/// Chance a league game is forced to include one external player, drawn
+/// uniformly from the roster (they also flow through the normal
+/// information-gain sampling on top of this).
+const EXTERNAL_PLAY_PROB: f64 = 1.0 / 3.0;
+
+/// One external league player: a built-in heuristic agent or a configured
+/// Battlesnake-protocol API server. `spec` is the arena `--nets` entry that
+/// seats it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalPlayer {
+    pub gen: u32,
+    pub name: String,
+    pub spec: String,
+}
+
+/// The run's external players: the fixed built-ins plus the config's API
+/// entries. `known` additionally keeps every player ever registered (from
+/// eval/players.json), so historical records stay nameable after a config
+/// removes a player.
+pub struct ExternalRegistry {
+    pub active: Vec<ExternalPlayer>,
+    pub known: Vec<ExternalPlayer>,
+}
+
+impl ExternalRegistry {
+    pub fn name(&self, gen: u32) -> Option<&str> {
+        self.known
+            .iter()
+            .find(|p| p.gen == gen)
+            .map(|p| p.name.as_str())
+    }
+
+    fn spec(&self, gen: u32) -> Option<&str> {
+        self.known
+            .iter()
+            .find(|p| p.gen == gen)
+            .map(|p| p.spec.as_str())
+    }
+
+    fn display(&self, gen: u32) -> String {
+        self.name(gen)
+            .map(str::to_string)
+            .unwrap_or_else(|| player_name(gen))
+    }
+}
+
+/// Resolve the external roster for `cfg`, assigning fresh ids to API players
+/// seen for the first time, and persist the union to eval/players.json.
+/// Malformed config entries are skipped (returned so the caller can log).
+pub fn load_external_registry(
+    cfg: &RunConfig,
+    eval_dir: &Path,
+) -> (ExternalRegistry, Vec<String>) {
+    let builtins = vec![
+        ExternalPlayer {
+            gen: HEURISTIC_GEN,
+            name: "floodfill".into(),
+            spec: "heuristic".into(),
+        },
+        ExternalPlayer {
+            gen: VORONOI_GEN,
+            name: "voronoi".into(),
+            spec: "voronoi".into(),
+        },
+    ];
+    let path = eval_dir.join("players.json");
+    let saved: Vec<ExternalPlayer> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let mut next_gen = saved
+        .iter()
+        .map(|p| p.gen)
+        .filter(|&g| g <= API_GEN_START)
+        .min()
+        .map(|g| g - 1)
+        .unwrap_or(API_GEN_START);
+    let mut active = builtins.clone();
+    let mut errors = Vec::new();
+    for entry in &cfg.league_api_players {
+        let Some((name, url)) = entry.split_once('=') else {
+            errors.push(format!(
+                "league_api_players entry {entry:?} is not \"name=url\"; skipped"
+            ));
+            continue;
+        };
+        let (name, url) = (name.trim(), url.trim().trim_end_matches('/'));
+        if name.is_empty() || !(url.starts_with("http://") || url.starts_with("https://")) {
+            errors.push(format!(
+                "league_api_players entry {entry:?} needs a name and an http(s) url; skipped"
+            ));
+            continue;
+        }
+        if active.iter().any(|p| p.name == name) {
+            errors.push(format!("duplicate league player name {name:?}; skipped"));
+            continue;
+        }
+        // The name is the stable identity; the id sticks across restarts.
+        let gen = saved
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.gen)
+            .unwrap_or_else(|| {
+                let g = next_gen;
+                next_gen -= 1;
+                g
+            });
+        active.push(ExternalPlayer {
+            gen,
+            name: name.to_string(),
+            spec: url.to_string(),
+        });
+    }
+    // known = everything ever seen; active entries override saved specs.
+    let mut known = active.clone();
+    for p in saved {
+        if !known.iter().any(|k| k.gen == p.gen) {
+            known.push(p);
+        }
+    }
+    known.sort_by_key(|p| std::cmp::Reverse(p.gen));
+    let doc = serde_json::to_vec_pretty(&known).unwrap_or_default();
+    if std::fs::read(&path).ok().as_deref() != Some(doc.as_slice()) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &doc).is_ok() {
+            let _ = std::fs::rename(tmp, &path);
+        }
+    }
+    (ExternalRegistry { active, known }, errors)
+}
+
+/// Display name for a league player id (fallback when no registry is at
+/// hand; the registry knows configured API players' real names).
 pub fn player_name(gen: u32) -> String {
-    if gen == HEURISTIC_GEN {
-        "floodfill".to_string()
-    } else {
-        format!("gen_{gen:04}")
+    match gen {
+        HEURISTIC_GEN => "floodfill".to_string(),
+        VORONOI_GEN => "voronoi".to_string(),
+        g if is_external(g) => format!("api_{}", API_GEN_START.saturating_sub(g)),
+        g => format!("gen_{g:04}"),
     }
 }
 
@@ -112,6 +255,10 @@ pub struct LeagueRatings {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LeagueRating {
     pub gen: u32,
+    /// Display name ("gen_0042", "floodfill", or a configured API player's
+    /// name). Empty in files written before names existed.
+    #[serde(default)]
+    pub name: String,
     /// Plackett–Luce strength on the Elo scale, anchored so the earliest rated
     /// generation is 0.
     pub elo: f64,
@@ -166,6 +313,8 @@ pub struct LiveEval {
 #[derive(Debug, Clone, Serialize)]
 pub struct LivePlayer {
     pub gen: u32,
+    /// Display name (external players carry their registry name).
+    pub name: String,
     /// Fitted league Elo entering the game.
     pub elo: f64,
     /// Career league games.
@@ -268,6 +417,8 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
     let mut records = read_summaries(&paths.root);
     let mut seq = records.iter().map(|m| m.seq + 1).max().unwrap_or(0);
     let mut announced = false;
+    // Config problems repeat every loop; log each distinct message once.
+    let mut logged_errors: std::collections::HashSet<String> = Default::default();
 
     while !stop.load(Ordering::Relaxed) {
         let cfg = trainer.config();
@@ -275,27 +426,43 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
             sleep_unless_stopped(stop, 30);
             continue;
         }
-        // The flood-fill baseline always holds a pool slot, so games (and a
-        // meaningful Elo) start from the very first checkpoint.
+        if std::fs::create_dir_all(&eval_dir).is_err() {
+            sleep_unless_stopped(stop, 30);
+            continue;
+        }
+        // External players (built-in heuristics + configured API snakes)
+        // always hold pool slots, so games (and a meaningful Elo) start from
+        // the very first checkpoint.
+        let (registry, config_errors) = load_external_registry(&cfg, &eval_dir);
+        for err in config_errors {
+            if logged_errors.insert(err.clone()) {
+                metrics.log(format!("eval league: {err}"));
+            }
+        }
         let mut pool = pool_members(paths, cfg.league_entrant_gens);
-        pool.push(HEURISTIC_GEN);
+        pool.extend(registry.active.iter().map(|p| p.gen));
+        pool.sort_unstable();
+        pool.dedup();
         if pool.len() < 2 {
             sleep_unless_stopped(stop, 15);
             continue;
         }
         if !announced {
             metrics.log(format!(
-                "eval league: running — pool of {} players incl. floodfill baseline (entrant every {} gens), {} distinct nets per game, {} sims",
+                "eval league: running — pool of {} players incl. {} external ({}), entrant every {} gens, {} distinct players per game, {} sims",
                 pool.len(),
+                registry.active.len(),
+                registry
+                    .active
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 cfg.league_entrant_gens,
                 cfg.num_snakes.min(pool.len()),
                 cfg.eval_sims,
             ));
             announced = true;
-        }
-        if std::fs::create_dir_all(&eval_dir).is_err() {
-            sleep_unless_stopped(stop, 30);
-            continue;
         }
 
         let ratings = fit_ratings(&pool, &records);
@@ -311,6 +478,7 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
             .iter()
             .map(|&gen| LivePlayer {
                 gen,
+                name: registry.display(gen),
                 elo: ratings.get(&gen).copied().unwrap_or(0.0),
                 games: career(gen),
             })
@@ -320,6 +488,7 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
             paths,
             &eval_dir,
             &cfg,
+            &registry,
             &players,
             live_players,
             seq,
@@ -332,7 +501,7 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
                     "eval league #{seq}: {ranking} ({turns} turns) — {rated} nets rated",
                     ranking = order
                         .iter()
-                        .map(|p| player_name(p.gen))
+                        .map(|p| registry.display(p.gen))
                         .collect::<Vec<_>>()
                         .join(" > "),
                     turns = record.turns,
@@ -343,7 +512,12 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
                 }
                 records.push(record);
                 let fitted = fit_ratings(&pool, &records);
-                if let Err(err) = write_ratings(&eval_dir.join("ratings.json"), &records, &fitted) {
+                if let Err(err) = write_ratings(
+                    &eval_dir.join("ratings.json"),
+                    &records,
+                    &fitted,
+                    &registry,
+                ) {
                     metrics.log(format!("eval league: failed to write ratings: {err}"));
                 }
                 prune_match_files(&eval_dir, KEEP_MATCH_FILES);
@@ -375,6 +549,7 @@ fn run_match(
     paths: &RunPaths,
     eval_dir: &Path,
     cfg: &RunConfig,
+    registry: &ExternalRegistry,
     players: &[u32],
     live_players: Vec<LivePlayer>,
     seq: u64,
@@ -386,15 +561,15 @@ fn run_match(
     let nets: Vec<String> = players
         .iter()
         .map(|&g| {
-            if g == HEURISTIC_GEN {
-                // The arena's literal spec for the built-in flood-fill agent.
-                "heuristic".to_string()
-            } else {
-                paths.checkpoint_net(g).display().to_string()
-            }
+            // External players carry their arena spec (a heuristic token or
+            // an http url); checkpoints are weights paths.
+            registry
+                .spec(g)
+                .map(str::to_string)
+                .unwrap_or_else(|| paths.checkpoint_net(g).display().to_string())
         })
         .collect();
-    let names: Vec<String> = players.iter().map(|&g| player_name(g)).collect();
+    let names: Vec<String> = players.iter().map(|&g| registry.display(g)).collect();
     let cores = league_cores(players.len(), cfg.eval_cores);
 
     let mut command = std::process::Command::new(bin);
@@ -413,7 +588,7 @@ fn run_match(
             &players
                 .iter()
                 .copied()
-                .filter(|&g| g != HEURISTIC_GEN)
+                .filter(|&g| !is_external(g))
                 .max()
                 .unwrap_or(0)
                 .to_string(),
@@ -629,11 +804,12 @@ fn pick_players(
 
     let k = seats.min(pool.len()).max(2);
     let mut selected = Vec::with_capacity(k);
-    // Regularly force the flood-fill baseline in (it also flows through the
-    // normal sampling below), so nets are constantly compared against the one
-    // player that never changes.
-    if pool.contains(&HEURISTIC_GEN) && rng.gen_bool(HEURISTIC_PLAY_PROB) {
-        selected.push(HEURISTIC_GEN);
+    // Regularly force one external player in (they also flow through the
+    // normal sampling below), so nets are constantly compared against
+    // players that never change.
+    let externals: Vec<u32> = pool.iter().copied().filter(|&g| is_external(g)).collect();
+    if !externals.is_empty() && rng.gen_bool(EXTERNAL_PLAY_PROB) {
+        selected.push(externals[rng.gen_range(0..externals.len())]);
     }
     if selected.is_empty() {
         let weights: Vec<f64> = pool.iter().map(|&g| uncertainty(g)).collect();
@@ -800,6 +976,7 @@ fn write_ratings(
     path: &Path,
     records: &[MatchRecord],
     fitted: &HashMap<u32, f64>,
+    registry: &ExternalRegistry,
 ) -> anyhow::Result<()> {
     // games, rank-1 finishes, rank sum per gen.
     let mut tally: HashMap<u32, (u32, u32, u64)> = HashMap::new();
@@ -831,6 +1008,7 @@ fn write_ratings(
             let (games, wins, rank_sum) = tally.get(&gen).copied().unwrap_or_default();
             LeagueRating {
                 gen,
+                name: registry.display(gen),
                 elo,
                 games,
                 wins,
@@ -1004,6 +1182,164 @@ mod tests {
         }
     }
 
+    /// Sample one full finishing order from the Plackett–Luce model with the
+    /// given (gen, strength) pairs: repeatedly pick the next finisher with
+    /// probability proportional to strength among those remaining.
+    fn sample_order(strengths: &[(u32, f64)], rng: &mut Xoshiro256PlusPlus) -> Vec<u32> {
+        let mut remaining = strengths.to_vec();
+        let mut order = Vec::with_capacity(remaining.len());
+        while !remaining.is_empty() {
+            let total: f64 = remaining.iter().map(|&(_, s)| s).sum();
+            let mut pick = rng.gen_range(0.0..total);
+            let mut chosen = remaining.len() - 1;
+            for (i, &(_, s)) in remaining.iter().enumerate() {
+                pick -= s;
+                if pick <= 0.0 {
+                    chosen = i;
+                    break;
+                }
+            }
+            order.push(remaining.remove(chosen).0);
+        }
+        order
+    }
+
+    fn shuffled(gens: &[u32], rng: &mut Xoshiro256PlusPlus) -> Vec<u32> {
+        let mut v = gens.to_vec();
+        for i in (1..v.len()).rev() {
+            v.swap(i, rng.gen_range(0..=i));
+        }
+        v
+    }
+
+    #[test]
+    fn two_player_fit_matches_bradley_terry_closed_form() {
+        // With an 8–2 head-to-head record plus the fit's built-in half virtual
+        // tie (0.25 wins each way), the Bradley–Terry MLE odds are exactly
+        // (8 + 0.25) : (2 + 0.25), so the Elo gap has a closed form the MM
+        // iteration must land on.
+        let pool = vec![0, 5];
+        let records = vec![pairwise(0, 5, 0, 8, 2, 0)];
+        let elo = fit_ratings(&pool, &records);
+        let expected = 400.0 * (8.25f64 / 2.25).log10();
+        assert!(
+            (elo[&5] - expected).abs() < 0.5,
+            "fitted {} vs closed form {expected}",
+            elo[&5]
+        );
+    }
+
+    #[test]
+    fn fit_recovers_known_strengths_from_simulated_games() {
+        // Simulate 3000 four-player games from known Plackett–Luce strengths
+        // and check the fit recovers every player's true Elo. This is the
+        // end-to-end accuracy test: sampling noise at 3000 games is ~10 Elo.
+        let true_elo = [(0u32, 0.0f64), (10, 100.0), (20, 200.0), (30, 300.0)];
+        let strengths: Vec<(u32, f64)> = true_elo
+            .iter()
+            .map(|&(g, e)| (g, 10f64.powf(e / 400.0)))
+            .collect();
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(7);
+        let records: Vec<MatchRecord> = (0..3000)
+            .map(|seq| game(seq, &sample_order(&strengths, &mut rng)))
+            .collect();
+        let pool: Vec<u32> = true_elo.iter().map(|&(g, _)| g).collect();
+        let elo = fit_ratings(&pool, &records);
+        for &(g, expected) in &true_elo {
+            assert!(
+                (elo[&g] - expected).abs() < 25.0,
+                "gen {g}: fitted {:.1} vs true {expected}",
+                elo[&g]
+            );
+        }
+    }
+
+    #[test]
+    fn fit_is_converged_and_scale_invariant() {
+        // A maximum-likelihood fit must not depend on the absolute number of
+        // identical observations: doubling every record leaves the optimum in
+        // place (only the fixed virtual ties shift relative weight, negligible
+        // at this data size). A drifting result here means the MM iteration
+        // ran out of its fixed iteration budget before converging.
+        let strengths = [(0u32, 1.0f64), (10, 1.6), (20, 2.6), (30, 4.2)];
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(11);
+        let records: Vec<MatchRecord> = (0..600)
+            .map(|seq| game(seq, &sample_order(&strengths, &mut rng)))
+            .collect();
+        let doubled: Vec<MatchRecord> = records.iter().chain(records.iter()).cloned().collect();
+        let pool = vec![0, 10, 20, 30];
+        let once = fit_ratings(&pool, &records);
+        let twice = fit_ratings(&pool, &doubled);
+        for g in &pool {
+            assert!(
+                (once[g] - twice[g]).abs() < 3.0,
+                "gen {g}: {:.2} vs doubled {:.2}",
+                once[g],
+                twice[g]
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_seats_in_one_game_read_as_repeated_comparisons() {
+        // Early league games seat the same player twice (pool smaller than the
+        // table): two floodfill seats tying for first over two gen-0 seats.
+        // That must fit as floodfill > gen 0 with every rating finite.
+        let pool = vec![0, HEURISTIC_GEN];
+        let records: Vec<MatchRecord> = (0..5)
+            .map(|seq| {
+                let mut r = game(seq, &[HEURISTIC_GEN, HEURISTIC_GEN, 0, 0]);
+                r.placements[1].rank = 1; // both floodfill seats share first
+                r
+            })
+            .collect();
+        let elo = fit_ratings(&pool, &records);
+        assert!(elo[&0].is_finite() && elo[&HEURISTIC_GEN].is_finite(), "{elo:?}");
+        assert!(
+            elo[&HEURISTIC_GEN] > 100.0,
+            "floodfill swept every game: {elo:?}"
+        );
+    }
+
+    #[test]
+    fn plackett_luce_rates_the_full_finishing_order_not_the_win_rate() {
+        // A "win or die" player X against three identical steady opponents: X
+        // finishes first in half its games and dead last in the rest, so it
+        // wins 3x as often as any opponent (50% vs ~17%) — yet the analytic
+        // Plackett–Luce MLE puts X ~74 Elo BELOW the steady players, because
+        // finishing last loses all three elimination stages while a win only
+        // takes the first. This is intended model semantics — league Elo
+        // orders by full-ranking strength, not rank-1 rate — and it is exactly
+        // why a high-win-rate bimodal player (the flood-fill baseline) can sit
+        // mid-table under nets with fewer outright wins. If this test starts
+        // failing, the rating semantics have changed; update the leaderboard
+        // copy accordingly.
+        let pool = vec![0, 10, 20, 99];
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(3);
+        let records: Vec<MatchRecord> = (0..1200)
+            .map(|seq| {
+                let others = shuffled(&[0, 10, 20], &mut rng);
+                let order: Vec<u32> = if rng.gen_bool(0.5) {
+                    std::iter::once(99).chain(others).collect()
+                } else {
+                    others.into_iter().chain(std::iter::once(99)).collect()
+                };
+                game(seq, &order)
+            })
+            .collect();
+        let elo = fit_ratings(&pool, &records);
+        for g in [0, 10, 20] {
+            assert!(
+                elo[&99] < elo[&g] - 20.0,
+                "win-or-die player must rate below steady equals: {elo:?}"
+            );
+        }
+        assert!(
+            elo[&99] > -160.0,
+            "penalty should stay near the analytic ~-74: {elo:?}"
+        );
+    }
+
     #[test]
     fn fit_matches_bradley_terry_for_two_players() {
         let pool = vec![0, 5];
@@ -1079,6 +1415,77 @@ mod tests {
             with_baseline > 15,
             "floodfill baseline only drawn {with_baseline}/60 times"
         );
+    }
+
+    #[test]
+    fn api_player_ids_are_stable_across_restarts_and_reorders() {
+        let dir = std::env::temp_dir().join(format!(
+            "snek3-eval-registry-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = crate::config::RunConfig {
+            league_api_players: vec![
+                "alpha=http://10.0.0.1:8000".into(),
+                "beta=http://10.0.0.2:8000/".into(),
+                "broken-entry-no-url".into(),
+            ],
+            ..Default::default()
+        };
+        let (reg, errors) = load_external_registry(&cfg, &dir);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let alpha = reg.active.iter().find(|p| p.name == "alpha").unwrap().gen;
+        let beta = reg.active.iter().find(|p| p.name == "beta").unwrap().gen;
+        assert!(is_external(alpha) && is_external(beta));
+        assert_ne!(alpha, beta);
+        assert_eq!(
+            reg.active.iter().find(|p| p.name == "beta").unwrap().spec,
+            "http://10.0.0.2:8000",
+            "trailing slash trimmed"
+        );
+        // Built-ins always present.
+        assert!(reg.active.iter().any(|p| p.gen == HEURISTIC_GEN));
+        assert!(reg.active.iter().any(|p| p.gen == VORONOI_GEN));
+
+        // Reorder + drop one: survivors keep their ids, the dropped player
+        // stays known (for naming history) but not active.
+        cfg.league_api_players = vec!["beta=http://10.0.0.2:9999".into()];
+        let (reg2, _) = load_external_registry(&cfg, &dir);
+        assert_eq!(
+            reg2.active.iter().find(|p| p.name == "beta").unwrap().gen,
+            beta
+        );
+        assert!(!reg2.active.iter().any(|p| p.name == "alpha"));
+        assert_eq!(reg2.name(alpha), Some("alpha"));
+
+        // Re-adding alpha restores its original id.
+        cfg.league_api_players = vec![
+            "beta=http://10.0.0.2:9999".into(),
+            "alpha=http://10.0.0.1:8000".into(),
+        ];
+        let (reg3, _) = load_external_registry(&cfg, &dir);
+        assert_eq!(
+            reg3.active.iter().find(|p| p.name == "alpha").unwrap().gen,
+            alpha
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forced_external_rotates_between_baselines() {
+        let pool = vec![0, 5, 10, 15, HEURISTIC_GEN, VORONOI_GEN];
+        let mut records: Vec<MatchRecord> = (0..5).map(|s| game(s, &[15, 10, 5, 0])).collect();
+        records.extend((5..10).map(|s| game(s, &[15, HEURISTIC_GEN, VORONOI_GEN, 0])));
+        let ratings = fit_ratings(&pool, &records);
+        let (mut with_ff, mut with_vor) = (0, 0);
+        for seq in 0..120 {
+            let players = pick_players(&pool, &records, &ratings, 4, seq);
+            with_ff += players.contains(&HEURISTIC_GEN) as u32;
+            with_vor += players.contains(&VORONOI_GEN) as u32;
+        }
+        assert!(with_ff > 15, "floodfill only drawn {with_ff}/120");
+        assert!(with_vor > 15, "voronoi only drawn {with_vor}/120");
     }
 
     #[test]

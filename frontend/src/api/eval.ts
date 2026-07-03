@@ -23,7 +23,7 @@ export type LiveFrame = {
 export type LiveEvalGame = { index: number; turn: number; frame: LiveFrame | null };
 
 // One player of the in-flight game (seat s plays player s % N).
-export type LiveEvalPlayer = { gen: number; elo: number; games: number };
+export type LiveEvalPlayer = { gen: number; name: string; elo: number; games: number };
 
 export type LiveEval = {
   active: boolean;

@@ -126,9 +126,11 @@ usage: arena --nets <m1,m2[,m3,m4…]> [options]
        arena --a <model> --b <model> [options]   (two-net shorthand)
 
 nets & seats:
-  --nets LIST         comma-separated model weights, one player per entry;
-                      the literal entry 'heuristic' (or 'floodfill') seats the
-                      built-in flood-fill MCTS baseline instead of a net
+  --nets LIST         comma-separated players, one per entry. Each entry is a
+                      model weights path, a built-in heuristic agent
+                      ('heuristic'/'floodfill' = flood-fill MCTS, 'voronoi' =
+                      time-expanded Voronoi MCTS), or an http(s):// base URL
+                      of an external Battlesnake-protocol server (POST /move)
   --a / --b PATH      shorthand for --nets a,b
   --names LIST        display names (default: model file stem / parent dir)
   --seats N           snakes per game; seat s plays net (s+game)%N, so two
@@ -307,15 +309,40 @@ fn parse_args() -> Args {
     }
 }
 
-fn default_name(path: &str, index: usize) -> String {
-    if snek_heuristic::is_heuristic_spec(path) {
-        return snek_heuristic::DISPLAY_NAME.to_string();
+/// What a `--nets` entry seats: a checkpoint, a built-in heuristic agent, or
+/// an external Battlesnake-protocol HTTP server.
+enum PlayerKind {
+    /// A checkpoint weights file (the spec string itself is the path).
+    Net,
+    Baseline(snek_heuristic::Baseline),
+    Http(String),
+}
+
+fn parse_player(spec: &str) -> PlayerKind {
+    if let Some(kind) = snek_heuristic::Baseline::parse(spec) {
+        PlayerKind::Baseline(kind)
+    } else if spec.starts_with("http://") || spec.starts_with("https://") {
+        PlayerKind::Http(spec.trim_end_matches('/').to_string())
+    } else {
+        PlayerKind::Net
     }
-    Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("net-{index}"))
+}
+
+fn default_name(path: &str, index: usize) -> String {
+    match parse_player(path) {
+        PlayerKind::Baseline(kind) => kind.display_name().to_string(),
+        PlayerKind::Http(url) => url
+            .split("://")
+            .nth(1)
+            .unwrap_or(&url)
+            .trim_end_matches('/')
+            .to_string(),
+        PlayerKind::Net => Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("net-{index}")),
+    }
 }
 
 fn parse_num<T: std::str::FromStr>(s: &str, flag: &str) -> T {
@@ -403,41 +430,52 @@ fn spawn_worker(
                     eprintln!("arena: warning: failed to pin {label} to core {id}");
                 }
             }
-            // A "heuristic"/"floodfill" model spec plays the fixed flood-fill
-            // MCTS baseline (snek-heuristic) — no weights, no libtorch. Its
-            // sims are ~100× cheaper than a net forward, so in fixed-sims mode
-            // it keeps its own static budget (~200ms/move, still
-            // deterministic) instead of the nets' --sims; in time mode the
-            // shared per-move deadline binds it like everyone else.
-            if snek_heuristic::is_heuristic_spec(&model) {
-                let hcfg = snek_heuristic::HeuristicConfig {
-                    max_sims: match budget {
-                        Budget::Sims(_) => {
-                            snek_heuristic::HeuristicConfig::default().max_sims
-                        }
-                        Budget::TimeMs(_) => usize::MAX,
-                    },
-                    draw_value: cfg.draw_value,
-                    ..Default::default()
-                };
-                while let Ok(job) = job_rx.recv() {
-                    let deadline = match budget {
-                        Budget::Sims(_) => Instant::now() + SIMS_DEADLINE,
-                        Budget::TimeMs(ms) => Instant::now() + Duration::from_millis(ms),
+            match parse_player(&model) {
+                // A built-in heuristic agent — no weights, no libtorch. Its
+                // sims are ~100× cheaper than a net forward, so in fixed-sims
+                // mode it keeps its own static budget (~200ms/move, still
+                // deterministic) instead of the nets' --sims; in time mode
+                // the shared per-move deadline binds it like everyone else.
+                PlayerKind::Baseline(kind) => {
+                    let hcfg = snek_heuristic::HeuristicConfig {
+                        max_sims: match budget {
+                            Budget::Sims(_) => {
+                                snek_heuristic::HeuristicConfig::default().max_sims
+                            }
+                            Budget::TimeMs(_) => usize::MAX,
+                        },
+                        draw_value: cfg.draw_value,
+                        ..Default::default()
                     };
-                    let d = snek_heuristic::heuristic_move_until(
-                        &hcfg,
-                        &job.board,
-                        job.me,
-                        deadline,
-                    );
-                    let _ = job.reply.send(MoveInfo {
-                        move_index: d.move_index,
-                        policy: d.policy,
-                        value: d.value,
-                    });
+                    while let Ok(job) = job_rx.recv() {
+                        let deadline = match budget {
+                            Budget::Sims(_) => Instant::now() + SIMS_DEADLINE,
+                            Budget::TimeMs(ms) => Instant::now() + Duration::from_millis(ms),
+                        };
+                        let d = snek_heuristic::baseline_move_until(
+                            kind,
+                            &hcfg,
+                            &job.board,
+                            job.me,
+                            deadline,
+                        );
+                        let _ = job.reply.send(MoveInfo {
+                            move_index: d.move_index,
+                            policy: d.policy,
+                            value: d.value,
+                        });
+                    }
+                    return;
                 }
-                return;
+                // An external Battlesnake-protocol server: POST {url}/move
+                // with the standard game state, play whatever it answers. A
+                // failed or illegal answer falls back to a sane legal move so
+                // one flaky server can't wedge a whole match.
+                PlayerKind::Http(url) => {
+                    http_player_loop(&label, &url, budget, job_rx);
+                    return;
+                }
+                PlayerKind::Net => {}
             }
             let mut net = Net::load(&model)
                 .unwrap_or_else(|e| panic!("arena: {label}: failed to load {model}: {e}"));
@@ -472,6 +510,109 @@ fn spawn_worker(
         })
         .expect("spawn arena worker");
     job_tx
+}
+
+/// Worker loop for an external HTTP player. Speaks the standard Battlesnake
+/// wire protocol (POST /move → {"move": "up"|"down"|"left"|"right"}), so any
+/// community snake server can take a seat. `snek-core` shares Battlesnake's
+/// coordinate system (x right, y up, origin bottom-left), so positions map
+/// verbatim. Only /move is called — /start and /end are skipped because games
+/// run concurrently and every request carries the full state.
+fn http_player_loop(label: &str, url: &str, budget: Budget, job_rx: mpsc::Receiver<MoveJob>) {
+    // Battlesnake's standard reply budget is 500ms; in time mode the shared
+    // per-move budget binds instead.
+    let timeout_ms = match budget {
+        Budget::Sims(_) => 500,
+        Budget::TimeMs(ms) => ms.max(1),
+    };
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_millis(timeout_ms))
+        .build();
+    let endpoint = format!("{url}/move");
+    let mut errors = 0u64;
+    while let Ok(job) = job_rx.recv() {
+        let state = battlesnake_state(&job.board, job.me, timeout_ms);
+        let answer = agent
+            .post(&endpoint)
+            .send_json(state)
+            .map_err(|e| e.to_string())
+            .and_then(|resp| {
+                resp.into_json::<serde_json::Value>()
+                    .map_err(|e| e.to_string())
+            })
+            .and_then(|v| {
+                match v
+                    .get("move")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_ascii_lowercase)
+                    .as_deref()
+                {
+                    Some("up") => Ok(Move::Up),
+                    Some("down") => Ok(Move::Down),
+                    Some("left") => Ok(Move::Left),
+                    Some("right") => Ok(Move::Right),
+                    other => Err(format!("bad move {other:?}")),
+                }
+            });
+        let mv = answer.unwrap_or_else(|err| {
+            errors += 1;
+            // First few failures loudly, then sampled — a dead server would
+            // otherwise write one line per turn.
+            if errors <= 3 || errors.is_multiple_of(100) {
+                eprintln!("arena: {label}: {endpoint} failed ({errors} so far): {err}");
+            }
+            snek_heuristic::candidates(&job.board, job.me)[0]
+        });
+        let mut policy = [0f32; 4];
+        policy[mv.index()] = 1.0;
+        let _ = job.reply.send(MoveInfo {
+            move_index: mv.index(),
+            policy,
+            value: 0.0,
+        });
+    }
+}
+
+/// The standard Battlesnake /move request body for `me`'s view of `board`.
+/// Dead snakes are omitted, exactly like the real engine.
+fn battlesnake_state(board: &Board, me: usize, timeout_ms: u64) -> serde_json::Value {
+    let point = |p: &snek_core::Point| json!({ "x": p.x as i32, "y": p.y as i32 });
+    let snake = |i: usize| {
+        let s = &board.snakes[i];
+        let body: Vec<_> = s.body.iter().map(|p| point(&p)).collect();
+        json!({
+            "id": format!("seat-{i}"),
+            "name": format!("seat-{i}"),
+            "health": s.health as i32,
+            "body": body,
+            "head": body.first().cloned().unwrap_or_else(|| json!({"x": 0, "y": 0})),
+            "length": s.len(),
+            "latency": "0",
+            "shout": "",
+        })
+    };
+    let alive: Vec<_> = (0..board.snakes.len())
+        .filter(|&i| board.snakes[i].alive())
+        .map(snake)
+        .collect();
+    json!({
+        "game": {
+            "id": "snek3-arena",
+            "ruleset": { "name": "standard", "version": "v1" },
+            "map": "standard",
+            "source": "custom",
+            "timeout": timeout_ms,
+        },
+        "turn": board.turn,
+        "board": {
+            "width": board.width as i32,
+            "height": board.height as i32,
+            "food": board.food.iter().map(&point).collect::<Vec<_>>(),
+            "hazards": board.hazards.iter().map(point).collect::<Vec<_>>(),
+            "snakes": alive,
+        },
+        "you": snake(me),
+    })
 }
 
 /// One seat's result: which net played it and where it finished. Rank 1 is

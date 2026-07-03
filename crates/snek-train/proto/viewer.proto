@@ -85,6 +85,9 @@ message LeagueRating {
   uint32 games = 3;
   uint32 wins = 4;      // rank-1 finishes
   double avg_rank = 5;
+  // Display name ("gen_0042", "floodfill", or a configured API player's
+  // name). Empty for ratings written before names existed.
+  string name = 6;
 }
 
 message RunDetail {

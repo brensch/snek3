@@ -14,6 +14,7 @@ import { useLiveStats } from "../hooks/useLiveStats";
 import { useLogs } from "../hooks/useLogs";
 import { useRunDetail } from "../hooks/useRunDetail";
 import { series } from "../lib/palette";
+import { registerPlayerNames } from "../lib/players";
 import type { RunConfig } from "../types";
 
 // One run, laid out by what a monitor needs first:
@@ -62,6 +63,8 @@ export function RunView() {
 
   const metrics = detail?.metrics ?? [];
   const league = detail?.league ?? [];
+  // Make external players (API snakes) nameable anywhere an id appears.
+  registerPlayerNames(league);
   const gens = metrics.map((m) => m.generation);
   const lrRows = metrics.filter((m) => m.lr > 0);
 

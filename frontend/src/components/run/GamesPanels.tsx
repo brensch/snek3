@@ -101,7 +101,7 @@ function LivePanel({ live }: { live: LiveEval | null }) {
           {chips.map((p, i) => (
             <span key={i} className="flex items-baseline gap-1.5 rounded-md bg-inset px-2 py-1 text-[11px]">
               <span className="h-2 w-2 shrink-0 self-center rounded-full" style={{ background: snakeColor(i) }} />
-              <span className="font-mono font-semibold text-ink">{p ? playerName(p.gen) : "–"}</span>
+              <span className="font-mono font-semibold text-ink">{p ? p.name || playerName(p.gen) : "–"}</span>
               <span className="ml-auto font-mono tabular-nums text-ink-2">
                 {p ? `${p.elo >= 0 ? "+" : ""}${p.elo.toFixed(0)}` : "–"}
               </span>
@@ -138,7 +138,7 @@ function LivePanel({ live }: { live: LiveEval | null }) {
         {live.players.map((p, i) => (
           <span key={i} className="flex items-baseline gap-1.5 rounded-md bg-inset px-2 py-1 text-[11px]">
             <span className="h-2 w-2 shrink-0 self-center rounded-full" style={{ background: snakeColor(i) }} />
-            <span className="font-mono font-semibold text-ink">{playerName(p.gen)}</span>
+            <span className="font-mono font-semibold text-ink">{p.name || playerName(p.gen)}</span>
             <span className="ml-auto font-mono tabular-nums text-ink-2">
               {p.elo >= 0 ? "+" : ""}
               {p.elo.toFixed(0)}
