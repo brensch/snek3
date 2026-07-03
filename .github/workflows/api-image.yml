@@ -42,7 +42,10 @@ jobs:
         with:
           context: .
           file: deploy/server.Dockerfile
-          push: true
+          # zstd layers pull smaller and decompress much faster than gzip.
+          # Pulling requires a containerd-backed docker on the host; if the
+          # deploy box ever fails to pull, drop this back to `push: true`.
+          outputs: type=image,push=true,oci-mediatypes=true,compression=zstd,compression-level=19,force-compression=true
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api

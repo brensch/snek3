@@ -24,8 +24,12 @@ RUN apt-get update \
 # compiled out (no CUDA headers needed). Python bindings dropped up front.
 RUN curl -fsSL -o /tmp/libtorch.zip \
         "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-2.11.0%2Bcpu.zip" \
-    && unzip -q /tmp/libtorch.zip -d /opt \
-    && rm /tmp/libtorch.zip /opt/libtorch/lib/libtorch_python.so
+    # Skip the Python bindings and static libs (~270MB, libdnnl.a alone is
+    # 186MB) at extraction: link-time leftovers — torch-sys links the shared
+    # libs, so nothing needs them at build or runtime. No archive without them
+    # exists upstream, so the full zip is still downloaded.
+    && unzip -q /tmp/libtorch.zip -x "libtorch/lib/*.a" "libtorch/lib/libtorch_python.so" -d /opt \
+    && rm /tmp/libtorch.zip
 ENV LIBTORCH=/opt/libtorch \
     SNEK_TORCH_DIR=/opt/libtorch
 WORKDIR /src
