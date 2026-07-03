@@ -4,6 +4,9 @@
 #   deploy/runpod.sh launch [gpu]           create an on-demand pod (default: 4090)
 #   deploy/runpod.sh status                 list your pods with cost + GPU
 #   deploy/runpod.sh stop <pod-id>          terminate a pod (volume is destroyed too)
+#   deploy/runpod.sh push <run-id>          copy runs/<run-id> onto the network volume (no pod needed)
+#   deploy/runpod.sh fetch <run-id>         copy the network volume's run back to runs/<run-id>
+#   deploy/runpod.sh ls [path]              list the network volume's contents
 #   deploy/runpod.sh sync <run-id> [host]   copy runs/<run-id> onto the pod over Tailscale SSH
 #   deploy/runpod.sh pull <run-id> [host]   copy /runs/<run-id> back from the pod
 #
@@ -11,8 +14,10 @@
 # gpuTypeId like "NVIDIA GeForce RTX 4090".
 #
 # Keys are read from the environment, then the repo .env, then ~/.snek-ts.env:
-#   RUNPOD_APIKEY   RunPod API key
-#   TS_AUTHKEY      tailnet auth key (reusable + ephemeral; see DASHBOARD.md)
+#   RUNPOD_APIKEY      RunPod API key
+#   TS_AUTHKEY         tailnet auth key (reusable + ephemeral; see DASHBOARD.md)
+#   RUNPOD_S3_ACCESSKEY   S3 API access key (user_...) for push/fetch/ls
+#   RUNPOD_S3_APIKEY   S3 API secret key (rps_...); created console Settings -> S3 API keys
 #
 # Launch knobs (env): RUN_ID (default main), TS_HOSTNAME (default
 #   snek-train-runpod), IMAGE (default ghcr.io/brensch/snek3-trainer:latest),
@@ -20,15 +25,15 @@
 #   seed /runs first, then start from the dashboard).
 #
 # Storage: by default pods mount the "snek3-runs" network volume (NETVOL,
-#   default ucc8x95ndn, US-NC-1) at /runs — it outlives pods, so runs survive
+#   default sdde6lnvh6, US-NC-1) at /runs — it outlives pods, so runs survive
 #   termination and every new pod sees the same data. Network volumes are
 #   secure-cloud only and pin the pod to their datacenter. Set NETVOL= (empty)
 #   for a pod-local volume instead (VOLUME_GB, default 50; CLOUD selects
 #   COMMUNITY|SECURE|ALL, default COMMUNITY).
 #
-# On-demand only, deliberately: spot pods get preempted and the replay buffer
-# isn't checkpointed, so every interruption costs ~20-30 generations of
-# flat win-rate while the buffer refills.
+# On-demand by default. The replay buffer persists per-gen (zstd shards), so a
+# preemption now costs only the partial generation — spot is viable when the
+# network volume holds the run state.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -58,6 +63,20 @@ gql() { # gql <query-json> -> response body, dies on GraphQL errors
     printf '%s' "$resp"
 }
 
+# aws cli against the network volume's S3-compatible door (works with no pod
+# running; the volume ID is the bucket). The aws cli is the client RunPod
+# officially supports — rclone's signer trips over their S3 implementation.
+# Credentials are injected via env so no ~/.aws config is ever written.
+s3aws() {
+    local dc=${S3_DC:-us-nc-1}   # the volume's datacenter
+    local access secret
+    access=$(env_lookup RUNPOD_S3_ACCESSKEY)
+    secret=$(env_lookup RUNPOD_S3_APIKEY)
+    AWS_ACCESS_KEY_ID="$access" AWS_SECRET_ACCESS_KEY="$secret" \
+    AWS_DEFAULT_REGION="$dc" \
+        aws --endpoint-url "https://s3api-$dc.runpod.io" s3 "$@"
+}
+
 gpu_id() {
     case "${1,,}" in
         4090) echo "NVIDIA GeForce RTX 4090" ;;
@@ -76,7 +95,7 @@ launch)
     RUNPOD_APIKEY=$(env_lookup RUNPOD_APIKEY)
     TS_AUTHKEY=$(env_lookup TS_AUTHKEY)
     gpu=$(gpu_id "${2:-4090}")
-    netvol=${NETVOL-ucc8x95ndn}
+    netvol=${NETVOL-sdde6lnvh6}
     if [[ -n "$netvol" ]]; then
         cloud=${CLOUD:-SECURE}   # network volumes are secure-cloud only
     else
@@ -122,6 +141,25 @@ stop)
         '{query: "mutation($in: PodTerminateInput!) { podTerminate(input: $in) }", variables: {in: {podId: $id}}}')" >/dev/null
     echo "terminated $pod"
     ;;
+push)
+    run_id=${2:?usage: deploy/runpod.sh push <run-id>}
+    netvol=${NETVOL:-sdde6lnvh6}
+    [[ -d "$REPO_DIR/runs/$run_id" ]] || { echo "error: no runs/$run_id locally" >&2; exit 1; }
+    echo "pushing runs/$run_id -> volume $netvol ..."
+    s3aws sync --delete "$REPO_DIR/runs/$run_id" "s3://$netvol/$run_id"
+    echo "done; pods mounting $netvol see it at /runs/$run_id"
+    ;;
+fetch)
+    run_id=${2:?usage: deploy/runpod.sh fetch <run-id>}
+    netvol=${NETVOL:-sdde6lnvh6}
+    echo "fetching volume $netvol/$run_id -> runs/$run_id ..."
+    s3aws sync --delete "s3://$netvol/$run_id" "$REPO_DIR/runs/$run_id"
+    echo "done"
+    ;;
+ls)
+    netvol=${NETVOL:-sdde6lnvh6}
+    s3aws ls "s3://$netvol/${2:-}"
+    ;;
 sync)
     run_id=${2:?usage: deploy/runpod.sh sync <run-id> [host]}
     host=${3:-${TS_HOSTNAME:-snek-train-runpod}}
@@ -141,6 +179,6 @@ pull)
     echo "done"
     ;;
 *)
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac

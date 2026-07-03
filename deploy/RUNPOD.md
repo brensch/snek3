@@ -14,7 +14,7 @@ deploy/runpod.sh stop <pod-id>      # terminate
 
 The pod pulls `ghcr.io/brensch/snek3-trainer:latest` (public), gets
 `TS_AUTHKEY`/`TS_HOSTNAME`/`RUN_ID` as env, and mounts the **snek3-runs
-network volume** (`ucc8x95ndn`, 100 GB, US-NC-1, ~$7/mo) at `/runs`. The
+network volume** (`sdde6lnvh6`, 10 GB, US-NC-1, ~$0.70/mo) at `/runs`. The
 volume outlives pods: terminate freely, relaunch on whatever GPU is
 available, and the runs are still there — upload a run once, reuse it
 across pods. The trade-offs: secure-cloud pricing only, and pods are pinned
