@@ -34,7 +34,17 @@ RUN apt-get update \
 RUN curl -fsSL -o /tmp/libtorch.zip \
         "https://download.pytorch.org/libtorch/cu128/libtorch-shared-with-deps-2.11.0%2Bcu128.zip" \
     && unzip -q /tmp/libtorch.zip -d /opt \
-    && rm /tmp/libtorch.zip /opt/libtorch/lib/libtorch_python.so
+    && rm /tmp/libtorch.zip /opt/libtorch/lib/libtorch_python.so \
+    # Prune bundle libs the trainer never loads (~1.9GB): static libs are
+    # link-time leftovers; the rest are lazily dlopened by features we don't
+    # use (sparse matmul, cuDNN RNN/attention, multi-GPU nvshmem, profiler,
+    # torch.linalg — init QR runs on CPU so cuda_linalg has no callers).
+    && rm /opt/libtorch/lib/*.a \
+          /opt/libtorch/lib/libcusparseLt*.so* \
+          /opt/libtorch/lib/libcudnn_adv.so* \
+          /opt/libtorch/lib/libnvshmem_host*.so* \
+          /opt/libtorch/lib/libnvperf_host*.so* \
+          /opt/libtorch/lib/libtorch_cuda_linalg.so
 COPY --from=cuda-headers /usr/local/cuda/include /opt/cuda/include
 ENV LIBTORCH=/opt/libtorch \
     SNEK_TORCH_DIR=/opt/libtorch \

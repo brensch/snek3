@@ -10,6 +10,7 @@
 #   TS_AUTHKEY   (required on first run) tailnet auth key; use a reusable,
 #                ephemeral key so pods self-register and vanish when they die.
 #   TS_HOSTNAME  node name on the tailnet (default: snek-train)
+#   TS_SSH       enable Tailscale SSH into the node (default: 1; set 0 to disable)
 #   DASH_PORT    local dashboard port to expose (default: 8050)
 #   TS_DIR       where to keep binaries + node state (default: ~/.snek-tailscale)
 set -euo pipefail
@@ -62,6 +63,12 @@ fi
 up_args=(--hostname="$TS_HOSTNAME")
 if [[ -n "${TS_AUTHKEY:-}" ]]; then
     up_args+=(--authkey="$TS_AUTHKEY")
+fi
+# Tailscale SSH (built into tailscaled; works in userspace mode) lets any
+# tailnet device scp/tar run data onto the pod: `ssh root@$TS_HOSTNAME`.
+# TS_SSH=0 disables it.
+if [[ "${TS_SSH:-1}" != "0" ]]; then
+    up_args+=(--ssh)
 fi
 "$TAILSCALE" --socket="$SOCKET" up "${up_args[@]}"
 

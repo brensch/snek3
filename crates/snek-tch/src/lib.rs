@@ -4,7 +4,7 @@
 //! per-cell "move my head onto this cell" logit map read out at the four
 //! neighbours of the snake's head, instead of the archived global-pool linear.
 
-use tch::{nn, nn::Module, Kind, Tensor};
+use tch::{nn, nn::Module, Device, Kind, Tensor};
 
 #[cfg(snek_cuda)]
 pub mod cudagraph;
@@ -92,7 +92,9 @@ pub fn init_orthogonal(vs: &nn::VarStore, gain: f64) {
             }
             let rows = dims[0];
             let cols: i64 = dims[1..].iter().product();
-            let flat = Tensor::randn([rows, cols], (Kind::Float, w.device()));
+            // QR on CPU: init-time only, and keeping linalg off the GPU lets the
+            // trainer image drop libtorch_cuda_linalg.so (791MB), its sole user.
+            let flat = Tensor::randn([rows, cols], (Kind::Float, Device::Cpu));
             let flat = if rows < cols {
                 flat.transpose(0, 1)
             } else {
