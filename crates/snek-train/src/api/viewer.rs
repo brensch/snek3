@@ -105,26 +105,34 @@ fn league(root: &Path) -> Vec<proto::LeagueRating> {
         .collect()
 }
 
-/// Load one league game's recording (eval/match_SSSSSS.json, tolerating older
-/// suffixed names via prefix match). Same schema and wire format as self-play
-/// sample games, so the frontend reuses one viewer.
+/// Load the league recording containing game `seq`. A match file is named
+/// after its first game's seq (eval/match_SSSSSS.json) and holds every game of
+/// the match, so any seq in the match resolves to the same file: pick the
+/// largest base at or below `seq` and check the file actually spans it.
+/// (Older single-game recordings — including legacy names carrying the pairing
+/// after the seq — parse the same way with base == seq.) Same schema and wire
+/// format as self-play sample games, so the frontend reuses one viewer.
 pub fn eval_game_file(root: &Path, seq: u64) -> Option<proto::GameFile> {
     let dir = root.join("eval");
-    let mut path = dir.join(format!("match_{seq:06}.json"));
-    if !path.exists() {
-        // Older recordings carried the pairing in the name.
-        let prefix = format!("match_{seq:06}");
-        path = std::fs::read_dir(&dir)
-            .ok()?
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&prefix) && n.ends_with(".json"))
-                    .unwrap_or(false)
-            })?;
-    }
+    let path = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter_map(|p| {
+            let name = p.file_name()?.to_str()?;
+            if !name.ends_with(".json") {
+                return None;
+            }
+            let base: u64 = name
+                .strip_prefix("match_")?
+                .split(['_', '.'])
+                .next()?
+                .parse()
+                .ok()?;
+            (base <= seq).then_some((base, p))
+        })
+        .max_by_key(|&(base, _)| base)?;
+    let (base, path) = path;
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) => {
@@ -133,7 +141,10 @@ pub fn eval_game_file(root: &Path, seq: u64) -> Option<proto::GameFile> {
         }
     };
     match serde_json::from_str::<GameFileJson>(&text) {
-        Ok(parsed) => Some(convert_game_file(parsed)),
+        Ok(parsed) if (seq - base) < parsed.games.len() as u64 => {
+            Some(convert_game_file(parsed))
+        }
+        Ok(_) => None,
         Err(err) => {
             tracing::warn!(?path, %err, "parse eval game file failed");
             None

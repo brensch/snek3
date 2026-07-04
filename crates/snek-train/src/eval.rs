@@ -1,9 +1,11 @@
-//! Continuous evaluation league. While a run is active, one arena game is
+//! Continuous evaluation league. While a run is active, one arena *match* is
 //! always in flight on pinned CPU cores: every checkpoint at a multiple of
 //! `league_entrant_gens` generations joins the pool, the scheduler picks
-//! `num_snakes` distinct nets per game (by expected information gain), plays
-//! one game via the snek-server `arena` binary — every net controlling its own
-//! snake — and refits ratings over *all* recorded results after every game.
+//! `num_snakes` distinct nets per match (by expected information gain), plays
+//! several concurrent games via the snek-server `arena` binary — every net
+//! controlling its own snake, seats rotating per game — and refits ratings
+//! over *all* recorded results after every match. The league's CPU allotment
+//! is derived from the machine (see [`league_layout`]), not configured.
 //!
 //! Ratings are the Plackett–Luce model: the multiplayer generalization of
 //! Bradley–Terry (identical to it for two players), whose likelihood of a full
@@ -280,6 +282,8 @@ struct GameEvent {
     #[serde(default)]
     turns: u32,
     #[serde(default)]
+    wall_ms: u64,
+    #[serde(default)]
     placements: Vec<ArenaPlacement>,
     /// The turn's board frame (turn events only): same JSON shape as one frame
     /// of games/gen_NNNN.json, passed through verbatim to the live view.
@@ -447,9 +451,10 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
             sleep_unless_stopped(stop, 15);
             continue;
         }
+        let layout = league_layout(cfg.num_snakes.min(pool.len()).max(2), cfg.num_snakes);
         if !announced {
             metrics.log(format!(
-                "eval league: running — pool of {} players incl. {} external ({}), entrant every {} gens, {} distinct players per game, {} sims",
+                "eval league: running — pool of {} players incl. {} external ({}), entrant every {} gens, {} distinct players per game, {} sims, {} worker cores, {} games per match ({} concurrent)",
                 pool.len(),
                 registry.active.len(),
                 registry
@@ -461,6 +466,9 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
                 cfg.league_entrant_gens,
                 cfg.num_snakes.min(pool.len()),
                 cfg.eval_sims,
+                layout.workers,
+                layout.games,
+                layout.parallel,
             ));
             announced = true;
         }
@@ -483,7 +491,7 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
                 games: career(gen),
             })
             .collect();
-        match run_match(
+        let result = run_match(
             &bin,
             paths,
             &eval_dir,
@@ -492,57 +500,73 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
             &players,
             live_players,
             seq,
+            &layout,
             stop,
-        ) {
-            MatchResult::Done(record) => {
-                let mut order = record.placements.clone();
-                order.sort_by_key(|p| p.rank);
-                metrics.log(format!(
-                    "eval league #{seq}: {ranking} ({turns} turns) — {rated} nets rated",
-                    ranking = order
-                        .iter()
-                        .map(|p| registry.display(p.gen))
-                        .collect::<Vec<_>>()
-                        .join(" > "),
-                    turns = record.turns,
-                    rated = pool.len(),
-                ));
-                if let Err(err) = append_summary(&eval_dir.join("summary.jsonl"), &record) {
-                    metrics.log(format!("eval league: failed to append summary: {err}"));
-                }
-                records.push(record);
-                let fitted = fit_ratings(&pool, &records);
-                if let Err(err) = write_ratings(
-                    &eval_dir.join("ratings.json"),
-                    &records,
-                    &fitted,
-                    &registry,
-                ) {
-                    metrics.log(format!("eval league: failed to write ratings: {err}"));
-                }
-                prune_match_files(&eval_dir, KEEP_MATCH_FILES);
-                seq += 1;
+        );
+        // Persist whatever finished — a pause or a crash mid-match still
+        // yields complete, valid games — then refit once over everything.
+        let (finished, stopped, failure) = match result {
+            MatchResult::Done(finished) => (finished, false, None),
+            MatchResult::Stopped(finished) => (finished, true, None),
+            MatchResult::Failed(err, finished) => (finished, false, Some(err)),
+        };
+        for record in finished {
+            let mut order = record.placements.clone();
+            order.sort_by_key(|p| p.rank);
+            metrics.log(format!(
+                "eval league #{n}: {ranking} ({turns} turns, {secs:.0}s)",
+                n = record.seq,
+                ranking = order
+                    .iter()
+                    .map(|p| registry.display(p.gen))
+                    .collect::<Vec<_>>()
+                    .join(" > "),
+                turns = record.turns,
+                secs = record.wall_seconds,
+            ));
+            if let Err(err) = append_summary(&eval_dir.join("summary.jsonl"), &record) {
+                metrics.log(format!("eval league: failed to append summary: {err}"));
             }
-            MatchResult::Stopped => break,
-            MatchResult::Failed(err) => {
-                metrics.log(format!("eval league #{seq}: game failed: {err}"));
-                seq += 1;
-                sleep_unless_stopped(stop, 30);
+            records.push(record);
+        }
+        if let Some(last) = records.last() {
+            let fitted = fit_ratings(&pool, &records);
+            if let Err(err) = write_ratings(
+                &eval_dir.join("ratings.json"),
+                &records,
+                &fitted,
+                &registry,
+            ) {
+                metrics.log(format!("eval league: failed to write ratings: {err}"));
             }
+            prune_match_files(&eval_dir, KEEP_MATCH_FILES);
+            seq = seq.max(last.seq + 1);
+        }
+        if stopped {
+            break;
+        }
+        if let Some(err) = failure {
+            metrics.log(format!("eval league #{seq}: match failed: {err}"));
+            seq += 1;
+            sleep_unless_stopped(stop, 30);
         }
     }
     metrics.log("eval league: stopped".to_string());
 }
 
 enum MatchResult {
-    Done(MatchRecord),
-    Stopped,
-    Failed(String),
+    /// Every game finished (records carry seqs `seq_base + game index`).
+    Done(Vec<MatchRecord>),
+    /// The run paused mid-match; completed games are still worth keeping.
+    Stopped(Vec<MatchRecord>),
+    /// The arena died; completed games are still worth keeping.
+    Failed(String, Vec<MatchRecord>),
 }
 
-/// Play one game (blocking): spawn the arena with one seat per selected net,
-/// stream its stdout events into the live view, and build the placement record
-/// from the game event. `stop` kills the arena promptly on a pause.
+/// Play one match (blocking): spawn the arena with one seat per selected net
+/// and `layout.games` concurrent games, stream its stdout events into the live
+/// view, and build one placement record per finished game. `stop` kills the
+/// arena promptly on a pause.
 #[allow(clippy::too_many_arguments)]
 fn run_match(
     bin: &Path,
@@ -553,9 +577,9 @@ fn run_match(
     players: &[u32],
     live_players: Vec<LivePlayer>,
     seq: u64,
+    layout: &LeagueLayout,
     stop: &AtomicBool,
 ) -> MatchResult {
-    let start = std::time::Instant::now();
     let record_path = eval_dir.join(format!("match_{seq:06}.json"));
     let log_path = eval_dir.join(format!("arena_{seq:06}.log"));
     let nets: Vec<String> = players
@@ -570,18 +594,17 @@ fn run_match(
         })
         .collect();
     let names: Vec<String> = players.iter().map(|&g| registry.display(g)).collect();
-    let cores = league_cores(players.len(), cfg.eval_cores);
 
     let mut command = std::process::Command::new(bin);
     command
         .args(["--nets", &nets.join(",")])
         .args(["--names", &names.join(",")])
-        .args(["--games", "1"])
+        .args(["--games", &layout.games.to_string()])
+        .args(["--parallel", &layout.parallel.to_string()])
         .args(["--seats", &cfg.num_snakes.to_string()])
         .args(["--sims", &cfg.eval_sims.to_string()])
         .args(["--board", &cfg.board.to_string()])
-        .args(["--cores", &cores])
-        .args(["--cores-per-net", &cfg.eval_cores.to_string()])
+        .args(["--cores", &layout.cores])
         .args(["--seed", &seq.wrapping_mul(1_000_003).to_string()])
         .args([
             "--record-gen",
@@ -608,7 +631,7 @@ fn run_match(
 
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(err) => return MatchResult::Failed(format!("spawn: {err}")),
+        Err(err) => return MatchResult::Failed(format!("spawn: {err}"), Vec::new()),
     };
     // Publish the in-flight game to the live SSE view, and guarantee the
     // "active" flag drops on every exit path.
@@ -653,37 +676,38 @@ fn run_match(
             }
         })
     });
-    let mut result: Option<MatchRecord> = None;
-    let apply = |ev: GameEvent, result: &mut Option<MatchRecord>| {
+    // One record per finished game, seq'd by the arena's game index so the
+    // summary lines up with the recorded match file's game order (games
+    // finish out of order when several run concurrently).
+    let mut records: Vec<MatchRecord> = Vec::new();
+    let apply = |ev: GameEvent, records: &mut Vec<MatchRecord>| {
         if ev.event != "game" {
             return;
         }
-        {
-            let placements = ev
-                .placements
-                .iter()
-                .map(|p| Placement {
-                    gen: players.get(p.net as usize).copied().unwrap_or(0),
-                    seat: p.seat,
-                    rank: p.rank,
-                    death_turn: p.death_turn,
-                })
-                .collect();
-            *result = Some(MatchRecord {
-                seq,
-                placements,
-                turns: ev.turns,
-                sims: cfg.eval_sims as u32,
-                wall_seconds: 0.0,
-                finished_unix_ms: 0,
-                gen: None,
-                opponent_gen: None,
-                wins: 0,
-                losses: 0,
-                draws: 0,
-            });
-            set_live(|l| l.games.retain(|g| g.index != ev.index));
-        }
+        let placements = ev
+            .placements
+            .iter()
+            .map(|p| Placement {
+                gen: players.get(p.net as usize).copied().unwrap_or(0),
+                seat: p.seat,
+                rank: p.rank,
+                death_turn: p.death_turn,
+            })
+            .collect();
+        records.push(MatchRecord {
+            seq: seq + ev.index as u64,
+            placements,
+            turns: ev.turns,
+            sims: cfg.eval_sims as u32,
+            wall_seconds: ev.wall_ms as f64 / 1000.0,
+            finished_unix_ms: chrono::Utc::now().timestamp_millis(),
+            gen: None,
+            opponent_gen: None,
+            wins: 0,
+            losses: 0,
+            draws: 0,
+        });
+        set_live(|l| l.games.retain(|g| g.index != ev.index));
     };
     let status = loop {
         if stop.load(Ordering::Relaxed) {
@@ -692,37 +716,38 @@ fn run_match(
             if let Some(handle) = reader {
                 let _ = handle.join();
             }
-            return MatchResult::Stopped;
+            while let Ok(ev) = event_rx.try_recv() {
+                apply(ev, &mut records);
+            }
+            records.sort_by_key(|r| r.seq);
+            return MatchResult::Stopped(records);
         }
         while let Ok(ev) = event_rx.try_recv() {
-            apply(ev, &mut result);
+            apply(ev, &mut records);
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(Duration::from_millis(500)),
-            Err(err) => return MatchResult::Failed(format!("wait: {err}")),
+            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            Err(err) => return MatchResult::Failed(format!("wait: {err}"), records),
         }
     };
     if let Some(handle) = reader {
         let _ = handle.join();
     }
     while let Ok(ev) = event_rx.try_recv() {
-        apply(ev, &mut result);
+        apply(ev, &mut records);
     }
+    records.sort_by_key(|r| r.seq);
     if !status.success() {
-        return MatchResult::Failed(format!(
-            "arena exited with {status} (see {})",
-            log_path.display()
-        ));
+        return MatchResult::Failed(
+            format!("arena exited with {status} (see {})", log_path.display()),
+            records,
+        );
     }
-    match result {
-        Some(mut record) => {
-            record.wall_seconds = start.elapsed().as_secs_f64();
-            record.finished_unix_ms = chrono::Utc::now().timestamp_millis();
-            MatchResult::Done(record)
-        }
-        None => MatchResult::Failed("arena exited without reporting a game".into()),
+    if records.is_empty() {
+        return MatchResult::Failed("arena exited without reporting a game".into(), records);
     }
+    MatchResult::Done(records)
 }
 
 /// Checkpoints eligible for the pool: every archived generation at a multiple
@@ -1072,21 +1097,54 @@ fn arena_bin() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("crates/snek-server/target/release/arena"))
 }
 
-/// Pin the league to the machine's highest-numbered cores (self-play's rayon
-/// pool is unpinned, so the scheduler migrates it away): `players × per_net`
-/// cores counted down from the top, as a flat spec the arena splits per net.
-fn league_cores(players: usize, per_net: usize) -> String {
+/// The league's CPU allotment, derived from the machine instead of a config
+/// knob: everything except a reserve for the trainer / self-play host threads
+/// (a quarter of the machine, clamped to [2, 8] cores). Each search runs
+/// single-threaded on one pinned worker, so a lone game can only ever busy
+/// `seats` cores — the layout therefore also sizes how many games one match
+/// plays concurrently so every worker has a search in flight. Workers are
+/// pinned to the highest-numbered cores (self-play's rayon pool is unpinned,
+/// so the scheduler migrates it away).
+struct LeagueLayout {
+    /// Flat pinned-core spec the arena splits per net, `workers` long.
+    cores: String,
+    /// Total worker threads (`players × per-net workers`).
+    workers: usize,
+    /// Concurrent games in flight: 2× the table count. Games spend most of
+    /// their turns as 2-snake endgames (half the table dead), so a game
+    /// averages ~seats/2 busy workers — one table of workers per *two* games
+    /// keeps them fed. Measured on a 16-thread box: this doubled throughput
+    /// over one-table parallelism, and doubling again added nothing (HT
+    /// contention) while doubling per-game latency.
+    parallel: usize,
+    /// Games per match: 2× parallel, so pools stay fed as games end unevenly
+    /// and the arena's process/model-load cost is amortized further.
+    games: usize,
+}
+
+fn league_layout(players: usize, seats: usize) -> LeagueLayout {
     let total = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let want = (players * per_net.max(1))
-        .min(total.saturating_sub(1))
-        .max(players);
-    let lo = total.saturating_sub(want);
-    (lo..total)
+    league_layout_for(total, players, seats)
+}
+
+fn league_layout_for(total: usize, players: usize, seats: usize) -> LeagueLayout {
+    let reserve = (total / 4).clamp(2, 8).min(total.saturating_sub(players));
+    let per_net = ((total - reserve) / players).max(1);
+    let workers = players * per_net;
+    let lo = total.saturating_sub(workers);
+    let cores = (lo..total)
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
-        .join(",")
+        .join(",");
+    let parallel = (2 * workers / seats.max(1)).max(1);
+    LeagueLayout {
+        cores,
+        workers,
+        parallel,
+        games: parallel * 2,
+    }
 }
 
 fn sleep_unless_stopped(stop: &AtomicBool, secs: u64) {
@@ -1486,6 +1544,36 @@ mod tests {
         }
         assert!(with_ff > 15, "floodfill only drawn {with_ff}/120");
         assert!(with_vor > 15, "voronoi only drawn {with_vor}/120");
+    }
+
+    #[test]
+    fn league_layout_saturates_the_machine_minus_a_reserve() {
+        // 16 threads, 4 players, 4 seats (the dev box): reserve 4, 3 workers
+        // per net, 12 pinned cores, 6 concurrent games, 12 games per match.
+        let l = league_layout_for(16, 4, 4);
+        assert_eq!(l.workers, 12);
+        assert_eq!(l.parallel, 6);
+        assert_eq!(l.games, 12);
+        assert_eq!(l.cores, "4,5,6,7,8,9,10,11,12,13,14,15");
+
+        // 32 threads: reserve 8 → 6 per net, 24 workers, 12 concurrent.
+        let l = league_layout_for(32, 4, 4);
+        assert_eq!(l.workers, 24);
+        assert_eq!(l.parallel, 12);
+        assert_eq!(l.games, 24);
+
+        // Tiny machine: every net still gets a worker and games still overlap.
+        let l = league_layout_for(4, 4, 4);
+        assert_eq!(l.workers, 4);
+        assert_eq!(l.parallel, 2);
+        assert_eq!(l.games, 4);
+        assert_eq!(l.cores.split(',').count(), 4);
+
+        // Small pool early in a run (2 players, 4 seats): both nets seat two
+        // snakes, so per-net workers double up and games still parallelize.
+        let l = league_layout_for(16, 2, 4);
+        assert_eq!(l.workers, 12);
+        assert_eq!(l.parallel, 6);
     }
 
     #[test]

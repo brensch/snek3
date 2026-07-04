@@ -165,22 +165,27 @@ pub fn serve_move_until_diagnostics(
             break;
         }
         // Early stop: if our leading root move has more visits than the remaining
-        // budget could possibly add to any rival, the decision is locked. Estimate
-        // the remaining sims from the rate so far (serving is deadline-bound, not
-        // sim-count-bound).
+        // budget could possibly add to any rival, the decision is locked. The
+        // budget is the smaller of the exact sims left (fixed-sims mode; the
+        // final batch may overshoot `max_sims` by up to a batch, hence the
+        // `leaves_per` slack) and a rate-based estimate of how many sims fit
+        // before the deadline (deadline-bound serving).
         if sims_completed >= 64 {
             if let Some((best, second)) = forest.root_visit_gap_first(me) {
+                let sims_left = (cfg.max_sims - sims_completed).saturating_add(leaves_per) as f32;
                 let elapsed = search_start.elapsed().as_secs_f64();
-                if elapsed > 0.0 {
+                let time_left = if elapsed > 0.0 {
                     let rate = sims_completed as f64 / elapsed;
                     let remaining = deadline
                         .saturating_duration_since(Instant::now())
                         .as_secs_f64();
-                    let est_remaining = (rate * remaining) as f32;
-                    if best - second > est_remaining {
-                        stopped_reason = "decided";
-                        break;
-                    }
+                    (rate * remaining) as f32
+                } else {
+                    f32::INFINITY
+                };
+                if best - second > sims_left.min(time_left) {
+                    stopped_reason = "decided";
+                    break;
                 }
             }
         }

@@ -954,6 +954,7 @@ fn main() {
             "event": "game",
             "index": out.game_index,
             "turns": out.turns,
+            "wall_ms": out.wall_ms,
             "placements": out.placements,
         }));
         games.push(out);
