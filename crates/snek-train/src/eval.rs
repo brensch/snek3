@@ -1,11 +1,11 @@
-//! Continuous evaluation league. While a run is active, one arena *match* is
-//! always in flight on pinned CPU cores: every checkpoint at a multiple of
-//! `league_entrant_gens` generations joins the pool, the scheduler picks
-//! `num_snakes` distinct nets per match (by expected information gain), plays
-//! several concurrent games via the snek-server `arena` binary — every net
-//! controlling its own snake, seats rotating per game — and refits ratings
-//! over *all* recorded results after every match. The league's CPU allotment
-//! is derived from the machine (see [`league_layout`]), not configured.
+//! Continuous evaluation league. While a run is active, `league_games` game
+//! slots run in-process on unpinned CPU threads: each slot picks the most
+//! informative opponents for one game (every checkpoint at a multiple of
+//! `league_entrant_gens` generations is in the pool, plus the external
+//! baselines/API players), plays it via [`snek_server::arena::play_game`] —
+//! one search thread per living snake — records it, refits ratings over all
+//! history, and immediately starts the next game. The game is the unit
+//! throughout: opponent selection, recording, rating updates.
 //!
 //! Ratings are the Plackett–Luce model: the multiplayer generalization of
 //! Bradley–Terry (identical to it for two players), whose likelihood of a full
@@ -18,12 +18,11 @@
 //!
 //!   summary.jsonl        one line per game: the full placement ranking
 //!   ratings.json         latest Plackett–Luce fit for every rated net
-//!   match_SSSSSS.json    the game's frames + search readout, in the exact
+//!   game_SSSSSS.json     one game's frames + search readout, in the exact
 //!                        schema of games/gen_NNNN.json
-//!   arena_SSSSSS.log     that game's arena stderr
 //!
-//! Old match recordings are pruned (newest `KEEP_MATCH_FILES` kept); the
-//! summary log and ratings are kept forever. The league stops (killing any
+//! Old game recordings are pruned (newest `KEEP_GAME_FILES` kept); the
+//! summary log and ratings are kept forever. The league stops (abandoning any
 //! in-flight game) when the run pauses, and resumes with it.
 
 use crate::config::RunConfig;
@@ -32,19 +31,23 @@ use crate::trainer::TrainerHandle;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
+use snek_server::arena::{play_game, Budget, GameSettings, Player, PlayerSpec};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Recorded match game files kept on disk (newest first); logs likewise.
-const KEEP_MATCH_FILES: usize = 60;
+/// Recorded game files kept on disk (newest first).
+const KEEP_GAME_FILES: usize = 200;
+
+/// League games end here if nobody has won yet; survivors tie at rank 1.
+const LEAGUE_MAX_TURNS: u32 = 500;
 
 /// External (non-checkpoint) league players live at ids counting down from
 /// `u32::MAX`, far above any real checkpoint generation. Fixed built-in ids:
 /// the flood-fill MCTS baseline and the stronger time-expanded-Voronoi MCTS
-/// baseline (both `snek-heuristic`, seated by literal arena net specs). They
+/// baseline (both `snek-heuristic`, seated by literal player specs). They
 /// never learn, so their fitted Elo is a stable reference every net is
 /// constantly measured against.
 pub const HEURISTIC_GEN: u32 = u32::MAX;
@@ -67,8 +70,8 @@ pub fn is_external(gen: u32) -> bool {
 const EXTERNAL_PLAY_PROB: f64 = 1.0 / 3.0;
 
 /// One external league player: a built-in heuristic agent or a configured
-/// Battlesnake-protocol API server. `spec` is the arena `--nets` entry that
-/// seats it.
+/// Battlesnake-protocol API server. `spec` is the player spec string that
+/// seats it (a heuristic token or an http url).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalPlayer {
     pub gen: u32,
@@ -110,10 +113,7 @@ impl ExternalRegistry {
 /// Resolve the external roster for `cfg`, assigning fresh ids to API players
 /// seen for the first time, and persist the union to eval/players.json.
 /// Malformed config entries are skipped (returned so the caller can log).
-pub fn load_external_registry(
-    cfg: &RunConfig,
-    eval_dir: &Path,
-) -> (ExternalRegistry, Vec<String>) {
+pub fn load_external_registry(cfg: &RunConfig, eval_dir: &Path) -> (ExternalRegistry, Vec<String>) {
     let builtins = vec![
         ExternalPlayer {
             gen: HEURISTIC_GEN,
@@ -207,8 +207,7 @@ pub fn player_name(gen: u32) -> String {
 static LEAGUE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// One line of `runs/<id>/eval/summary.jsonl`: one game's full placement
-/// ranking. Legacy pre-multiplayer lines (pairwise wins/losses/draws) are
-/// still read and converted into rankings for the fit.
+/// ranking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchRecord {
     #[serde(default)]
@@ -224,17 +223,6 @@ pub struct MatchRecord {
     pub wall_seconds: f64,
     #[serde(default)]
     pub finished_unix_ms: i64,
-    // Legacy v1 pairwise fields (read-only).
-    #[serde(default, skip_serializing)]
-    gen: Option<u32>,
-    #[serde(default, skip_serializing)]
-    opponent_gen: Option<u32>,
-    #[serde(default, skip_serializing)]
-    wins: u32,
-    #[serde(default, skip_serializing)]
-    losses: u32,
-    #[serde(default, skip_serializing)]
-    draws: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,48 +258,25 @@ pub struct LeagueRating {
     pub avg_rank: f64,
 }
 
-/// An event line the arena prints to stdout: "turn" (per-turn progress, with
-/// --events) or "game" (a finished game with its placements).
-#[derive(Deserialize)]
-struct GameEvent {
-    event: String,
-    #[serde(default)]
-    index: u32,
-    #[serde(default)]
-    turn: u32,
-    #[serde(default)]
-    turns: u32,
-    #[serde(default)]
-    wall_ms: u64,
-    #[serde(default)]
-    placements: Vec<ArenaPlacement>,
-    /// The turn's board frame (turn events only): same JSON shape as one frame
-    /// of games/gen_NNNN.json, passed through verbatim to the live view.
-    #[serde(default)]
-    frame: Option<serde_json::Value>,
-}
-
-/// A placement as the arena reports it: `net` indexes the --nets list.
-#[derive(Deserialize)]
-struct ArenaPlacement {
-    seat: u32,
-    net: u32,
-    rank: u32,
-    #[serde(default)]
-    death_turn: Option<u32>,
-}
-
-/// Real-time state of the in-flight league game, published to the frontend
-/// via the `/api/stream/eval` SSE endpoint. `active: false` between games.
+/// Real-time state of the in-flight league games, published to the frontend
+/// via the shared SSE event stream. One entry per game slot currently playing.
 #[derive(Debug, Clone, Serialize)]
 pub struct LiveEval {
+    /// The league is enabled and slots are running (false while paused).
     pub active: bool,
-    pub seq: u64,
-    /// The players of this game, in --nets order (seat s plays player s % N).
-    pub players: Vec<LivePlayer>,
-    /// In-flight games (index within the match, current turn), ascending.
+    /// In-flight games, ascending by seq. Each carries its own players.
     pub games: Vec<LiveGame>,
     pub updated_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveGame {
+    pub seq: u64,
+    pub turn: u32,
+    /// This game's players; seat s plays players[s % players.len()].
+    pub players: Vec<LivePlayer>,
+    /// Latest board frame (same shape as one frame of games/gen_NNNN.json).
+    pub frame: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -325,18 +290,8 @@ pub struct LivePlayer {
     pub games: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct LiveGame {
-    pub index: u32,
-    pub turn: u32,
-    /// Latest board frame (same shape as one frame of games/gen_NNNN.json).
-    pub frame: Option<serde_json::Value>,
-}
-
 static LIVE: Mutex<LiveEval> = Mutex::new(LiveEval {
     active: false,
-    seq: 0,
-    players: Vec::new(),
     games: Vec::new(),
     updated_unix_ms: 0,
 });
@@ -355,30 +310,10 @@ fn live_tx() -> &'static tokio::sync::broadcast::Sender<LiveEval> {
     LIVE_TX.get_or_init(|| tokio::sync::broadcast::channel(64).0)
 }
 
-/// Subscribe to live-state changes (one message per board turn while a league
-/// game is in flight).
+/// Subscribe to live-state changes (one message per board turn while league
+/// games are in flight).
 pub fn live_rx() -> tokio::sync::broadcast::Receiver<LiveEval> {
     live_tx().subscribe()
-}
-
-/// Fold one of the arena's per-turn events into the live view (and broadcast
-/// it). Called from the stdout reader thread, so a turn is visible the moment
-/// the arena reports it.
-fn apply_turn(ev: GameEvent) {
-    set_live(|l| {
-        match l.games.iter_mut().find(|g| g.index == ev.index) {
-            Some(game) => {
-                game.turn = ev.turn;
-                game.frame = ev.frame;
-            }
-            None => l.games.push(LiveGame {
-                index: ev.index,
-                turn: ev.turn,
-                frame: ev.frame,
-            }),
-        }
-        l.games.sort_by_key(|g| g.index);
-    });
 }
 
 fn set_live(update: impl FnOnce(&mut LiveEval)) {
@@ -388,8 +323,9 @@ fn set_live(update: impl FnOnce(&mut LiveEval)) {
     let _ = live_tx().send(live.clone());
 }
 
-/// Start the league thread for the active run. Returns immediately; the thread
-/// exits when `stop` is set (killing any in-flight game).
+/// Start the league for the active run. Returns immediately; the supervisor
+/// thread and its game slots exit when `stop` is set (abandoning any
+/// in-flight game).
 pub fn start_league(paths: RunPaths, trainer: TrainerHandle, stop: Arc<AtomicBool>) {
     std::thread::Builder::new()
         .name("eval-league".into())
@@ -401,60 +337,146 @@ pub fn start_league(paths: RunPaths, trainer: TrainerHandle, stop: Arc<AtomicBoo
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
-            league_loop(&paths, &trainer, &stop);
+            league_loop(paths, trainer, stop);
             LEAGUE_ACTIVE.store(false, Ordering::SeqCst);
         })
         .expect("spawn eval league thread");
 }
 
-fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
-    let metrics = trainer.metrics();
-    let eval_dir = paths.root.join("eval");
-    let bin = arena_bin();
-    if !bin.exists() {
-        metrics.log(format!(
-            "eval league: arena binary not found at {} (build with `make arena-build` or set SNEK_ARENA_BIN); league disabled for this run",
-            bin.display()
-        ));
-        return;
-    }
-    let mut records = read_summaries(&paths.root);
-    let mut seq = records.iter().map(|m| m.seq + 1).max().unwrap_or(0);
-    let mut announced = false;
-    // Config problems repeat every loop; log each distinct message once.
-    let mut logged_errors: std::collections::HashSet<String> = Default::default();
+/// State shared by the supervisor and every game slot.
+struct LeagueCtx {
+    paths: RunPaths,
+    trainer: TrainerHandle,
+    stop: Arc<AtomicBool>,
+    /// All recorded games (in-memory mirror of summary.jsonl), plus every
+    /// write that must be serialized with it (summary append, ratings file,
+    /// pruning).
+    records: Mutex<Vec<MatchRecord>>,
+    next_seq: AtomicU64,
+    /// Serializes players.json read/modify/write across slots.
+    registry: Mutex<()>,
+    /// Config problems repeat every game; log each distinct message once.
+    logged_errors: Mutex<std::collections::HashSet<String>>,
+    announced: AtomicBool,
+}
 
+/// Supervisor: keeps `league_games` slot threads alive while the run is
+/// active, growing/shrinking with config changes, and tears everything down
+/// on stop.
+fn league_loop(paths: RunPaths, trainer: TrainerHandle, stop: Arc<AtomicBool>) {
+    let metrics = trainer.metrics();
+    let mut records = read_summaries(&paths.root);
+    records.sort_by_key(|r| r.seq);
+    let next_seq = records.iter().map(|m| m.seq + 1).max().unwrap_or(0);
+    let ctx = Arc::new(LeagueCtx {
+        paths,
+        trainer,
+        stop: stop.clone(),
+        records: Mutex::new(records),
+        next_seq: AtomicU64::new(next_seq),
+        registry: Mutex::new(()),
+        logged_errors: Mutex::new(Default::default()),
+        announced: AtomicBool::new(false),
+    });
+
+    let mut slots: Vec<(Arc<AtomicBool>, std::thread::JoinHandle<()>)> = Vec::new();
     while !stop.load(Ordering::Relaxed) {
-        let cfg = trainer.config();
+        let cfg = ctx.trainer.config();
+        let want = if cfg.league_entrant_gens == 0 {
+            0
+        } else {
+            cfg.league_games.max(1)
+        };
+        // Reap slots that exited (finished a shrink request, or panicked —
+        // the slot logs its own panic; a fresh slot takes its place).
+        slots.retain(|(_, handle)| !handle.is_finished());
+        while slots.len() < want {
+            let slot_stop = Arc::new(AtomicBool::new(false));
+            let ctx = Arc::clone(&ctx);
+            let flag = Arc::clone(&slot_stop);
+            let handle = std::thread::Builder::new()
+                .name(format!("league-slot-{}", slots.len()))
+                .spawn(move || slot_loop(ctx, flag))
+                .expect("spawn league slot");
+            slots.push((slot_stop, handle));
+        }
+        for (flag, _) in slots.iter().skip(want) {
+            flag.store(true, Ordering::Relaxed);
+        }
+        let active = want > 0;
+        if live().active != active {
+            set_live(|l| l.active = active);
+        }
+        sleep_unless_stopped(&stop, 2);
+    }
+    for (flag, _) in &slots {
+        flag.store(true, Ordering::Relaxed);
+    }
+    for (_, handle) in slots {
+        let _ = handle.join();
+    }
+    set_live(|l| {
+        l.active = false;
+        l.games.clear();
+    });
+    metrics.log("eval league: stopped".to_string());
+}
+
+/// One game slot: pick opponents, play one game, record + refit, repeat.
+fn slot_loop(ctx: Arc<LeagueCtx>, slot_stop: Arc<AtomicBool>) {
+    // League searches must never steal CPU from the GPU-feeding self-play
+    // threads. Niceness is per-thread on Linux and inherited by the search
+    // threads play_game spawns, so one call here demotes the whole slot:
+    // league games consume only otherwise-idle cores.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 15);
+    }
+    let metrics = ctx.trainer.metrics();
+    let stopped = || ctx.stop.load(Ordering::Relaxed) || slot_stop.load(Ordering::Relaxed);
+    let nap = |secs: u64| {
+        for _ in 0..secs {
+            if stopped() {
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    };
+
+    while !stopped() {
+        let cfg = ctx.trainer.config();
         if cfg.league_entrant_gens == 0 {
-            sleep_unless_stopped(stop, 30);
+            nap(15); // the supervisor is about to retire this slot
             continue;
         }
+        let eval_dir = ctx.paths.root.join("eval");
         if std::fs::create_dir_all(&eval_dir).is_err() {
-            sleep_unless_stopped(stop, 30);
+            nap(30);
             continue;
         }
         // External players (built-in heuristics + configured API snakes)
         // always hold pool slots, so games (and a meaningful Elo) start from
         // the very first checkpoint.
-        let (registry, config_errors) = load_external_registry(&cfg, &eval_dir);
+        let (registry, config_errors) = {
+            let _guard = ctx.registry.lock().unwrap();
+            load_external_registry(&cfg, &eval_dir)
+        };
         for err in config_errors {
-            if logged_errors.insert(err.clone()) {
+            if ctx.logged_errors.lock().unwrap().insert(err.clone()) {
                 metrics.log(format!("eval league: {err}"));
             }
         }
-        let mut pool = pool_members(paths, cfg.league_entrant_gens);
+        let mut pool = pool_members(&ctx.paths, cfg.league_entrant_gens);
         pool.extend(registry.active.iter().map(|p| p.gen));
         pool.sort_unstable();
         pool.dedup();
         if pool.len() < 2 {
-            sleep_unless_stopped(stop, 15);
+            nap(15);
             continue;
         }
-        let layout = league_layout(cfg.num_snakes.min(pool.len()).max(2), cfg.num_snakes);
-        if !announced {
+        if !ctx.announced.swap(true, Ordering::Relaxed) {
             metrics.log(format!(
-                "eval league: running — pool of {} players incl. {} external ({}), entrant every {} gens, {} distinct players per game, {} sims, {} worker cores, {} games per match ({} concurrent)",
+                "eval league: running — pool of {} players incl. {} external ({}), entrant every {} gens, {} distinct players per game, {} sims, {} concurrent games",
                 pool.len(),
                 registry.active.len(),
                 registry
@@ -466,288 +488,218 @@ fn league_loop(paths: &RunPaths, trainer: &TrainerHandle, stop: &AtomicBool) {
                 cfg.league_entrant_gens,
                 cfg.num_snakes.min(pool.len()),
                 cfg.eval_sims,
-                layout.workers,
-                layout.games,
-                layout.parallel,
+                cfg.league_games.max(1),
             ));
-            announced = true;
         }
 
-        let ratings = fit_ratings(&pool, &records);
-        let players = pick_players(&pool, &records, &ratings, cfg.num_snakes, seq);
-        let career = |gen: u32| {
-            records
-                .iter()
-                .flat_map(participants)
-                .filter(|&g| g == gen)
-                .count() as u32
-        };
-        let live_players: Vec<LivePlayer> = players
-            .iter()
-            .map(|&gen| LivePlayer {
-                gen,
-                name: registry.display(gen),
-                elo: ratings.get(&gen).copied().unwrap_or(0.0),
-                games: career(gen),
-            })
-            .collect();
-        let result = run_match(
-            &bin,
-            paths,
-            &eval_dir,
-            &cfg,
-            &registry,
-            &players,
-            live_players,
-            seq,
-            &layout,
-            stop,
-        );
-        // Persist whatever finished — a pause or a crash mid-match still
-        // yields complete, valid games — then refit once over everything.
-        let (finished, stopped, failure) = match result {
-            MatchResult::Done(finished) => (finished, false, None),
-            MatchResult::Stopped(finished) => (finished, true, None),
-            MatchResult::Failed(err, finished) => (finished, false, Some(err)),
-        };
-        for record in finished {
-            let mut order = record.placements.clone();
-            order.sort_by_key(|p| p.rank);
-            metrics.log(format!(
-                "eval league #{n}: {ranking} ({turns} turns, {secs:.0}s)",
-                n = record.seq,
-                ranking = order
+        let seq = ctx.next_seq.fetch_add(1, Ordering::Relaxed);
+        let (players, live_players) = {
+            let records = ctx.records.lock().unwrap();
+            let ratings = fit_ratings(&pool, &records);
+            let players = pick_players(&pool, &records, &ratings, cfg.num_snakes, seq);
+            let career = |gen: u32| {
+                records
                     .iter()
-                    .map(|p| registry.display(p.gen))
-                    .collect::<Vec<_>>()
-                    .join(" > "),
-                turns = record.turns,
-                secs = record.wall_seconds,
-            ));
+                    .flat_map(participants)
+                    .filter(|&g| g == gen)
+                    .count() as u32
+            };
+            let live_players: Vec<LivePlayer> = players
+                .iter()
+                .map(|&gen| LivePlayer {
+                    gen,
+                    name: registry.display(gen),
+                    elo: ratings.get(&gen).copied().unwrap_or(0.0),
+                    games: career(gen),
+                })
+                .collect();
+            (players, live_players)
+        };
+
+        let budget = Budget::Sims(cfg.eval_sims.max(1));
+        let mut seats: Vec<Player> = Vec::with_capacity(players.len());
+        let mut load_error = None;
+        for &gen in &players {
+            let spec_str = registry
+                .spec(gen)
+                .map(str::to_string)
+                .unwrap_or_else(|| ctx.paths.checkpoint_net(gen).display().to_string());
+            match Player::load(
+                &PlayerSpec::parse(&spec_str),
+                tch::Device::Cpu,
+                cfg.trunk_channels,
+                cfg.trunk_blocks,
+                budget,
+                &registry.display(gen),
+            ) {
+                Ok(player) => seats.push(player),
+                Err(err) => {
+                    load_error = Some(format!("{}: {err}", registry.display(gen)));
+                    break;
+                }
+            }
+        }
+        if let Some(err) = load_error {
+            // A checkpoint can vanish mid-pick (pruning); just try again.
+            if ctx.logged_errors.lock().unwrap().insert(err.clone()) {
+                metrics.log(format!("eval league: failed to load player: {err}"));
+            }
+            nap(10);
+            continue;
+        }
+
+        // Search parameters match training (c_puct/draw_value from the run
+        // config); the argmax serving search itself guarantees determinism.
+        let settings = GameSettings {
+            seats: cfg.num_snakes,
+            board_size: cfg.board,
+            max_turns: LEAGUE_MAX_TURNS,
+            cfg: snek_server::Config {
+                max_sims: cfg.eval_sims.max(1),
+                c_puct: cfg.c_puct,
+                draw_value: cfg.draw_value,
+                eval_chunk: 4096,
+                leaves_per_sim: 8,
+                virtual_loss: 1.0,
+            },
+            budget,
+        };
+        set_live(|l| {
+            l.games.push(LiveGame {
+                seq,
+                turn: 0,
+                players: live_players.clone(),
+                frame: None,
+            });
+            l.games.sort_by_key(|g| g.seq);
+        });
+        let seed = seq.wrapping_mul(1_000_003);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            play_game(
+                &mut seats,
+                0, // pick_players already rotates seat order by seq
+                &settings,
+                seed,
+                &stopped,
+                &mut |frame| {
+                    let value = serde_json::to_value(frame).ok();
+                    set_live(|l| {
+                        if let Some(game) = l.games.iter_mut().find(|g| g.seq == seq) {
+                            game.turn = frame.turn;
+                            game.frame = value;
+                        }
+                    });
+                },
+            )
+        }));
+        set_live(|l| l.games.retain(|g| g.seq != seq));
+
+        let outcome = match result {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => continue, // stopped mid-game; loop condition exits
+            Err(_) => {
+                metrics.log(format!(
+                    "eval league #{seq}: game panicked (players {players:?}); slot continuing"
+                ));
+                nap(30);
+                continue;
+            }
+        };
+
+        let record = MatchRecord {
+            seq,
+            placements: outcome
+                .placements
+                .iter()
+                .map(|p| Placement {
+                    gen: players.get(p.player as usize).copied().unwrap_or(0),
+                    seat: p.seat,
+                    rank: p.rank,
+                    death_turn: p.death_turn,
+                })
+                .collect(),
+            turns: outcome.turns,
+            sims: cfg.eval_sims as u32,
+            wall_seconds: outcome.wall_ms as f64 / 1000.0,
+            finished_unix_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        if let Err(err) = write_game_file(&eval_dir, seq, &players, &registry, &record, &outcome) {
+            metrics.log(format!("eval league #{seq}: failed to record game: {err}"));
+        }
+
+        let mut order = record.placements.clone();
+        order.sort_by_key(|p| p.rank);
+        metrics.log(format!(
+            "eval league #{seq}: {ranking} ({turns} turns, {secs:.0}s)",
+            ranking = order
+                .iter()
+                .map(|p| registry.display(p.gen))
+                .collect::<Vec<_>>()
+                .join(" > "),
+            turns = record.turns,
+            secs = record.wall_seconds,
+        ));
+
+        {
+            let mut records = ctx.records.lock().unwrap();
             if let Err(err) = append_summary(&eval_dir.join("summary.jsonl"), &record) {
                 metrics.log(format!("eval league: failed to append summary: {err}"));
             }
             records.push(record);
-        }
-        if let Some(last) = records.last() {
+            records.sort_by_key(|r| r.seq);
             let fitted = fit_ratings(&pool, &records);
-            if let Err(err) = write_ratings(
-                &eval_dir.join("ratings.json"),
-                &records,
-                &fitted,
-                &registry,
-            ) {
+            if let Err(err) =
+                write_ratings(&eval_dir.join("ratings.json"), &records, &fitted, &registry)
+            {
                 metrics.log(format!("eval league: failed to write ratings: {err}"));
             }
-            prune_match_files(&eval_dir, KEEP_MATCH_FILES);
-            seq = seq.max(last.seq + 1);
-        }
-        if stopped {
-            break;
-        }
-        if let Some(err) = failure {
-            metrics.log(format!("eval league #{seq}: match failed: {err}"));
-            seq += 1;
-            sleep_unless_stopped(stop, 30);
+            prune_game_files(&eval_dir, KEEP_GAME_FILES);
         }
     }
-    metrics.log("eval league: stopped".to_string());
 }
 
-enum MatchResult {
-    /// Every game finished (records carry seqs `seq_base + game index`).
-    Done(Vec<MatchRecord>),
-    /// The run paused mid-match; completed games are still worth keeping.
-    Stopped(Vec<MatchRecord>),
-    /// The arena died; completed games are still worth keeping.
-    Failed(String, Vec<MatchRecord>),
-}
-
-/// Play one match (blocking): spawn the arena with one seat per selected net
-/// and `layout.games` concurrent games, stream its stdout events into the live
-/// view, and build one placement record per finished game. `stop` kills the
-/// arena promptly on a pause.
-#[allow(clippy::too_many_arguments)]
-fn run_match(
-    bin: &Path,
-    paths: &RunPaths,
+/// Write one game's recording as `game_SSSSSS.json`, in the exact schema of
+/// the trainer's `games/gen_NNNN.json` so the frontend reuses one viewer. The
+/// `config` slot carries the players and placements for the reader.
+fn write_game_file(
     eval_dir: &Path,
-    cfg: &RunConfig,
-    registry: &ExternalRegistry,
-    players: &[u32],
-    live_players: Vec<LivePlayer>,
     seq: u64,
-    layout: &LeagueLayout,
-    stop: &AtomicBool,
-) -> MatchResult {
-    let record_path = eval_dir.join(format!("match_{seq:06}.json"));
-    let log_path = eval_dir.join(format!("arena_{seq:06}.log"));
-    let nets: Vec<String> = players
+    players: &[u32],
+    registry: &ExternalRegistry,
+    record: &MatchRecord,
+    outcome: &snek_server::arena::Outcome,
+) -> anyhow::Result<()> {
+    let winners: Vec<u32> = record
+        .placements
         .iter()
-        .map(|&g| {
-            // External players carry their arena spec (a heuristic token or
-            // an http url); checkpoints are weights paths.
-            registry
-                .spec(g)
-                .map(str::to_string)
-                .unwrap_or_else(|| paths.checkpoint_net(g).display().to_string())
-        })
+        .filter(|p| p.rank == 1)
+        .map(|p| p.seat)
         .collect();
-    let names: Vec<String> = players.iter().map(|&g| registry.display(g)).collect();
-
-    let mut command = std::process::Command::new(bin);
-    command
-        .args(["--nets", &nets.join(",")])
-        .args(["--names", &names.join(",")])
-        .args(["--games", &layout.games.to_string()])
-        .args(["--parallel", &layout.parallel.to_string()])
-        .args(["--seats", &cfg.num_snakes.to_string()])
-        .args(["--sims", &cfg.eval_sims.to_string()])
-        .args(["--board", &cfg.board.to_string()])
-        .args(["--cores", &layout.cores])
-        .args(["--seed", &seq.wrapping_mul(1_000_003).to_string()])
-        .args([
-            "--record-gen",
-            &players
-                .iter()
-                .copied()
-                .filter(|&g| !is_external(g))
-                .max()
-                .unwrap_or(0)
-                .to_string(),
-        ])
-        .arg("--record")
-        .arg(&record_path)
-        .arg("--events")
-        .stdout(std::process::Stdio::piped());
-    match std::fs::File::create(&log_path) {
-        Ok(log) => {
-            command.stderr(log);
-        }
-        Err(_) => {
-            command.stderr(std::process::Stdio::null());
-        }
-    }
-
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(err) => return MatchResult::Failed(format!("spawn: {err}"), Vec::new()),
-    };
-    // Publish the in-flight game to the live SSE view, and guarantee the
-    // "active" flag drops on every exit path.
-    set_live(|l| {
-        *l = LiveEval {
-            active: true,
-            seq,
-            players: live_players,
-            games: Vec::new(),
-            updated_unix_ms: 0,
-        };
+    let file = serde_json::json!({
+        "gen": players.iter().copied().filter(|&g| !is_external(g)).max().unwrap_or(0),
+        "config": {
+            "seq": seq,
+            "players": players.iter().map(|&g| serde_json::json!({
+                "gen": g,
+                "name": registry.display(g),
+            })).collect::<Vec<_>>(),
+            "placements": record.placements,
+            "sims": record.sims,
+        },
+        "games": [{
+            "frames": outcome.frames,
+            "winner": match winners.as_slice() {
+                [only] => Some(*only as i32),
+                _ => None,
+            },
+            "num_turns": outcome.turns,
+        }],
     });
-    struct LiveClear;
-    impl Drop for LiveClear {
-        fn drop(&mut self) {
-            set_live(|l| {
-                l.active = false;
-                l.games.clear();
-            });
-        }
-    }
-    let _live_clear = LiveClear;
-
-    // Events arrive on the child's stdout; a reader thread forwards them so
-    // the wait loop below can consume without blocking.
-    let (event_tx, event_rx) = std::sync::mpsc::channel::<GameEvent>();
-    let reader = child.stdout.take().map(|out| {
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
-                if let Ok(ev) = serde_json::from_str::<GameEvent>(&line) {
-                    // Turn events update (and broadcast) the live view the
-                    // moment they arrive — the SSE stream ticks per turn, not
-                    // on the wait loop's poll cadence. Everything else goes to
-                    // the wait loop for match bookkeeping.
-                    if ev.event == "turn" {
-                        apply_turn(ev);
-                    } else if event_tx.send(ev).is_err() {
-                        break;
-                    }
-                }
-            }
-        })
-    });
-    // One record per finished game, seq'd by the arena's game index so the
-    // summary lines up with the recorded match file's game order (games
-    // finish out of order when several run concurrently).
-    let mut records: Vec<MatchRecord> = Vec::new();
-    let apply = |ev: GameEvent, records: &mut Vec<MatchRecord>| {
-        if ev.event != "game" {
-            return;
-        }
-        let placements = ev
-            .placements
-            .iter()
-            .map(|p| Placement {
-                gen: players.get(p.net as usize).copied().unwrap_or(0),
-                seat: p.seat,
-                rank: p.rank,
-                death_turn: p.death_turn,
-            })
-            .collect();
-        records.push(MatchRecord {
-            seq: seq + ev.index as u64,
-            placements,
-            turns: ev.turns,
-            sims: cfg.eval_sims as u32,
-            wall_seconds: ev.wall_ms as f64 / 1000.0,
-            finished_unix_ms: chrono::Utc::now().timestamp_millis(),
-            gen: None,
-            opponent_gen: None,
-            wins: 0,
-            losses: 0,
-            draws: 0,
-        });
-        set_live(|l| l.games.retain(|g| g.index != ev.index));
-    };
-    let status = loop {
-        if stop.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
-            if let Some(handle) = reader {
-                let _ = handle.join();
-            }
-            while let Ok(ev) = event_rx.try_recv() {
-                apply(ev, &mut records);
-            }
-            records.sort_by_key(|r| r.seq);
-            return MatchResult::Stopped(records);
-        }
-        while let Ok(ev) = event_rx.try_recv() {
-            apply(ev, &mut records);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
-            Err(err) => return MatchResult::Failed(format!("wait: {err}"), records),
-        }
-    };
-    if let Some(handle) = reader {
-        let _ = handle.join();
-    }
-    while let Ok(ev) = event_rx.try_recv() {
-        apply(ev, &mut records);
-    }
-    records.sort_by_key(|r| r.seq);
-    if !status.success() {
-        return MatchResult::Failed(
-            format!("arena exited with {status} (see {})", log_path.display()),
-            records,
-        );
-    }
-    if records.is_empty() {
-        return MatchResult::Failed("arena exited without reporting a game".into(), records);
-    }
-    MatchResult::Done(records)
+    let path = eval_dir.join(format!("game_{seq:06}.json"));
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(&file)?)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
 }
 
 /// Checkpoints eligible for the pool: every archived generation at a multiple
@@ -775,11 +727,7 @@ fn pool_members(paths: &RunPaths, entrant_gens: usize) -> Vec<u32> {
 
 /// The distinct gens a record involves.
 fn participants(record: &MatchRecord) -> Vec<u32> {
-    let mut gens: Vec<u32> = if record.placements.is_empty() {
-        record.gen.into_iter().chain(record.opponent_gen).collect()
-    } else {
-        record.placements.iter().map(|p| p.gen).collect()
-    };
+    let mut gens: Vec<u32> = record.placements.iter().map(|p| p.gen).collect();
     gens.sort_unstable();
     gens.dedup();
     gens
@@ -867,48 +815,33 @@ fn pick_players(
 type Ranking = (f64, Vec<u32>);
 
 /// Expand a record into weighted strict rankings. Placement ties are averaged
-/// over the orderings of each tied group (weight 1/k! each); legacy pairwise
-/// lines expand to win/loss orderings with draws as half each way.
+/// over the orderings of each tied group (weight 1/k! each).
 fn rankings_of(record: &MatchRecord) -> Vec<Ranking> {
-    if !record.placements.is_empty() {
-        // Group gens by rank (ascending); each group is a tied set.
-        let mut rank_groups: std::collections::BTreeMap<u32, Vec<u32>> = Default::default();
-        for p in &record.placements {
-            rank_groups.entry(p.rank).or_default().push(p.gen);
-        }
-        let groups: Vec<Vec<u32>> = rank_groups.into_values().collect();
-        let mut out: Vec<Ranking> = vec![(1.0, Vec::new())];
-        for group in groups {
-            let perms = permutations_capped(&group);
-            let w = 1.0 / perms.len() as f64;
-            out = out
-                .into_iter()
-                .flat_map(|(rw, prefix)| {
-                    perms.iter().map(move |perm| {
-                        let mut order = prefix.clone();
-                        order.extend_from_slice(perm);
-                        (rw * w, order)
-                    })
-                })
-                .collect();
-        }
-        out
-    } else if let (Some(a), Some(b)) = (record.gen, record.opponent_gen) {
-        let mut out = Vec::new();
-        if record.wins > 0 {
-            out.push((record.wins as f64, vec![a, b]));
-        }
-        if record.losses > 0 {
-            out.push((record.losses as f64, vec![b, a]));
-        }
-        if record.draws > 0 {
-            out.push((record.draws as f64 * 0.5, vec![a, b]));
-            out.push((record.draws as f64 * 0.5, vec![b, a]));
-        }
-        out
-    } else {
-        Vec::new()
+    if record.placements.is_empty() {
+        return Vec::new();
     }
+    // Group gens by rank (ascending); each group is a tied set.
+    let mut rank_groups: std::collections::BTreeMap<u32, Vec<u32>> = Default::default();
+    for p in &record.placements {
+        rank_groups.entry(p.rank).or_default().push(p.gen);
+    }
+    let groups: Vec<Vec<u32>> = rank_groups.into_values().collect();
+    let mut out: Vec<Ranking> = vec![(1.0, Vec::new())];
+    for group in groups {
+        let perms = permutations_capped(&group);
+        let w = 1.0 / perms.len() as f64;
+        out = out
+            .into_iter()
+            .flat_map(|(rw, prefix)| {
+                perms.iter().map(move |perm| {
+                    let mut order = prefix.clone();
+                    order.extend_from_slice(perm);
+                    (rw * w, order)
+                })
+            })
+            .collect();
+    }
+    out
 }
 
 /// All orderings of a tied group, capped: groups larger than 4 fall back to
@@ -1006,20 +939,6 @@ fn write_ratings(
     // games, rank-1 finishes, rank sum per gen.
     let mut tally: HashMap<u32, (u32, u32, u64)> = HashMap::new();
     for record in records {
-        if record.placements.is_empty() {
-            if let (Some(a), Some(b)) = (record.gen, record.opponent_gen) {
-                let games = record.wins + record.losses + record.draws;
-                let ta = tally.entry(a).or_default();
-                ta.0 += games;
-                ta.1 += record.wins;
-                ta.2 += (record.wins + record.losses * 2) as u64 + (record.draws as u64 * 3) / 2;
-                let tb = tally.entry(b).or_default();
-                tb.0 += games;
-                tb.1 += record.losses;
-                tb.2 += (record.losses + record.wins * 2) as u64 + (record.draws as u64 * 3) / 2;
-            }
-            continue;
-        }
         for p in &record.placements {
             let t = tally.entry(p.gen).or_default();
             t.0 += 1;
@@ -1056,94 +975,31 @@ fn write_ratings(
     Ok(())
 }
 
-/// Keep only the newest `keep` recorded matches on disk (games + logs). The
-/// summary log and ratings are never pruned.
-fn prune_match_files(eval_dir: &Path, keep: usize) {
+/// Keep only the newest `keep` recorded games on disk. The summary log and
+/// ratings are never pruned.
+fn prune_game_files(eval_dir: &Path, keep: usize) {
     let Ok(rd) = std::fs::read_dir(eval_dir) else {
         return;
     };
-    let mut matches: Vec<(u64, PathBuf)> = Vec::new();
-    for entry in rd.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let seq = ["match_", "arena_", "out_"]
-            .iter()
-            .find_map(|p| name.strip_prefix(p))
-            .and_then(|rest| rest.split(['_', '.']).next())
-            .and_then(|s| s.parse::<u64>().ok());
-        if let Some(seq) = seq {
-            matches.push((seq, path));
-        }
-    }
-    let mut seqs: Vec<u64> = matches.iter().map(|(s, _)| *s).collect();
-    seqs.sort_unstable();
-    seqs.dedup();
-    if seqs.len() <= keep {
+    let mut files: Vec<(u64, std::path::PathBuf)> = rd
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            let seq: u64 = name
+                .strip_prefix("game_")?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()?;
+            Some((seq, path))
+        })
+        .collect();
+    if files.len() <= keep {
         return;
     }
-    let cutoff = seqs[seqs.len() - keep];
-    for (seq, path) in matches {
-        if seq < cutoff {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-fn arena_bin() -> PathBuf {
-    std::env::var("SNEK_ARENA_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("crates/snek-server/target/release/arena"))
-}
-
-/// The league's CPU allotment, derived from the machine instead of a config
-/// knob: everything except a reserve for the trainer / self-play host threads
-/// (a quarter of the machine, clamped to [2, 8] cores). Each search runs
-/// single-threaded on one pinned worker, so a lone game can only ever busy
-/// `seats` cores — the layout therefore also sizes how many games one match
-/// plays concurrently so every worker has a search in flight. Workers are
-/// pinned to the highest-numbered cores (self-play's rayon pool is unpinned,
-/// so the scheduler migrates it away).
-struct LeagueLayout {
-    /// Flat pinned-core spec the arena splits per net, `workers` long.
-    cores: String,
-    /// Total worker threads (`players × per-net workers`).
-    workers: usize,
-    /// Concurrent games in flight: 2× the table count. Games spend most of
-    /// their turns as 2-snake endgames (half the table dead), so a game
-    /// averages ~seats/2 busy workers — one table of workers per *two* games
-    /// keeps them fed. Measured on a 16-thread box: this doubled throughput
-    /// over one-table parallelism, and doubling again added nothing (HT
-    /// contention) while doubling per-game latency.
-    parallel: usize,
-    /// Games per match: 2× parallel, so pools stay fed as games end unevenly
-    /// and the arena's process/model-load cost is amortized further.
-    games: usize,
-}
-
-fn league_layout(players: usize, seats: usize) -> LeagueLayout {
-    let total = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    league_layout_for(total, players, seats)
-}
-
-fn league_layout_for(total: usize, players: usize, seats: usize) -> LeagueLayout {
-    let reserve = (total / 4).clamp(2, 8).min(total.saturating_sub(players));
-    let per_net = ((total - reserve) / players).max(1);
-    let workers = players * per_net;
-    let lo = total.saturating_sub(workers);
-    let cores = (lo..total)
-        .map(|c| c.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let parallel = (2 * workers / seats.max(1)).max(1);
-    LeagueLayout {
-        cores,
-        workers,
-        parallel,
-        games: parallel * 2,
+    files.sort_by_key(|&(seq, _)| std::cmp::Reverse(seq));
+    for (_, path) in files.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -1166,17 +1022,21 @@ fn append_summary(path: &Path, record: &MatchRecord) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read a run's match history (oldest first). Missing file → empty.
+/// Read a run's game history, ascending by seq. Missing file → empty.
 pub fn read_summaries(run_root: &Path) -> Vec<MatchRecord> {
     let path = run_root.join("eval").join("summary.jsonl");
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    text.lines()
+    let mut records: Vec<MatchRecord> = text
+        .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .filter_map(|l| serde_json::from_str(l).ok())
-        .collect()
+        .filter(|r: &MatchRecord| !r.placements.is_empty())
+        .collect();
+    records.sort_by_key(|r| r.seq);
+    records
 }
 
 /// Read a run's latest league ratings. Missing file → empty.
@@ -1209,35 +1069,17 @@ mod tests {
             sims: 0,
             wall_seconds: 0.0,
             finished_unix_ms: 0,
-            gen: None,
-            opponent_gen: None,
-            wins: 0,
-            losses: 0,
-            draws: 0,
         }
     }
 
-    fn pairwise(
-        seq: u64,
-        gen: u32,
-        opponent_gen: u32,
-        wins: u32,
-        losses: u32,
-        draws: u32,
-    ) -> MatchRecord {
-        MatchRecord {
-            seq,
-            placements: Vec::new(),
-            turns: 0,
-            sims: 0,
-            wall_seconds: 0.0,
-            finished_unix_ms: 0,
-            gen: Some(gen),
-            opponent_gen: Some(opponent_gen),
-            wins,
-            losses,
-            draws,
-        }
+    /// `wins` two-player games where `gen` beats `opponent`, then `losses`
+    /// the other way (one record per game, like the league writes).
+    fn head_to_head(gen: u32, opponent: u32, wins: u32, losses: u32) -> Vec<MatchRecord> {
+        let mut records: Vec<MatchRecord> = (0..wins)
+            .map(|i| game(i as u64, &[gen, opponent]))
+            .collect();
+        records.extend((0..losses).map(|i| game((wins + i) as u64, &[opponent, gen])));
+        records
     }
 
     /// Sample one full finishing order from the Plackett–Luce model with the
@@ -1277,7 +1119,7 @@ mod tests {
         // (8 + 0.25) : (2 + 0.25), so the Elo gap has a closed form the MM
         // iteration must land on.
         let pool = vec![0, 5];
-        let records = vec![pairwise(0, 5, 0, 8, 2, 0)];
+        let records = head_to_head(5, 0, 8, 2);
         let elo = fit_ratings(&pool, &records);
         let expected = 400.0 * (8.25f64 / 2.25).log10();
         assert!(
@@ -1352,7 +1194,10 @@ mod tests {
             })
             .collect();
         let elo = fit_ratings(&pool, &records);
-        assert!(elo[&0].is_finite() && elo[&HEURISTIC_GEN].is_finite(), "{elo:?}");
+        assert!(
+            elo[&0].is_finite() && elo[&HEURISTIC_GEN].is_finite(),
+            "{elo:?}"
+        );
         assert!(
             elo[&HEURISTIC_GEN] > 100.0,
             "floodfill swept every game: {elo:?}"
@@ -1401,7 +1246,7 @@ mod tests {
     #[test]
     fn fit_matches_bradley_terry_for_two_players() {
         let pool = vec![0, 5];
-        let records = vec![pairwise(0, 5, 0, 8, 2, 0)];
+        let records = head_to_head(5, 0, 8, 2);
         let elo = fit_ratings(&pool, &records);
         assert_eq!(elo[&0], 0.0);
         assert!(elo[&5] > 100.0 && elo[&5] < 400.0, "{elo:?}");
@@ -1465,9 +1310,7 @@ mod tests {
         records.extend((5..10).map(|s| game(s, &[15, HEURISTIC_GEN, 5, 0])));
         let ratings = fit_ratings(&pool, &records);
         let with_baseline = (0..60)
-            .filter(|&seq| {
-                pick_players(&pool, &records, &ratings, 4, seq).contains(&HEURISTIC_GEN)
-            })
+            .filter(|&seq| pick_players(&pool, &records, &ratings, 4, seq).contains(&HEURISTIC_GEN))
             .count();
         assert!(
             with_baseline > 15,
@@ -1477,10 +1320,8 @@ mod tests {
 
     #[test]
     fn api_player_ids_are_stable_across_restarts_and_reorders() {
-        let dir = std::env::temp_dir().join(format!(
-            "snek3-eval-registry-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("snek3-eval-registry-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = crate::config::RunConfig {
@@ -1547,36 +1388,6 @@ mod tests {
     }
 
     #[test]
-    fn league_layout_saturates_the_machine_minus_a_reserve() {
-        // 16 threads, 4 players, 4 seats (the dev box): reserve 4, 3 workers
-        // per net, 12 pinned cores, 6 concurrent games, 12 games per match.
-        let l = league_layout_for(16, 4, 4);
-        assert_eq!(l.workers, 12);
-        assert_eq!(l.parallel, 6);
-        assert_eq!(l.games, 12);
-        assert_eq!(l.cores, "4,5,6,7,8,9,10,11,12,13,14,15");
-
-        // 32 threads: reserve 8 → 6 per net, 24 workers, 12 concurrent.
-        let l = league_layout_for(32, 4, 4);
-        assert_eq!(l.workers, 24);
-        assert_eq!(l.parallel, 12);
-        assert_eq!(l.games, 24);
-
-        // Tiny machine: every net still gets a worker and games still overlap.
-        let l = league_layout_for(4, 4, 4);
-        assert_eq!(l.workers, 4);
-        assert_eq!(l.parallel, 2);
-        assert_eq!(l.games, 4);
-        assert_eq!(l.cores.split(',').count(), 4);
-
-        // Small pool early in a run (2 players, 4 seats): both nets seat two
-        // snakes, so per-net workers double up and games still parallelize.
-        let l = league_layout_for(16, 2, 4);
-        assert_eq!(l.workers, 12);
-        assert_eq!(l.parallel, 6);
-    }
-
-    #[test]
     fn small_pools_use_every_member() {
         let pool = vec![0, 5];
         let records = Vec::new();
@@ -1585,5 +1396,34 @@ mod tests {
         let mut sorted = players.clone();
         sorted.sort_unstable();
         assert_eq!(sorted, vec![0, 5]);
+    }
+
+    #[test]
+    fn prune_keeps_newest_game_files() {
+        let dir =
+            std::env::temp_dir().join(format!("snek3-eval-prune-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for seq in 0..10u64 {
+            std::fs::write(dir.join(format!("game_{seq:06}.json")), b"{}").unwrap();
+        }
+        std::fs::write(dir.join("summary.jsonl"), b"").unwrap();
+        prune_game_files(&dir, 3);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "game_000007.json",
+                "game_000008.json",
+                "game_000009.json",
+                "summary.jsonl"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

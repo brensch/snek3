@@ -29,6 +29,10 @@ message StatsFrame {
   uint32 train_steps_total = 16;
   // Mean length (turns) of games completing during self-play, windowed EMA.
   double avg_game_turn = 17;
+  // Live mean of the current turn across all in-flight self-play games. Starts
+  // at 0 on a fresh generation and climbs as games advance, dipping as games
+  // finish and reset. Instantaneous (not smoothed).
+  double avg_inflight_turn = 18;
 }
 
 message RunState {

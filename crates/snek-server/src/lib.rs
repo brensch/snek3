@@ -11,6 +11,7 @@ use std::time::Instant;
 use snek_core::{obs_h, obs_w, Board, Move, NUM_CHANNELS};
 use snek_search::{forced_move, MctsForest, TreeSnapshot};
 
+pub mod arena;
 mod net;
 pub use net::Net;
 

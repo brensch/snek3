@@ -1,50 +1,22 @@
-//! Multi-net evaluation arena: N nets (one snake seat each, seats rotating
-//! between games), the exact `snek-core` rules engine, and the same
-//! `serve_move_until` search the live server uses — all in-process, no HTTP.
-//! Rules parity with the official Go engine is inherited from `snek-core` (the
-//! same `Board::step_and_spawn` self-play and serving run on).
+//! Multi-player evaluation CLI over [`snek_server::arena::play_game`] — the
+//! same in-process game runner the trainer's league calls directly. N player
+//! slots run games concurrently off a shared counter (no core pinning; the OS
+//! schedules), seats rotating by game index so no player accrues a seat bias.
 //!
-//! Each net gets its own pool of worker threads pinned to its own CPU cores,
-//! one worker (and one `Net`) per core, so players never steal cycles from
-//! each other or from a concurrently running training job. Within a turn every
-//! living snake's search runs concurrently on its net's pool.
+//! Rules parity with the official Go engine is inherited from `snek-core`
+//! (the same `Board::step_and_spawn` self-play and serving run on). With the
+//! default fixed-sims budget every game is deterministic given its seed.
 //!
-//! Games are scored by elimination order: rank 1 for the survivor, ties for
-//! simultaneous deaths, and the game ends the moment at most one net has a
-//! living snake (a Plackett–Luce rating fit consumes the full ranking).
-//!
-//! Fairness/determinism:
-//! - The default budget is a fixed simulation count per move (`--sims`): the
-//!   serving search is strict-argmax DUCT with no noise, so every game is
-//!   deterministic given its seed and hardware-independent. `--time-ms`
-//!   switches to wall-clock budgets like live play.
-//! - Seat assignment rotates by game index (`seat s` plays net `(s+g) % N`),
-//!   and start spawns are seed-shuffled, so no net accrues a seat bias.
-//! - CPU-only by default; `--gpu` opts in (don't use while training runs).
-//!
-//! Example (4 checkpoints, one core each):
-//!   arena --nets g40.st,g35.st,g25.st,g10.st --games 20 --sims 64 --cores 12-15
+//! Example (4 checkpoints, 4 concurrent games):
+//!   arena --nets g40.st,g35.st,g25.st,g10.st --games 20 --sims 64 --parallel 4
 
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use rand::SeedableRng;
-use rand_xoshiro::Xoshiro256PlusPlus;
-use serde::Serialize;
 use serde_json::json;
-use snek_core::{standard_start, Board, Move};
-use snek_server::{serve_move_until_diagnostics, Config, Net};
-
-/// Stand-in "no deadline" horizon for fixed-sims mode (matches `serve_move`).
-const SIMS_DEADLINE: Duration = Duration::from_secs(3600);
-
-#[derive(Clone, Copy)]
-enum Budget {
-    Sims(usize),
-    TimeMs(u64),
-}
+use snek_server::arena::{play_game, Budget, GameSettings, Outcome, Placement, PlayerSpec};
+use snek_server::Config;
 
 struct Args {
     nets: Vec<String>,
@@ -52,9 +24,7 @@ struct Args {
     games: usize,
     seats: usize,
     budget: Budget,
-    cores: Option<Vec<usize>>,
-    cores_per_net: usize,
-    parallel: Option<usize>,
+    parallel: usize,
     board: i8,
     seed: u64,
     max_turns: u32,
@@ -67,108 +37,58 @@ struct Args {
     out: Option<String>,
     record: Option<String>,
     record_gen: u32,
-    events: bool,
-}
-
-/// One machine-readable JSON line on stdout, for a parent process driving us
-/// (per-game results always; per-turn progress with --events). stdout is
-/// block-buffered when piped, so flush each line.
-fn emit_event(value: serde_json::Value) {
-    use std::io::Write;
-    let mut stdout = std::io::stdout();
-    let _ = writeln!(stdout, "{value}");
-    let _ = stdout.flush();
-}
-
-/// On-disk mirror of the recorded-game schema in `snek-train`'s `sample.rs`
-/// (`GameFileJson` and friends), so eval games render through the exact same
-/// frontend viewer as self-play sample games. Keep the two in sync.
-#[derive(Serialize)]
-struct GameFileJson {
-    gen: u32,
-    config: serde_json::Value,
-    games: Vec<GameJson>,
-}
-
-#[derive(Serialize)]
-struct GameJson {
-    frames: Vec<FrameJson>,
-    winner: Option<i32>,
-    num_turns: u32,
-}
-
-#[derive(Serialize, Clone)]
-struct FrameJson {
-    turn: u32,
-    width: i32,
-    height: i32,
-    food: Vec<[i32; 2]>,
-    hazards: Vec<[i32; 2]>,
-    snakes: Vec<SnakeJson>,
-}
-
-#[derive(Serialize, Clone)]
-struct SnakeJson {
-    alive: bool,
-    body: Vec<[i32; 2]>,
-    health: i32,
-    chosen_move: u32,
-    policy: Vec<f64>,
-    play_policy: Vec<f64>,
-    value: f64,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "arena: play N nets against each other with the in-process rules engine.
+        "arena: play N players against each other with the in-process rules engine.
 
 usage: arena --nets <m1,m2[,m3,m4…]> [options]
-       arena --a <model> --b <model> [options]   (two-net shorthand)
+       arena --a <model> --b <model> [options]   (two-player shorthand)
 
-nets & seats:
+players & seats:
   --nets LIST         comma-separated players, one per entry. Each entry is a
                       model weights path, a built-in heuristic agent
-                      ('heuristic'/'floodfill' = flood-fill MCTS, 'voronoi' =
-                      time-expanded Voronoi MCTS), or an http(s):// base URL
-                      of an external Battlesnake-protocol server (POST /move)
-  --a / --b PATH      shorthand for --nets a,b
-  --names LIST        display names (default: model file stem / parent dir)
-  --seats N           snakes per game; seat s plays net (s+game)%N, so two
-                      nets with --seats 4 alternate A,B,A,B (default: net count)
+                      (\"floodfill\", \"voronoi\") or an http(s):// Battlesnake
+                      server url
+  --names LIST        display names, same order as --nets (default: file stems)
+  --seats N           snakes per game; seat s plays player (s+game)%N, so two
+                      players with --seats 4 alternate A,B,A,B (default: player
+                      count)
 
-match:
+schedule:
   --games N           total games; seats rotate every game (100)
-  --sims N            fixed MCTS sims per move; deterministic (1000)
-  --time-ms MS        wall-clock budget per move instead of --sims
-  --board N           board side length (11)
-  --seed N            base seed; game g uses seed+g (1)
-  --max-turns N       turn cutoff; survivors tie for rank 1 (500)
+  --parallel N        concurrent games, each on its own thread with its own
+                      copies of the nets (default: 4, capped at --games)
+  --seed N            base seed; game g plays with seed+g (1)
+  --board N           board width/height (11)
+  --max-turns N       cutoff; survivors tie at rank 1 (500)
 
-cpu / pinning:
-  --cores SPEC        flat core list split between nets in order, e.g. 12-15
-                      gives net 1 cores 12,13 and net 2 cores 14,15 at
-                      --cores-per-net 2 (auto)
-  --cores-per-net N   cores (worker threads) per net (1)
-  --parallel N        concurrent games (default: workers / seats, min 1)
-  --gpu               allow CUDA (default forces CPU so training is untouched)
-
-search (defaults match live serving):
-  --c-puct F          PUCT exploration constant (1.5)
-  --draw-value F      terminal draw value (-0.25)
-  --leaves-per-sim N  virtual-loss batch width (8)
-  --virtual-loss F    virtual-loss magnitude (1.0)
+search:
+  --sims N            fixed simulations per move — deterministic (1000)
+  --time-ms N         wall-clock per move instead of fixed sims
+  --c-puct X          PUCT exploration constant (1.5)
+  --draw-value X      terminal draw value (-0.25)
+  --leaves-per-sim N  leaves per batched selection round (8)
+  --virtual-loss X    virtual loss for batched selection (1.0)
   --eval-chunk N      max rows per net forward (4096)
+  --gpu               allow CUDA (don't use while training runs; default CPU)
 
 output:
   --out PATH          write full results (placements per game) as JSON
   --record PATH       record every game (frames + search readout) as a
                       viewer-compatible games file (same schema as the
                       trainer's games/gen_NNNN.json)
-  --record-gen N      the generation label stamped into --record (0)
-  --events            stream per-turn progress as JSON lines on stdout (for
-                      a parent process; per-game results always stream)"
+  --record-gen N      the generation label stamped into --record (0)"
     );
     std::process::exit(2);
+}
+
+fn parse_num<T: std::str::FromStr>(s: &str, flag: &str) -> T {
+    s.parse().unwrap_or_else(|_| {
+        eprintln!("arena: invalid value {s:?} for {flag}");
+        std::process::exit(2);
+    })
 }
 
 fn parse_args() -> Args {
@@ -180,9 +100,7 @@ fn parse_args() -> Args {
     let mut seats: Option<usize> = None;
     let mut sims = 1000usize;
     let mut time_ms: Option<u64> = None;
-    let mut cores = None;
-    let mut cores_per_net = 1usize;
-    let mut parallel = None;
+    let mut parallel = 4usize;
     let mut board = 11i8;
     let mut seed = 1u64;
     let mut max_turns = 500u32;
@@ -195,7 +113,6 @@ fn parse_args() -> Args {
     let mut out = None;
     let mut record = None;
     let mut record_gen = 0u32;
-    let mut events = false;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -229,12 +146,7 @@ fn parse_args() -> Args {
             "--seats" | "--snakes" => seats = Some(parse_num(&val("--seats"), "--seats")),
             "--sims" => sims = parse_num(&val("--sims"), "--sims"),
             "--time-ms" => time_ms = Some(parse_num(&val("--time-ms"), "--time-ms")),
-            "--cores" => cores = Some(parse_core_spec(&val("--cores"))),
-            "--cores-per-net" => {
-                cores_per_net =
-                    parse_num::<usize>(&val("--cores-per-net"), "--cores-per-net").max(1)
-            }
-            "--parallel" => parallel = Some(parse_num(&val("--parallel"), "--parallel")),
+            "--parallel" => parallel = parse_num(&val("--parallel"), "--parallel"),
             "--board" => board = parse_num(&val("--board"), "--board"),
             "--seed" => seed = parse_num(&val("--seed"), "--seed"),
             "--max-turns" => max_turns = parse_num(&val("--max-turns"), "--max-turns"),
@@ -249,7 +161,6 @@ fn parse_args() -> Args {
             "--out" => out = Some(val("--out")),
             "--record" => record = Some(val("--record")),
             "--record-gen" => record_gen = parse_num(&val("--record-gen"), "--record-gen"),
-            "--events" => events = true,
             "--help" | "-h" => usage(),
             other => {
                 eprintln!("arena: unknown argument {other}");
@@ -263,7 +174,7 @@ fn parse_args() -> Args {
         }
     }
     if nets.len() < 2 {
-        eprintln!("arena: need at least two nets (--nets or --a/--b)");
+        eprintln!("arena: need at least two players (--nets or --a/--b)");
         usage();
     }
     if games == 0 {
@@ -278,8 +189,8 @@ fn parse_args() -> Args {
     // Fill in default display names: file stem, or the parent directory when
     // stems collide (trainer checkpoints are all net_NNNN.safetensors).
     while names.len() < nets.len() {
-        let path = &nets[names.len()];
-        names.push(default_name(path, names.len()));
+        let spec = PlayerSpec::parse(&nets[names.len()]);
+        names.push(spec.default_name(names.len()));
     }
     Args {
         nets,
@@ -290,9 +201,7 @@ fn parse_args() -> Args {
             Some(ms) => Budget::TimeMs(ms.max(1)),
             None => Budget::Sims(sims.max(1)),
         },
-        cores,
-        cores_per_net,
-        parallel,
+        parallel: parallel.max(1).min(games),
         board,
         seed,
         max_turns,
@@ -305,481 +214,13 @@ fn parse_args() -> Args {
         out,
         record,
         record_gen,
-        events,
     }
 }
 
-/// What a `--nets` entry seats: a checkpoint, a built-in heuristic agent, or
-/// an external Battlesnake-protocol HTTP server.
-enum PlayerKind {
-    /// A checkpoint weights file (the spec string itself is the path).
-    Net,
-    Baseline(snek_heuristic::Baseline),
-    Http(String),
-}
-
-fn parse_player(spec: &str) -> PlayerKind {
-    if let Some(kind) = snek_heuristic::Baseline::parse(spec) {
-        PlayerKind::Baseline(kind)
-    } else if spec.starts_with("http://") || spec.starts_with("https://") {
-        PlayerKind::Http(spec.trim_end_matches('/').to_string())
-    } else {
-        PlayerKind::Net
-    }
-}
-
-fn default_name(path: &str, index: usize) -> String {
-    match parse_player(path) {
-        PlayerKind::Baseline(kind) => kind.display_name().to_string(),
-        PlayerKind::Http(url) => url
-            .split("://")
-            .nth(1)
-            .unwrap_or(&url)
-            .trim_end_matches('/')
-            .to_string(),
-        PlayerKind::Net => Path::new(path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("net-{index}")),
-    }
-}
-
-fn parse_num<T: std::str::FromStr>(s: &str, flag: &str) -> T {
-    s.parse().unwrap_or_else(|_| {
-        eprintln!("arena: invalid value {s:?} for {flag}");
-        std::process::exit(2);
-    })
-}
-
-/// "0-3", "0,2,4", "0-1,6-7" → sorted, deduped core id list.
-fn parse_core_spec(spec: &str) -> Vec<usize> {
-    let mut out = Vec::new();
-    for part in spec.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if let Some((lo, hi)) = part.split_once('-') {
-            let lo: usize = parse_num(lo, "core spec");
-            let hi: usize = parse_num(hi, "core spec");
-            if lo > hi {
-                eprintln!("arena: bad core range {part:?}");
-                std::process::exit(2);
-            }
-            out.extend(lo..=hi);
-        } else {
-            out.push(parse_num(part, "core spec"));
-        }
-    }
-    out.sort_unstable();
-    out.dedup();
-    if out.is_empty() {
-        eprintln!("arena: empty core spec {spec:?}");
-        std::process::exit(2);
-    }
-    out
-}
-
-struct MoveJob {
-    board: Board,
-    me: usize,
-    reply: mpsc::Sender<MoveInfo>,
-}
-
-/// A worker's answer for one position: the move plus the search readout for
-/// snake `me` (visit-count policy and root value), used by game recording.
-struct MoveInfo {
-    move_index: usize,
-    policy: [f32; 4],
-    value: f32,
-}
-
-/// One net's worker pool: one pinned thread (own `Net`) per core. Jobs carry
-/// their own reply channel, so any number of concurrent games share the pool.
-struct NetPool {
-    name: String,
-    senders: Vec<mpsc::Sender<MoveJob>>,
-    next: AtomicUsize,
-}
-
-impl NetPool {
-    fn submit(&self, board: Board, me: usize) -> mpsc::Receiver<MoveInfo> {
-        let (reply, rx) = mpsc::channel();
-        let k = self.next.fetch_add(1, Ordering::Relaxed) % self.senders.len();
-        self.senders[k]
-            .send(MoveJob { board, me, reply })
-            .expect("arena worker exited");
-        rx
-    }
-}
-
-fn spawn_worker(
-    label: String,
-    model: String,
-    core: Option<usize>,
-    cfg: Config,
-    budget: Budget,
-) -> mpsc::Sender<MoveJob> {
-    let (job_tx, job_rx) = mpsc::channel::<MoveJob>();
-    std::thread::Builder::new()
-        .name(label.clone())
-        .spawn(move || {
-            if let Some(id) = core {
-                if !core_affinity::set_for_current(core_affinity::CoreId { id }) {
-                    eprintln!("arena: warning: failed to pin {label} to core {id}");
-                }
-            }
-            match parse_player(&model) {
-                // A built-in heuristic agent — no weights, no libtorch. Its
-                // sims are ~100× cheaper than a net forward, so in fixed-sims
-                // mode it keeps its own static budget (~200ms/move, still
-                // deterministic) instead of the nets' --sims; in time mode
-                // the shared per-move deadline binds it like everyone else.
-                PlayerKind::Baseline(kind) => {
-                    let hcfg = snek_heuristic::HeuristicConfig {
-                        max_sims: match budget {
-                            Budget::Sims(_) => {
-                                snek_heuristic::HeuristicConfig::default().max_sims
-                            }
-                            Budget::TimeMs(_) => usize::MAX,
-                        },
-                        draw_value: cfg.draw_value,
-                        ..Default::default()
-                    };
-                    while let Ok(job) = job_rx.recv() {
-                        let deadline = match budget {
-                            Budget::Sims(_) => Instant::now() + SIMS_DEADLINE,
-                            Budget::TimeMs(ms) => Instant::now() + Duration::from_millis(ms),
-                        };
-                        let d = snek_heuristic::baseline_move_until(
-                            kind,
-                            &hcfg,
-                            &job.board,
-                            job.me,
-                            deadline,
-                        );
-                        let _ = job.reply.send(MoveInfo {
-                            move_index: d.move_index,
-                            policy: d.policy,
-                            value: d.value,
-                        });
-                    }
-                    return;
-                }
-                // An external Battlesnake-protocol server: POST {url}/move
-                // with the standard game state, play whatever it answers. A
-                // failed or illegal answer falls back to a sane legal move so
-                // one flaky server can't wedge a whole match.
-                PlayerKind::Http(url) => {
-                    http_player_loop(&label, &url, budget, job_rx);
-                    return;
-                }
-                PlayerKind::Net => {}
-            }
-            let mut net = Net::load(&model)
-                .unwrap_or_else(|e| panic!("arena: {label}: failed to load {model}: {e}"));
-            while let Ok(job) = job_rx.recv() {
-                let deadline = match budget {
-                    Budget::Sims(_) => Instant::now() + SIMS_DEADLINE,
-                    Budget::TimeMs(ms) => Instant::now() + Duration::from_millis(ms),
-                };
-                let d = serve_move_until_diagnostics(&mut net, &cfg, &job.board, job.me, deadline);
-                let n = job.board.snakes.len();
-                let mut policy = [0f32; 4];
-                let mut value = 0f32;
-                if d.diagnostics.root_policy.len() == n * 4 {
-                    policy.copy_from_slice(&d.diagnostics.root_policy[job.me * 4..job.me * 4 + 4]);
-                    value = d
-                        .diagnostics
-                        .root_values
-                        .get(job.me)
-                        .copied()
-                        .unwrap_or(0.0);
-                } else {
-                    // Forced move / fallback paths skip the search: record the
-                    // decision as a one-hot policy with no value estimate.
-                    policy[d.move_index] = 1.0;
-                }
-                let _ = job.reply.send(MoveInfo {
-                    move_index: d.move_index,
-                    policy,
-                    value,
-                });
-            }
-        })
-        .expect("spawn arena worker");
-    job_tx
-}
-
-/// Worker loop for an external HTTP player. Speaks the standard Battlesnake
-/// wire protocol (POST /move → {"move": "up"|"down"|"left"|"right"}), so any
-/// community snake server can take a seat. `snek-core` shares Battlesnake's
-/// coordinate system (x right, y up, origin bottom-left), so positions map
-/// verbatim. Only /move is called — /start and /end are skipped because games
-/// run concurrently and every request carries the full state.
-fn http_player_loop(label: &str, url: &str, budget: Budget, job_rx: mpsc::Receiver<MoveJob>) {
-    // Battlesnake's standard reply budget is 500ms; in time mode the shared
-    // per-move budget binds instead.
-    let timeout_ms = match budget {
-        Budget::Sims(_) => 500,
-        Budget::TimeMs(ms) => ms.max(1),
-    };
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_millis(timeout_ms))
-        .build();
-    let endpoint = format!("{url}/move");
-    let mut errors = 0u64;
-    while let Ok(job) = job_rx.recv() {
-        let state = battlesnake_state(&job.board, job.me, timeout_ms);
-        let answer = agent
-            .post(&endpoint)
-            .send_json(state)
-            .map_err(|e| e.to_string())
-            .and_then(|resp| {
-                resp.into_json::<serde_json::Value>()
-                    .map_err(|e| e.to_string())
-            })
-            .and_then(|v| {
-                match v
-                    .get("move")
-                    .and_then(|m| m.as_str())
-                    .map(str::to_ascii_lowercase)
-                    .as_deref()
-                {
-                    Some("up") => Ok(Move::Up),
-                    Some("down") => Ok(Move::Down),
-                    Some("left") => Ok(Move::Left),
-                    Some("right") => Ok(Move::Right),
-                    other => Err(format!("bad move {other:?}")),
-                }
-            });
-        let mv = answer.unwrap_or_else(|err| {
-            errors += 1;
-            // First few failures loudly, then sampled — a dead server would
-            // otherwise write one line per turn.
-            if errors <= 3 || errors.is_multiple_of(100) {
-                eprintln!("arena: {label}: {endpoint} failed ({errors} so far): {err}");
-            }
-            snek_heuristic::candidates(&job.board, job.me)[0]
-        });
-        let mut policy = [0f32; 4];
-        policy[mv.index()] = 1.0;
-        let _ = job.reply.send(MoveInfo {
-            move_index: mv.index(),
-            policy,
-            value: 0.0,
-        });
-    }
-}
-
-/// The standard Battlesnake /move request body for `me`'s view of `board`.
-/// Dead snakes are omitted, exactly like the real engine.
-fn battlesnake_state(board: &Board, me: usize, timeout_ms: u64) -> serde_json::Value {
-    let point = |p: &snek_core::Point| json!({ "x": p.x as i32, "y": p.y as i32 });
-    let snake = |i: usize| {
-        let s = &board.snakes[i];
-        let body: Vec<_> = s.body.iter().map(|p| point(&p)).collect();
-        json!({
-            "id": format!("seat-{i}"),
-            "name": format!("seat-{i}"),
-            "health": s.health as i32,
-            "body": body,
-            "head": body.first().cloned().unwrap_or_else(|| json!({"x": 0, "y": 0})),
-            "length": s.len(),
-            "latency": "0",
-            "shout": "",
-        })
-    };
-    let alive: Vec<_> = (0..board.snakes.len())
-        .filter(|&i| board.snakes[i].alive())
-        .map(snake)
-        .collect();
-    json!({
-        "game": {
-            "id": "snek3-arena",
-            "ruleset": { "name": "standard", "version": "v1" },
-            "map": "standard",
-            "source": "custom",
-            "timeout": timeout_ms,
-        },
-        "turn": board.turn,
-        "board": {
-            "width": board.width as i32,
-            "height": board.height as i32,
-            "food": board.food.iter().map(&point).collect::<Vec<_>>(),
-            "hazards": board.hazards.iter().map(point).collect::<Vec<_>>(),
-            "snakes": alive,
-        },
-        "you": snake(me),
-    })
-}
-
-/// One seat's result: which net played it and where it finished. Rank 1 is
-/// best; ties share a rank (simultaneous deaths, or survivors at the cutoff).
-#[derive(Serialize, Clone)]
-struct SeatPlacement {
-    seat: usize,
-    net: usize,
-    rank: u32,
-    death_turn: Option<u32>,
-}
-
-struct GameOutcome {
-    game_index: usize,
+struct GameResult {
+    index: usize,
     seed: u64,
-    turns: u32,
-    wall_ms: u64,
-    placements: Vec<SeatPlacement>,
-    /// Recorded frames (pre-step, like self-play sample games); empty unless
-    /// --record is set.
-    frames: Vec<FrameJson>,
-}
-
-/// Which net plays seat `s` of game `g`: rotation by game index means every
-/// net cycles through every seat (two nets at four seats give A,B,A,B then
-/// B,A,B,A — the classic mirrored pair).
-fn net_for_seat(seat: usize, game_index: usize, n_nets: usize) -> usize {
-    (seat + game_index) % n_nets
-}
-
-#[allow(clippy::too_many_arguments)]
-fn play_game(
-    game_index: usize,
-    seed: u64,
-    seats: usize,
-    board_size: i8,
-    max_turns: u32,
-    record: bool,
-    events: bool,
-    pools: &[NetPool],
-) -> GameOutcome {
-    let start = Instant::now();
-    let n_nets = pools.len();
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    let mut board = standard_start(board_size, board_size, seats, &mut rng);
-    let mut frames = Vec::new();
-    let mut death_turn: Vec<Option<u32>> = vec![None; seats];
-    // The game ends for rating purposes as soon as at most one net has a
-    // living snake — the elimination order is complete at that point.
-    let living_nets = |board: &Board| {
-        let mut nets: Vec<usize> = board
-            .snakes
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.alive())
-            .map(|(i, _)| net_for_seat(i, game_index, n_nets))
-            .collect();
-        nets.sort_unstable();
-        nets.dedup();
-        nets
-    };
-    while board.turn < max_turns && living_nets(&board).len() > 1 {
-        let n = board.snakes.len();
-        let mut moves = vec![Move::Up; n];
-        let mut infos: Vec<Option<MoveInfo>> = (0..n).map(|_| None).collect();
-        // Fan out every living snake's search before collecting any: each job
-        // lands on its net's worker pool, so all nets search concurrently.
-        let mut pending: Vec<(usize, mpsc::Receiver<MoveInfo>)> = Vec::new();
-        for i in 0..n {
-            if !board.snakes[i].alive() {
-                continue;
-            }
-            let pool = &pools[net_for_seat(i, game_index, n_nets)];
-            pending.push((i, pool.submit(board.clone(), i)));
-        }
-        for (i, rx) in pending {
-            let info = rx.recv().expect("arena worker exited");
-            moves[i] = Move::from_index(info.move_index);
-            infos[i] = Some(info);
-        }
-        let frame = (record || events).then(|| frame_from_board(&board, &moves, &infos));
-        if record {
-            frames.push(frame.clone().expect("frame built when recording"));
-        }
-        board.step_and_spawn(&moves, &mut rng);
-        for (i, snake) in board.snakes.iter().enumerate() {
-            if !snake.alive() && death_turn[i].is_none() {
-                death_turn[i] = Some(board.turn);
-            }
-        }
-        if events {
-            // The frame is the pre-step position with each snake's decision
-            // (policy/value/move), so a live viewer renders exactly what the
-            // recorded replay will show for this turn.
-            emit_event(json!({
-                "event": "turn",
-                "index": game_index,
-                "turn": board.turn,
-                "alive": board.alive_count(),
-                "frame": frame,
-            }));
-        }
-    }
-    // Competition ranking by elimination order: outlasting a snake beats it,
-    // survivors (including everyone at a max-turns cutoff) tie at the top.
-    let score = |i: usize| death_turn[i].unwrap_or(u32::MAX);
-    let placements: Vec<SeatPlacement> = (0..seats)
-        .map(|i| {
-            let rank = 1 + (0..seats).filter(|&j| score(j) > score(i)).count() as u32;
-            SeatPlacement {
-                seat: i,
-                net: net_for_seat(i, game_index, n_nets),
-                rank,
-                death_turn: death_turn[i],
-            }
-        })
-        .collect();
-    GameOutcome {
-        game_index,
-        seed,
-        turns: board.turn,
-        wall_ms: start.elapsed().as_millis() as u64,
-        placements,
-        frames,
-    }
-}
-
-/// Capture the pre-step state of the board as a recordable frame, mirroring
-/// self-play's `frame_from_board`: every snake's body/health plus the search
-/// readout for the snakes that moved this turn. Eval plays argmax (no
-/// sampling), so `play_policy` is the one-hot of the chosen move.
-fn frame_from_board(board: &Board, moves: &[Move], infos: &[Option<MoveInfo>]) -> FrameJson {
-    let coord = |p: &snek_core::Point| [p.x as i32, p.y as i32];
-    let snakes = (0..board.snakes.len())
-        .map(|i| {
-            let snake = &board.snakes[i];
-            let (policy, play_policy, value) = match &infos[i] {
-                Some(info) => {
-                    let mut one_hot = vec![0.0f64; 4];
-                    one_hot[info.move_index] = 1.0;
-                    (
-                        info.policy.iter().map(|&v| v as f64).collect(),
-                        one_hot,
-                        info.value as f64,
-                    )
-                }
-                None => (Vec::new(), Vec::new(), 0.0),
-            };
-            SnakeJson {
-                alive: snake.alive(),
-                body: snake.body.iter().map(|p| coord(&p)).collect(),
-                health: snake.health as i32,
-                chosen_move: moves[i].index() as u32,
-                policy,
-                play_policy,
-                value,
-            }
-        })
-        .collect();
-    FrameJson {
-        turn: board.turn,
-        width: board.width as i32,
-        height: board.height as i32,
-        food: board.food.iter().map(coord).collect(),
-        hazards: board.hazards.iter().map(coord).collect(),
-        snakes,
-    }
+    outcome: Outcome,
 }
 
 fn main() {
@@ -787,17 +228,22 @@ fn main() {
     tch::set_num_interop_threads(1);
 
     let args = parse_args();
-    if !args.gpu && std::env::var("SNEK_CPU_ONLY").is_err() {
-        std::env::set_var("SNEK_CPU_ONLY", "1");
-    }
-    let n_nets = args.nets.len();
+    let device = if args.gpu && tch::Cuda::is_available() {
+        tch::Device::Cuda(0)
+    } else {
+        tch::Device::Cpu
+    };
+    let trunk_channels = snek_server::env_or("SNEK_TRUNK_CHANNELS", 96i64);
+    let trunk_blocks = snek_server::env_or("SNEK_TRUNK_BLOCKS", 8i64);
+    let n_players = args.nets.len();
+
     // Disambiguate colliding default names via the parent directory.
     let mut names = args.names.clone();
     for i in 0..names.len() {
         if names.iter().filter(|n| **n == names[i]).count() > 1 {
-            if let Some(parent) = Path::new(&args.nets[i])
+            if let Some(parent) = std::path::Path::new(&args.nets[i])
                 .parent()
-                .and_then(Path::file_name)
+                .and_then(std::path::Path::file_name)
                 .and_then(|s| s.to_str())
             {
                 names[i] = format!("{parent}/{}", names[i]);
@@ -805,181 +251,148 @@ fn main() {
         }
     }
 
-    // Allocate cores: an explicit --cores list is split between nets in order;
-    // otherwise take nets × cores_per_net from the machine's available cores.
-    let available: Vec<usize> = core_affinity::get_core_ids()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|c| c.id)
-        .collect();
-    let flat: Option<Vec<usize>> = match &args.cores {
-        Some(list) => Some(list.clone()),
-        None if available.is_empty() => None,
-        None => Some(
-            available
-                .iter()
-                .copied()
-                .take(n_nets * args.cores_per_net)
-                .collect(),
-        ),
-    };
-    let per_net = flat
-        .as_ref()
-        .map(|f| (f.len() / n_nets).max(1))
-        .unwrap_or(args.cores_per_net);
-    let net_cores = |net: usize, k: usize| -> Option<usize> {
-        flat.as_ref()
-            .and_then(|f| f.get(net * per_net + k).copied())
-    };
-    if flat.is_none() {
-        eprintln!("arena: warning: cannot enumerate CPU cores; workers will be unpinned");
-    }
-
-    let cfg = Config {
-        max_sims: match args.budget {
-            Budget::Sims(n) => n,
-            Budget::TimeMs(_) => usize::MAX,
+    let settings = Arc::new(GameSettings {
+        seats: args.seats,
+        board_size: args.board,
+        max_turns: args.max_turns,
+        cfg: Config {
+            max_sims: match args.budget {
+                Budget::Sims(n) => n,
+                Budget::TimeMs(_) => usize::MAX,
+            },
+            c_puct: args.c_puct,
+            draw_value: args.draw_value,
+            eval_chunk: args.eval_chunk,
+            leaves_per_sim: args.leaves_per_sim,
+            virtual_loss: args.virtual_loss,
         },
-        c_puct: args.c_puct,
-        draw_value: args.draw_value,
-        eval_chunk: args.eval_chunk,
-        leaves_per_sim: args.leaves_per_sim,
-        virtual_loss: args.virtual_loss,
-    };
+        budget: args.budget,
+    });
     let budget_desc = match args.budget {
         Budget::Sims(n) => format!("{n} sims/move"),
         Budget::TimeMs(ms) => format!("{ms} ms/move"),
     };
-
-    let pools: Arc<Vec<NetPool>> = Arc::new(
-        (0..n_nets)
-            .map(|net| {
-                let senders = (0..per_net)
-                    .map(|k| {
-                        spawn_worker(
-                            format!("arena-n{net}w{k}"),
-                            args.nets[net].clone(),
-                            net_cores(net, k),
-                            cfg.clone(),
-                            args.budget,
-                        )
-                    })
-                    .collect();
-                NetPool {
-                    name: names[net].clone(),
-                    senders,
-                    next: AtomicUsize::new(0),
-                }
-            })
-            .collect(),
-    );
-    for (net, pool) in pools.iter().enumerate() {
-        let cores: Vec<_> = (0..per_net).filter_map(|k| net_cores(net, k)).collect();
-        eprintln!(
-            "arena: net {net} {name} ({path}) cores={cores:?}",
-            name = pool.name,
-            path = args.nets[net],
-        );
-    }
-    let parallel = args
-        .parallel
-        .unwrap_or_else(|| ((n_nets * per_net) / args.seats).max(1))
-        .max(1)
-        .min(args.games);
     eprintln!(
-        "arena: {games} games, {seats} seats over {n_nets} nets (rotating), {budget_desc}, board {board}x{board}, parallel {parallel}, {mode}",
+        "arena: {games} games, {seats} seats over {n_players} players (rotating), {budget_desc}, board {board}x{board}, parallel {parallel}, {dev}",
         games = args.games,
         seats = args.seats,
         board = args.board,
-        mode = if args.gpu { "gpu allowed" } else { "cpu only" }
+        parallel = args.parallel,
+        dev = if device == tch::Device::Cpu { "cpu" } else { "gpu" },
     );
 
-    let mut runners = Vec::new();
-    let (result_tx, result_rx) = mpsc::channel::<GameOutcome>();
-    for slot in 0..parallel {
-        let pools = Arc::clone(&pools);
+    // One slot per thread, games claimed off a shared counter so a slot that
+    // draws short games absorbs more of them (no straggler by construction).
+    // Each slot loads its own copies of the nets: a search needs `&mut Net`.
+    let next_game = Arc::new(AtomicUsize::new(0));
+    let (result_tx, result_rx) = mpsc::channel::<GameResult>();
+    let specs: Arc<Vec<String>> = Arc::new(args.nets.clone());
+    let slot_names: Arc<Vec<String>> = Arc::new(names.clone());
+    let record_frames = args.record.is_some();
+    let mut slots = Vec::new();
+    for slot in 0..args.parallel {
+        let next_game = Arc::clone(&next_game);
         let tx = result_tx.clone();
-        let record = args.record.is_some();
-        let events = args.events;
-        let (games, base_seed, seats, board, max_turns) = (
-            args.games,
-            args.seed,
-            args.seats,
-            args.board,
-            args.max_turns,
-        );
-        runners.push(std::thread::spawn(move || {
-            let mut g = slot;
-            while g < games {
-                let seed = base_seed.wrapping_add(g as u64);
-                let out = play_game(g, seed, seats, board, max_turns, record, events, &pools);
-                if tx.send(out).is_err() {
+        let specs = Arc::clone(&specs);
+        let slot_names = Arc::clone(&slot_names);
+        let settings = Arc::clone(&settings);
+        let (games, base_seed) = (args.games, args.seed);
+        slots.push(std::thread::spawn(move || {
+            let mut players: Vec<_> = specs
+                .iter()
+                .enumerate()
+                .map(|(i, spec)| {
+                    snek_server::arena::Player::load(
+                        &PlayerSpec::parse(spec),
+                        device,
+                        trunk_channels,
+                        trunk_blocks,
+                        settings.budget,
+                        &slot_names[i],
+                    )
+                    .unwrap_or_else(|e| {
+                        eprintln!("arena: slot {slot}: failed to load {spec}: {e}");
+                        std::process::exit(1);
+                    })
+                })
+                .collect();
+            loop {
+                let g = next_game.fetch_add(1, Ordering::Relaxed);
+                if g >= games {
                     return;
                 }
-                g += parallel;
+                let seed = base_seed.wrapping_add(g as u64);
+                let outcome = play_game(&mut players, g, &settings, seed, &|| false, &mut |_| {})
+                    .expect("no stop signal in CLI mode");
+                let mut outcome = outcome;
+                if !record_frames {
+                    outcome.frames.clear();
+                }
+                if tx
+                    .send(GameResult {
+                        index: g,
+                        seed,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
             }
         }));
     }
     drop(result_tx);
 
     let started = Instant::now();
-    let mut games: Vec<GameOutcome> = Vec::with_capacity(args.games);
-    // Per-net running tallies: games, rank-1 finishes, summed rank.
-    let mut tally = vec![(0u32, 0u32, 0u64); n_nets];
-    while let Ok(out) = result_rx.recv() {
-        for p in &out.placements {
-            let t = &mut tally[p.net];
+    let mut results: Vec<GameResult> = Vec::with_capacity(args.games);
+    // Per-player running tallies: games, rank-1 finishes, summed rank.
+    let mut tally = vec![(0u32, 0u32, 0u64); n_players];
+    while let Ok(res) = result_rx.recv() {
+        for p in &res.outcome.placements {
+            let t = &mut tally[p.player as usize];
             t.0 += 1;
             t.1 += (p.rank == 1) as u32;
             t.2 += p.rank as u64;
         }
-        let mut order = out.placements.clone();
+        let mut order: Vec<&Placement> = res.outcome.placements.iter().collect();
         order.sort_by_key(|p| p.rank);
-        let ranking = order
-            .iter()
-            .map(|p| names[p.net].clone())
-            .collect::<Vec<_>>()
-            .join(" > ");
         eprintln!(
             "arena: [{done:>4}/{total}] game {idx:04} {ranking} · {turns} turns ({secs:.1}s)",
-            done = games.len() + 1,
+            done = results.len() + 1,
             total = args.games,
-            idx = out.game_index,
-            turns = out.turns,
-            secs = out.wall_ms as f64 / 1000.0,
+            idx = res.index,
+            ranking = order
+                .iter()
+                .map(|p| names[p.player as usize].clone())
+                .collect::<Vec<_>>()
+                .join(" > "),
+            turns = res.outcome.turns,
+            secs = res.outcome.wall_ms as f64 / 1000.0,
         );
-        // Per-game event for whoever drives us as a child process (the
-        // trainer's league updates ratings after every game).
-        emit_event(json!({
-            "event": "game",
-            "index": out.game_index,
-            "turns": out.turns,
-            "wall_ms": out.wall_ms,
-            "placements": out.placements,
-        }));
-        games.push(out);
+        results.push(res);
     }
-    for r in runners {
-        let _ = r.join();
+    for handle in slots {
+        let _ = handle.join();
     }
 
-    if games.is_empty() {
+    if results.is_empty() {
         eprintln!("arena: no games completed");
         std::process::exit(1);
     }
-    games.sort_by_key(|g| g.game_index);
-    let avg_turns = games.iter().map(|g| g.turns as f64).sum::<f64>() / games.len() as f64;
+    results.sort_by_key(|r| r.index);
+    let avg_turns =
+        results.iter().map(|r| r.outcome.turns as f64).sum::<f64>() / results.len() as f64;
     let wall = started.elapsed().as_secs_f64();
     println!(
-        "arena: {} games over {} nets, {budget_desc}, avg turns {avg_turns:.0}, wall {:.1}m",
-        games.len(),
-        n_nets,
+        "arena: {} games over {} players, {budget_desc}, avg turns {avg_turns:.0}, wall {:.1}m",
+        results.len(),
+        n_players,
         wall / 60.0
     );
-    for (net, (played, firsts, rank_sum)) in tally.iter().enumerate() {
+    for (player, (played, firsts, rank_sum)) in tally.iter().enumerate() {
         println!(
             "  {name:<24} {played} games, {firsts} wins, avg rank {avg:.2}",
-            name = names[net],
+            name = names[player],
             avg = if *played > 0 {
                 *rank_sum as f64 / *played as f64
             } else {
@@ -991,10 +404,9 @@ fn main() {
     if args.out.is_some() || args.record.is_some() {
         let doc = json!({
             "config": {
-                "nets": (0..n_nets).map(|i| json!({
+                "players": (0..n_players).map(|i| json!({
                     "model": args.nets[i],
                     "name": names[i],
-                    "cores": (0..per_net).filter_map(|k| net_cores(i, k)).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
                 "games": args.games,
                 "seats": args.seats,
@@ -1002,12 +414,12 @@ fn main() {
                 "board": args.board,
                 "seed": args.seed,
                 "max_turns": args.max_turns,
-                "parallel": parallel,
+                "parallel": args.parallel,
                 "c_puct": args.c_puct,
                 "draw_value": args.draw_value,
             },
             "summary": {
-                "nets": (0..n_nets).map(|i| json!({
+                "players": (0..n_players).map(|i| json!({
                     "name": names[i],
                     "games": tally[i].0,
                     "wins": tally[i].1,
@@ -1016,12 +428,12 @@ fn main() {
                 "avg_turns": avg_turns,
                 "wall_seconds": wall,
             },
-            "games": games.iter().map(|g| json!({
-                "index": g.game_index,
-                "seed": g.seed,
-                "turns": g.turns,
-                "wall_ms": g.wall_ms,
-                "placements": g.placements,
+            "games": results.iter().map(|r| json!({
+                "index": r.index,
+                "seed": r.seed,
+                "turns": r.outcome.turns,
+                "wall_ms": r.outcome.wall_ms,
+                "placements": r.outcome.placements,
             })).collect::<Vec<_>>(),
         });
         if let Some(path) = &args.out {
@@ -1035,27 +447,24 @@ fn main() {
         }
         if let Some(path) = &args.record {
             // Same file shape as the trainer's games/gen_NNNN.json, with the
-            // match summary in the `config` slot so the viewer can surface it.
-            let file = GameFileJson {
-                gen: args.record_gen,
-                config: doc.clone(),
-                games: games
-                    .iter_mut()
-                    .map(|g| {
-                        let winners: Vec<_> = g.placements.iter().filter(|p| p.rank == 1).collect();
-                        GameJson {
-                            frames: std::mem::take(&mut g.frames),
-                            winner: match winners.as_slice() {
-                                [only] => Some(only.seat as i32),
-                                _ => None,
-                            },
-                            num_turns: g.turns,
-                        }
+            // run summary in the `config` slot so the viewer can surface it.
+            let file = json!({
+                "gen": args.record_gen,
+                "config": doc,
+                "games": results.iter().map(|r| {
+                    let winners: Vec<_> = r.outcome.placements.iter().filter(|p| p.rank == 1).collect();
+                    json!({
+                        "frames": r.outcome.frames,
+                        "winner": match winners.as_slice() {
+                            [only] => Some(only.seat as i32),
+                            _ => None,
+                        },
+                        "num_turns": r.outcome.turns,
                     })
-                    .collect(),
-            };
+                }).collect::<Vec<_>>(),
+            });
             let write = || -> anyhow::Result<()> {
-                if let Some(parent) = Path::new(path).parent() {
+                if let Some(parent) = std::path::Path::new(path).parent() {
                     std::fs::create_dir_all(parent)?;
                 }
                 let tmp = format!("{path}.tmp");

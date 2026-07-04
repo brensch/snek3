@@ -431,7 +431,11 @@ mod tests {
             let node = &tree.nodes[id];
             for i in 0..4 {
                 let k = node.ncand[i];
-                let support: Vec<f32> = node.prior[i][..k].iter().copied().filter(|&p| p > EPS).collect();
+                let support: Vec<f32> = node.prior[i][..k]
+                    .iter()
+                    .copied()
+                    .filter(|&p| p > EPS)
+                    .collect();
                 for &p in &support {
                     assert!(
                         (p - support[0]).abs() < 1e-6,

@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file snek.proto.
  */
 export const file_snek: GenFile = /*@__PURE__*/
-  fileDesc("CgpzbmVrLnByb3RvEgRzbmVrIqMDCgpTdGF0c0ZyYW1lEhEKCXRfdW5peF9tcxgBIAEoBBISCgpnZW5lcmF0aW9uGAIgASgNEhoKBXBoYXNlGAMgASgOMgsuc25lay5QaGFzZRIaChJpbmZlcmVuY2VzX3Blcl9zZWMYBCABKAESFQoNZ2FtZXNfcGVyX3NlYxgFIAEoARIdChVjb21wbGV0ZWRfZ2FtZXNfdG90YWwYBiABKAQSGQoRc2FtcGxlc19jb2xsZWN0ZWQYByABKA0SFgoOc2FtcGxlc190YXJnZXQYCCABKA0SFAoMZ3B1X2J1c3lfcGN0GAkgASgBEhYKDmJhdGNoX2F2Z19yb3dzGAogASgNEhMKC3BvbGljeV9sb3NzGAsgASgBEhIKCnZhbHVlX2xvc3MYDCABKAESFgoOdGFyZ2V0X2VudHJvcHkYDSABKAESGAoQZ3B1X3Jvd3NfcGVyX3NlYxgOIAEoARISCgp0cmFpbl9zdGVwGA8gASgNEhkKEXRyYWluX3N0ZXBzX3RvdGFsGBAgASgNEhUKDWF2Z19nYW1lX3R1cm4YESABKAEiWwoIUnVuU3RhdGUSGgoFcGhhc2UYASABKA4yCy5zbmVrLlBoYXNlEhIKCmdlbmVyYXRpb24YAiABKA0SDgoGcnVuX2lkGAMgASgJEg8KB3J1bm5pbmcYBCABKAgqVwoFUGhhc2USCAoESURMRRAAEgsKB1BMQVlJTkcQARIMCghUUkFJTklORxACEg4KCkNIRUNLUE9JTlQQAxIMCghTVE9QUElORxAEEgsKB1NUT1BQRUQQBWIGcHJvdG8z");
+  fileDesc("CgpzbmVrLnByb3RvEgRzbmVrIr4DCgpTdGF0c0ZyYW1lEhEKCXRfdW5peF9tcxgBIAEoBBISCgpnZW5lcmF0aW9uGAIgASgNEhoKBXBoYXNlGAMgASgOMgsuc25lay5QaGFzZRIaChJpbmZlcmVuY2VzX3Blcl9zZWMYBCABKAESFQoNZ2FtZXNfcGVyX3NlYxgFIAEoARIdChVjb21wbGV0ZWRfZ2FtZXNfdG90YWwYBiABKAQSGQoRc2FtcGxlc19jb2xsZWN0ZWQYByABKA0SFgoOc2FtcGxlc190YXJnZXQYCCABKA0SFAoMZ3B1X2J1c3lfcGN0GAkgASgBEhYKDmJhdGNoX2F2Z19yb3dzGAogASgNEhMKC3BvbGljeV9sb3NzGAsgASgBEhIKCnZhbHVlX2xvc3MYDCABKAESFgoOdGFyZ2V0X2VudHJvcHkYDSABKAESGAoQZ3B1X3Jvd3NfcGVyX3NlYxgOIAEoARISCgp0cmFpbl9zdGVwGA8gASgNEhkKEXRyYWluX3N0ZXBzX3RvdGFsGBAgASgNEhUKDWF2Z19nYW1lX3R1cm4YESABKAESGQoRYXZnX2luZmxpZ2h0X3R1cm4YEiABKAEiWwoIUnVuU3RhdGUSGgoFcGhhc2UYASABKA4yCy5zbmVrLlBoYXNlEhIKCmdlbmVyYXRpb24YAiABKA0SDgoGcnVuX2lkGAMgASgJEg8KB3J1bm5pbmcYBCABKAgqVwoFUGhhc2USCAoESURMRRAAEgsKB1BMQVlJTkcQARIMCghUUkFJTklORxACEg4KCkNIRUNLUE9JTlQQAxIMCghTVE9QUElORxAEEgsKB1NUT1BQRUQQBWIGcHJvdG8z");
 
 /**
  * @generated from message snek.StatsFrame
@@ -102,6 +102,15 @@ export type StatsFrame = Message<"snek.StatsFrame"> & {
    * @generated from field: double avg_game_turn = 17;
    */
   avgGameTurn: number;
+
+  /**
+   * Live mean of the current turn across all in-flight self-play games. Starts
+   * at 0 on a fresh generation and climbs as games advance, dipping as games
+   * finish and reset. Instantaneous (not smoothed).
+   *
+   * @generated from field: double avg_inflight_turn = 18;
+   */
+  avgInflightTurn: number;
 };
 
 /**

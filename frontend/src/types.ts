@@ -31,9 +31,10 @@ export type RunConfig = {
   search_threads: number;
   sample_games: number;
   // Continuous CPU evaluation league: a checkpoint joins the pool every this
-  // many gens; game pairs run back-to-back while the run is active. 0 disables.
+  // many gens; games run back-to-back while the run is active. 0 disables.
   league_entrant_gens: number;
   eval_sims: number;
+  league_games: number;
 };
 
 // The JSON shape returned by GET /api/state. `phase` is the Phase enum value

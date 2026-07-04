@@ -18,6 +18,21 @@ pub(super) fn game_matches_shape(g: &GameJson, board: i8, n: usize) -> bool {
         .is_some_and(|f| f.width == board as i32 && f.height == board as i32 && f.snakes.len() == n)
 }
 
+/// Can a carried in-flight game be resumed under the current config? Its board
+/// must be the right size, and its snake count must match — taken from the game's
+/// own start frame (which held all `n` snakes) when it has one, else from the live
+/// board for a game paused before recording its first frame. A mismatch would
+/// encode frames to the wrong observation, so such games are dropped and replaced.
+pub(super) fn in_flight_matches_shape(b: &Board, rec: &[FrameJson], board: i8, n: usize) -> bool {
+    if b.width != board || b.height != board {
+        return false;
+    }
+    match rec.first() {
+        Some(f) => f.width == board as i32 && f.height == board as i32 && f.snakes.len() == n,
+        None => b.snakes.len() == n,
+    }
+}
+
 /// Number of training samples a finished game contributes: one per (pre-terminal
 /// frame, snake alive at that frame). Mirrors [`materialize_game`]'s emission so
 /// the generation's sample gate stays exact without building any observations.

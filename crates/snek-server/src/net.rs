@@ -7,6 +7,9 @@ pub struct Net {
 }
 
 impl Net {
+    /// Load with device and trunk shape from the environment (`SNEK_CPU_ONLY`,
+    /// `SNEK_TRUNK_CHANNELS`, `SNEK_TRUNK_BLOCKS`) — the standalone serving
+    /// path. In-process callers that know the run's config use [`Net::load_on`].
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let device = if std::env::var("SNEK_CPU_ONLY").ok().as_deref() == Some("1") {
             Device::Cpu
@@ -15,8 +18,22 @@ impl Net {
         } else {
             Device::Cpu
         };
-        let trunk_channels = env_or("SNEK_TRUNK_CHANNELS", 96i64);
-        let trunk_blocks = env_or("SNEK_TRUNK_BLOCKS", 8i64);
+        Self::load_on(
+            path,
+            device,
+            env_or("SNEK_TRUNK_CHANNELS", 96i64),
+            env_or("SNEK_TRUNK_BLOCKS", 8i64),
+        )
+    }
+
+    /// Load onto an explicit device with an explicit trunk shape (which must
+    /// match how the checkpoint was trained).
+    pub fn load_on(
+        path: &str,
+        device: Device,
+        trunk_channels: i64,
+        trunk_blocks: i64,
+    ) -> anyhow::Result<Self> {
         let mut vs = nn::VarStore::new(device);
         let net = snek_tch::AZNet::new(
             &vs.root(),

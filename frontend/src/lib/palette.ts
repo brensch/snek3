@@ -49,6 +49,32 @@ export const chrome = {
 } as const;
 
 // Snake identity on boards: the categorical order, fixed by seat index.
+// Self-play boards (where snakes have no persistent identity) use this.
 export function snakeColor(seat: number): string {
   return CATEGORICAL[seat % CATEGORICAL.length];
+}
+
+// League players carry a persistent identity, so their color is hashed from
+// the display name: gen_0040 is the same hue in every game, list, chip and
+// board it appears in. FNV-1a + a murmur-style finalizer, because names
+// differing only in trailing digits (gen_0040 vs gen_0045) must scatter —
+// a plain h*31+c hash lands them a few hue degrees apart. Lightness varies
+// from a second hash slice so even close hues stay tellable; both stay in a
+// band that reads on the dark surface. True collisions remain possible, but
+// the named legends always disambiguate.
+export function playerColor(name: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  h >>>= 0;
+  const hue = h % 360;
+  const lightness = 50 + ((h >>> 9) % 18); // 50–67%
+  return `hsl(${hue} 62% ${lightness}%)`;
 }

@@ -24,6 +24,12 @@ export function LiveThroughput({ stats, history }: { stats: StatsFrame | null; h
         color={series.yellow}
         max={100}
       />
+      <Metric
+        label="avg in-flight turn"
+        value={stats ? stats.avgInflightTurn.toFixed(1) : "–"}
+        values={history.map((f) => f.avgInflightTurn)}
+        color={series.aqua}
+      />
     </div>
   );
 }

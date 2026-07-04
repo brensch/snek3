@@ -10,8 +10,19 @@ const HOLD = 10;
 // One recorded game as a self-contained tile: a board, its own play/pause and
 // turn scrubber, a copy-as-JSON button, the value/length/health of each snake,
 // and the per-direction policy on hover. `intervalMs`/`cell` come from the
-// grid-wide speed/size sliders.
-export function GameTile({ game, intervalMs, cell }: { game: Game; intervalMs: number; cell: number }) {
+// grid-wide speed/size sliders; `colors` overrides seat colors with stable
+// per-player colors (league games).
+export function GameTile({
+  game,
+  intervalMs,
+  cell,
+  colors,
+}: {
+  game: Game;
+  intervalMs: number;
+  cell: number;
+  colors?: string[];
+}) {
   const frames = game.frames;
   const len = frames.length;
   const cycle = len + HOLD;
@@ -87,8 +98,11 @@ export function GameTile({ game, intervalMs, cell }: { game: Game; intervalMs: n
           cell={cell}
           highlight={hovered}
           onHoverSnake={setHovered}
+          colors={colors}
         />
-        {hovered != null && frame.snakes[hovered] && <PolicyPopover snake={frame.snakes[hovered]} index={hovered} />}
+        {hovered != null && frame.snakes[hovered] && (
+          <PolicyPopover snake={frame.snakes[hovered]} index={hovered} color={colors?.[hovered]} />
+        )}
       </div>
 
       <div className="mt-1.5 flex min-w-0 items-center gap-1 text-[10px] text-ink-3">
@@ -137,7 +151,7 @@ export function GameTile({ game, intervalMs, cell }: { game: Game; intervalMs: n
             onMouseLeave={() => setHovered(null)}
             className={`${statCols} rounded px-0.5 text-[10px] ${hovered === i ? "bg-inset" : ""} ${s.alive ? "" : "opacity-40"}`}
           >
-            <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: snakeColor(i) }} />
+            <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: colors?.[i] ?? snakeColor(i) }} />
             <ValueBar v={s.value} showValue={hovered === i} />
             <span className="text-right font-mono tabular-nums text-ink-3" title={`length ${s.body.length}`}>
               {s.body.length}
@@ -183,11 +197,11 @@ function ValueBar({ v, showValue }: { v: number; showValue?: boolean }) {
 
 // The four-direction search policy for one snake, shown only on hover.
 // `pointer-events-none` so it never steals the hover from the element beneath.
-function PolicyPopover({ snake, index }: { snake: SnakeFrame; index: number }) {
+function PolicyPopover({ snake, index, color }: { snake: SnakeFrame; index: number; color?: string }) {
   return (
     <div className="pointer-events-none absolute left-1 top-1 z-10 rounded-md border border-white/10 bg-page/95 p-1.5 shadow-lg">
       <div className="mb-1 flex items-center gap-1 text-[10px] text-ink-2">
-        <span className="h-2 w-2 rounded-full" style={{ background: snakeColor(index) }} />
+        <span className="h-2 w-2 rounded-full" style={{ background: color ?? snakeColor(index) }} />
         snake {index}
       </div>
       {[0, 1, 2, 3].map((m) => {

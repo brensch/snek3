@@ -36,7 +36,6 @@ rand_xoshiro = "0.6"
 rust-embed = "8"
 sha2 = "0.10"
 tch = "0.24"
-core_affinity = "0.8"
 ureq = { version = "2", features = ["json"] }
 
 [profile.release]

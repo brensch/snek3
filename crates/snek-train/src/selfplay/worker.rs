@@ -9,11 +9,11 @@
 use super::gpu::Gpu;
 use super::materialize::game_sample_count;
 use super::rules::{argmax_move, mask_obvious_immediate_deaths, sample_move, terminal_value};
-use rand::Rng;
 use super::tree::Tree;
 use crate::config::RunConfig;
 use crate::metrics::Counters;
 use crate::sample::{frame_from_board, FrameJson, GameJson};
+use rand::Rng;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use snek_core::{encode_into, obs_side, standard_start, Board, Move, NUM_CHANNELS};
@@ -200,6 +200,12 @@ pub(super) fn play_chunk(
             bslice[g].step_and_spawn(&actions, &mut rng);
             tslice[g] += 1;
             shared.call_turns.fetch_add(1, Ordering::Relaxed);
+            // Mirror the advance into the live in-flight-turn sum (a reset below
+            // subtracts the game's whole count back out).
+            shared
+                .counters
+                .inflight_turn_sum
+                .fetch_add(1, Ordering::Relaxed);
 
             // A game ends on a terminal board, at the turn cap, or if it somehow
             // hits the frame safety cap (bounds memory for pathological configs
@@ -218,6 +224,10 @@ pub(super) fn play_chunk(
                 && rslice[g].len() <= cfg.skip_short_draw_turns
             {
                 rslice[g].clear();
+                shared
+                    .counters
+                    .inflight_turn_sum
+                    .fetch_sub(tslice[g] as u64, Ordering::Relaxed);
                 bslice[g] = standard_start(board, board, n, &mut rng);
                 tslice[g] = 0;
                 continue;
@@ -260,6 +270,11 @@ pub(super) fn play_chunk(
                 .counters
                 .completed_turns
                 .fetch_add(tslice[g] as u64, Ordering::Relaxed);
+            // Drop this game's turns from the live in-flight sum as it resets.
+            shared
+                .counters
+                .inflight_turn_sum
+                .fetch_sub(tslice[g] as u64, Ordering::Relaxed);
 
             bslice[g] = standard_start(board, board, n, &mut rng);
             tslice[g] = 0;

@@ -25,6 +25,14 @@ pub struct Counters {
     /// to derive a realtime mean game length).
     pub completed_turns: AtomicU64,
     pub inferences: AtomicU64,
+    /// Sum of the current turn across all in-flight self-play games, kept in
+    /// step with `inflight_games` so `sum / games` is the live mean in-flight
+    /// turn. Re-synced at the start of every generation, then maintained
+    /// incrementally by the workers as games advance and reset.
+    pub inflight_turn_sum: AtomicU64,
+    /// Number of in-flight self-play games (`concurrent_games`); the divisor for
+    /// `inflight_turn_sum`. Zero until the first generation begins.
+    pub inflight_games: AtomicU32,
     pub gpu_forward_us: AtomicU64,
     pub gpu_requests: AtomicU64,
     pub gpu_rows: AtomicU64,
@@ -141,6 +149,16 @@ impl Metrics {
                 avg_turn_ema = raw_avg_turn;
                 initialized = true;
             }
+            // Live mean of where every in-flight game currently is, straight from
+            // the running sum/count (no smoothing — it's already an average over
+            // all games, and we want it to track fresh-start → climb → reset).
+            let inflight_games = self.counters.inflight_games.load(Ordering::Relaxed);
+            let inflight_sum = self.counters.inflight_turn_sum.load(Ordering::Relaxed);
+            let avg_inflight_turn = if inflight_games > 0 {
+                inflight_sum as f64 / inflight_games as f64
+            } else {
+                0.0
+            };
             let req_delta = reqs.saturating_sub(last_reqs).max(1);
             let row_delta = rows.saturating_sub(last_rows);
             let gpu_rows_per_sec = if fwd_delta_us > 0 {
@@ -168,6 +186,7 @@ impl Metrics {
                 ),
                 gpu_rows_per_sec,
                 avg_game_turn: avg_turn_ema,
+                avg_inflight_turn,
             };
             last_at = now;
             last_inf = inf;

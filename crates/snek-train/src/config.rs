@@ -51,11 +51,14 @@ pub struct RunConfig {
     /// (`alias`: pre-league configs called this eval_turns.)
     #[serde(default = "default_league_entrant_gens", alias = "eval_turns")]
     pub league_entrant_gens: usize,
-    /// Fixed MCTS sims per eval move (deterministic, CPU). The league's CPU
-    /// allotment and concurrent-game count are derived from the machine, not
-    /// configured — see `eval::league_layout`.
+    /// Fixed MCTS sims per eval move (deterministic, CPU).
     #[serde(default = "default_eval_sims")]
     pub eval_sims: usize,
+    /// Concurrent league games. Each is a slot that picks fresh opponents,
+    /// plays one game on unpinned CPU threads (one search thread per living
+    /// snake), records it, and immediately starts the next.
+    #[serde(default = "default_league_games")]
+    pub league_games: usize,
     /// External API players holding permanent league seats, as "name=url"
     /// entries. The url is the base of a Battlesnake-protocol HTTP server
     /// (the arena POSTs {url}/move). The name is the player's stable league
@@ -88,6 +91,10 @@ fn default_league_entrant_gens() -> usize {
 
 fn default_eval_sims() -> usize {
     64
+}
+
+fn default_league_games() -> usize {
+    4
 }
 
 /// How many GPU-batch-sized groups of games are kept in flight at once. Two is a
@@ -131,6 +138,7 @@ impl Default for RunConfig {
             sample_games: default_sample_games(),
             league_entrant_gens: default_league_entrant_gens(),
             eval_sims: default_eval_sims(),
+            league_games: default_league_games(),
             league_api_players: Vec::new(),
         }
     }

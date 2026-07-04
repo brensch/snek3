@@ -16,6 +16,8 @@ type Props = {
   cell?: number;
   highlight?: number | null; // snake index to emphasize
   onHoverSnake?: (index: number | null) => void;
+  /** Per-seat color override (league: stable player colors); defaults to seat order. */
+  colors?: string[];
 };
 
 // Battlesnake coords put (0,0) bottom-left with y increasing upward, so we flip
@@ -30,6 +32,7 @@ export function Board({
   cell = 30,
   highlight = null,
   onHoverSnake,
+  colors,
 }: Props) {
   if (!width || !height) return null;
   const W = width * cell;
@@ -71,7 +74,7 @@ export function Board({
       ))}
       {snakes.map((s, i) => {
         if (!s.body?.length) return null;
-        const color = snakeColor(i);
+        const color = colors?.[i] ?? snakeColor(i);
         const emphasized = highlight === i;
         const dimmed = highlight != null && highlight !== i;
         const pts = s.body.map((p) => `${cx(p.x)},${cy(p.y)}`).join(" ");

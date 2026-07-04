@@ -77,7 +77,7 @@ ARENA_ARGS ?=
 arena-build: ## Build the head-to-head arena binary
 	$(LIBTORCH_ENV) cargo build --release --manifest-path crates/snek-server/Cargo.toml --bin arena
 
-arena: arena-build ## Play two nets head to head: make arena A=path B=path [ARENA_GAMES=100 ARENA_SIMS=1000 ARENA_ARGS="--cores-a 0-3 --cores-b 4-7"]
+arena: arena-build ## Play two nets head to head: make arena A=path B=path [ARENA_GAMES=100 ARENA_SIMS=1000 ARENA_ARGS="--parallel 8"]
 	$(LIBTORCH_ENV) ./crates/snek-server/target/release/arena \
 		--a $(A) --b $(B) --games $(ARENA_GAMES) --sims $(ARENA_SIMS) $(ARENA_ARGS)
 

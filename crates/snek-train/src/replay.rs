@@ -155,7 +155,8 @@ impl ReplayBuffer {
             if shard_gen(&path).is_some_and(|gen| gen >= up_to_gen) {
                 continue;
             }
-            let samples: Samples = serde_json::from_slice(&zstd::decode_all(&*std::fs::read(path)?)?)?;
+            let samples: Samples =
+                serde_json::from_slice(&zstd::decode_all(&*std::fs::read(path)?)?)?;
             out.add(samples);
         }
         Ok(out)

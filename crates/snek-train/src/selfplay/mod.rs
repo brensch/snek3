@@ -28,8 +28,8 @@ use crate::metrics::Metrics;
 use crate::replay::Samples;
 use crate::sample::{FrameJson, GameJson};
 use gpu::Gpu;
-use materialize::{game_matches_shape, game_sample_count, materialize_game};
-use rand::SeedableRng;
+use materialize::{game_matches_shape, game_sample_count, in_flight_matches_shape, materialize_game};
+use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use snek_core::{obs_side, standard_start, Board, NUM_CHANNELS};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -122,33 +122,60 @@ pub fn generate(
     // per buffer, each holding one GPU batch of games.
     let count = cfg.concurrent_games();
 
-    // (Re)initialise the in-flight buffer to exactly `count` games. Any structural
-    // mismatch (batch size changed, or a corrupt/old snapshot with no frame
-    // history) rebuilds it from fresh starts — that keeps the whole-game invariant
-    // (a game's samples/replay always span its entire life) unconditionally true.
+    // Reconcile the carried in-flight buffer with the current config to exactly
+    // `count` games, preserving as much resumable work as we can rather than
+    // discarding everything on a size change: extra slots start fresh, surplus
+    // games are dropped at random. Every kept game keeps its whole-game invariant
+    // (its board/turn/rec triple always moves together).
     let mut init_rng = Xoshiro256PlusPlus::seed_from_u64(seed ^ 0xCA22_1E5D_F00Du64);
-    if state.boards.len() != count || state.turns.len() != count || state.rec.len() != count {
-        state.boards = (0..count)
-            .map(|_| standard_start(board, board, n, &mut init_rng))
-            .collect();
-        state.turns = vec![0usize; count];
-        state.rec = (0..count).map(|_| Vec::new()).collect();
-    } else {
-        // A carried board that is somehow already terminal gets a fresh start so
-        // we never resume a dead game (its frames are dropped with it).
-        for ((b, t), r) in state
-            .boards
-            .iter_mut()
-            .zip(state.turns.iter_mut())
-            .zip(state.rec.iter_mut())
-        {
-            if b.is_terminal() {
-                *b = standard_start(board, board, n, &mut init_rng);
-                *t = 0;
-                r.clear();
-            }
+
+    // A corrupt/old snapshot whose three parallel vectors disagree on length can't
+    // be sliced back into coherent triples, so it rebuilds entirely from scratch.
+    if state.boards.len() != state.turns.len() || state.boards.len() != state.rec.len() {
+        state.boards.clear();
+        state.turns.clear();
+        state.rec.clear();
+    }
+
+    // Drop any carried game we can't safely resume — one that has already ended, or
+    // whose board size / snake count no longer matches the config (its frames would
+    // encode to the wrong observation). `swap_remove` keeps the triple aligned.
+    let mut i = 0;
+    while i < state.boards.len() {
+        let resumable = !state.boards[i].is_terminal()
+            && in_flight_matches_shape(&state.boards[i], &state.rec[i], board, n);
+        if resumable {
+            i += 1;
+        } else {
+            state.boards.swap_remove(i);
+            state.turns.swap_remove(i);
+            state.rec.swap_remove(i);
         }
     }
+
+    // Too many carried games (the slot count shrank): remove the surplus at random.
+    while state.boards.len() > count {
+        let victim = init_rng.gen_range(0..state.boards.len());
+        state.boards.swap_remove(victim);
+        state.turns.swap_remove(victim);
+        state.rec.swap_remove(victim);
+    }
+    // Too few (the slot count grew, or we dropped some above): fill the empty slots
+    // with fresh starts.
+    while state.boards.len() < count {
+        state.boards.push(standard_start(board, board, n, &mut init_rng));
+        state.turns.push(0);
+        state.rec.push(Vec::new());
+    }
+
+    // Seed the live in-flight-turn gauge from the reconciled buffer (0 for a fresh
+    // run, the carried turns on a resume). The workers keep the sum in step from
+    // here as games advance and reset; this is the only place it's recomputed.
+    counters.inflight_games.store(count as u32, Ordering::Relaxed);
+    counters.inflight_turn_sum.store(
+        state.turns.iter().map(|&t| t as u64).sum(),
+        Ordering::Relaxed,
+    );
 
     // Drop carried finished games whose shape no longer matches the current config
     // (board size or snake count changed): their frames would encode to a
