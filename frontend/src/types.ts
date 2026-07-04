@@ -13,7 +13,11 @@ export type RunConfig = {
   // backend (a double buffer), so this is the only GPU dial.
   gpu_batch_games: number;
   samples_per_gen: number;
-  exploration_prob: number;
+  // Opening turns sampled from the visit policy (temperature 1); argmax after.
+  sample_turns: number;
+  // AlphaZero root-prior Dirichlet exploration inside the self-play search.
+  dirichlet_frac: number;
+  dirichlet_alpha: number;
   max_turns: number;
   draw_value: number;
   skip_short_draw_turns: number;
@@ -30,7 +34,6 @@ export type RunConfig = {
   // many gens; game pairs run back-to-back while the run is active. 0 disables.
   league_entrant_gens: number;
   eval_sims: number;
-  eval_cores: number;
 };
 
 // The JSON shape returned by GET /api/state. `phase` is the Phase enum value

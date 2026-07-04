@@ -216,10 +216,12 @@ fn apply_random_d4<R: Rng>(
     if h != w {
         return;
     }
-    let transform = rng.gen_range(0..8);
     let obs_len = c * h * w;
     let src = obs.to_vec();
     for b in 0..batch {
+        // One independent transform per sample — a single draw for the whole
+        // batch would give every step just one orientation of the board.
+        let transform = rng.gen_range(0..8);
         for ch in 0..c {
             for y in 0..h {
                 for x in 0..w {
@@ -231,8 +233,8 @@ fn apply_random_d4<R: Rng>(
         }
         let old = [pol[b * 4], pol[b * 4 + 1], pol[b * 4 + 2], pol[b * 4 + 3]];
         let perm = move_perm(transform);
-        for m in 0..4 {
-            pol[b * 4 + perm[m]] = old[m];
+        for (m, &dst) in perm.iter().enumerate() {
+            pol[b * 4 + dst] = old[m];
         }
     }
 }

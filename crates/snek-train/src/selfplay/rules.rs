@@ -155,38 +155,37 @@ pub(super) fn terminal_value(
     }
 }
 
-/// Mix exploration noise into a masked play policy in place, matching the
-/// archived Python trainer (a65fea4, added to break an all-draws plateau):
-/// Dirichlet noise over the legal (non-zero) moves first, then a uniform floor
-/// over them. Only what gets played (and the recorded play_policy) is
-/// perturbed — the stored training target stays the clean search policy.
-pub(super) fn add_exploration_noise<R: Rng>(
-    policy: &mut [f32; 4],
-    dirichlet_frac: f32,
-    dirichlet_alpha: f32,
-    uniform_prob: f32,
+/// Mix Dirichlet noise into a root prior in place, the AlphaZero way:
+/// p ← (1-frac)·p + frac·Dir(alpha) over the prior's support (the masked-legal
+/// candidates — moves the mask zeroed stay zero). Applied at the search root
+/// only, BEFORE the simulations run, so the visit-count training target itself
+/// explores moves the raw prior dislikes. `slots` is the candidate count; the
+/// support is the subset with mass.
+pub(super) fn mix_root_dirichlet<R: Rng>(
+    prior: &mut [f32; MAXC],
+    slots: usize,
+    frac: f32,
+    alpha: f32,
     rng: &mut R,
 ) {
-    let mut legal = [0usize; 4];
+    if frac <= 0.0 {
+        return;
+    }
+    let mut support = [0usize; MAXC];
     let mut k = 0;
-    for i in 0..4 {
-        if policy[i] > 0.0 {
-            legal[k] = i;
+    for (a, &p) in prior.iter().enumerate().take(slots) {
+        if p > EPS {
+            support[k] = a;
             k += 1;
         }
     }
-    if dirichlet_frac > 0.0 && k >= 2 {
-        if let Ok(dir) = Dirichlet::new_with_size(dirichlet_alpha, k) {
-            let noise = dir.sample(rng);
-            for (j, &i) in legal[..k].iter().enumerate() {
-                policy[i] = (1.0 - dirichlet_frac) * policy[i] + dirichlet_frac * noise[j];
-            }
-        }
+    if k < 2 {
+        return;
     }
-    if uniform_prob > 0.0 && k > 0 {
-        let u = uniform_prob / k as f32;
-        for &i in &legal[..k] {
-            policy[i] = (1.0 - uniform_prob) * policy[i] + u;
+    if let Ok(dir) = Dirichlet::new_with_size(alpha, k) {
+        let noise = dir.sample(rng);
+        for (j, &a) in support[..k].iter().enumerate() {
+            prior[a] = (1.0 - frac) * prior[a] + frac * noise[j];
         }
     }
 }
@@ -199,6 +198,17 @@ pub(super) fn sample_move<R: Rng>(policy: &[f32], rng: &mut R) -> Move {
     Move::from_index(idx)
 }
 
+/// The play policy's argmax (post-opening move selection, temperature → 0).
+pub(super) fn argmax_move(policy: &[f32]) -> Move {
+    let mut best = 0usize;
+    for i in 1..policy.len().min(4) {
+        if policy[i] > policy[best] {
+            best = i;
+        }
+    }
+    Move::from_index(best)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,23 +216,30 @@ mod tests {
     use rand_xoshiro::Xoshiro256PlusPlus;
 
     #[test]
-    fn exploration_noise_respects_legality_and_normalization() {
+    fn root_dirichlet_respects_support_and_normalization() {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(7);
+        let mut moved = false;
         for _ in 0..100 {
-            let mut p = [0.7, 0.0, 0.2, 0.1]; // move 1 illegal
-            add_exploration_noise(&mut p, 0.25, 0.3, 0.25, &mut rng);
-            assert_eq!(p[1], 0.0, "illegal move must stay zero");
+            let mut p = [0.7, 0.0, 0.2, 0.1]; // move 1 masked out
+            mix_root_dirichlet(&mut p, 4, 0.25, 0.3, &mut rng);
+            assert_eq!(p[1], 0.0, "masked move must stay zero");
             let sum: f32 = p.iter().sum();
             assert!((sum - 1.0).abs() < 1e-5, "stays a distribution, got {sum}");
             assert!(p.iter().all(|&v| v >= 0.0));
+            moved |= (p[0] - 0.7).abs() > 1e-3;
         }
+        assert!(moved, "noise must actually perturb the prior");
     }
 
     #[test]
-    fn exploration_noise_disabled_is_identity() {
+    fn root_dirichlet_disabled_or_degenerate_is_identity() {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(7);
         let mut p = [0.7, 0.0, 0.2, 0.1];
-        add_exploration_noise(&mut p, 0.0, 0.3, 0.0, &mut rng);
+        mix_root_dirichlet(&mut p, 4, 0.0, 0.3, &mut rng);
         assert_eq!(p, [0.7, 0.0, 0.2, 0.1]);
+        // A single-move support has nothing to explore.
+        let mut lone = [0.0, 1.0, 0.0, 0.0];
+        mix_root_dirichlet(&mut lone, 4, 0.25, 0.3, &mut rng);
+        assert_eq!(lone, [0.0, 1.0, 0.0, 0.0]);
     }
 }

@@ -5,9 +5,12 @@
 //! traffic and no per-turn barrier.
 
 use super::rules::{
-    candidates, mask_obvious_immediate_deaths, obvious_immediate_death, terminal_values,
+    candidates, mask_obvious_immediate_deaths, mix_root_dirichlet, obvious_immediate_death,
+    terminal_values,
 };
 use super::{EPS, MAXC};
+use rand::SeedableRng;
+use rand_xoshiro::Xoshiro256PlusPlus;
 use snek_core::{Board, Move, MAX_SNAKES};
 
 struct Node {
@@ -65,12 +68,31 @@ pub(super) struct Tree {
     h: i8,
     c_puct: f32,
     draw: f32,
+    /// AlphaZero root exploration: prior ← (1-frac)·prior + frac·Dir(alpha)
+    /// per snake at the root, sampled fresh every search (i.e. every turn, on
+    /// root expansion). The visit-count training target is read from the
+    /// noised search, so exploration reaches the targets — noise applied only
+    /// to the played move cannot (snek3-14 plateaued exactly that way).
+    noise_frac: f32,
+    noise_alpha: f32,
+    rng: Xoshiro256PlusPlus,
     pending: Option<usize>,
     path: Vec<Edge>,
 }
 
 impl Tree {
-    pub(super) fn new(n: usize, w: i8, h: i8, c_puct: f32, draw: f32, cap: usize) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        n: usize,
+        w: i8,
+        h: i8,
+        c_puct: f32,
+        draw: f32,
+        cap: usize,
+        noise_frac: f32,
+        noise_alpha: f32,
+        noise_seed: u64,
+    ) -> Self {
         let mut nodes = Vec::with_capacity(cap);
         for _ in 0..cap {
             nodes.push(Node::empty(w, h));
@@ -83,6 +105,9 @@ impl Tree {
             h,
             c_puct,
             draw,
+            noise_frac,
+            noise_alpha,
+            rng: Xoshiro256PlusPlus::seed_from_u64(noise_seed),
             pending: None,
             path: Vec::with_capacity(64),
         }
@@ -270,6 +295,12 @@ impl Tree {
                     }
                 }
             }
+            // Root only: AlphaZero Dirichlet exploration over the masked-legal
+            // candidates, so the search (and therefore the visit-count target)
+            // is forced to try moves the raw prior dislikes.
+            if id == 0 && board.snakes[i].alive() {
+                mix_root_dirichlet(&mut p, k, self.noise_frac, self.noise_alpha, &mut self.rng);
+            }
             let node = &mut self.nodes[id];
             node.ncand[i] = k;
             node.cand[i] = cand;
@@ -288,6 +319,17 @@ impl Tree {
             };
         }
         self.backup(&val);
+    }
+
+    /// The root prior for snake `i` mapped back onto move indices (tests).
+    #[cfg(test)]
+    fn root_prior(&self, i: usize) -> [f32; 4] {
+        let root = &self.nodes[0];
+        let mut out = [0.0f32; 4];
+        for a in 0..root.ncand[i] {
+            out[root.cand[i][a] as usize] = root.prior[i][a];
+        }
+        out
     }
 
     /// Root visit-count policy (`[n,4]`) and mean root value (`[n]`).
@@ -310,6 +352,93 @@ impl Tree {
                     pol[i * 4 + root.cand[i][a] as usize] = root.nvisit[i][a] / total;
                 }
                 val[i] = root.wsum[i][..k].iter().sum::<f32>() / total;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256PlusPlus;
+    use snek_core::standard_start;
+
+    fn expanded_root(noise_frac: f32, seed: u64) -> Tree {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(3);
+        let board = standard_start(11, 11, 4, &mut rng);
+        let mut tree = Tree::new(4, 11, 11, 1.5, -0.25, 64, noise_frac, 0.3, seed);
+        tree.reset(&board);
+        tree.select();
+        assert!(tree.pending_board().is_some(), "fresh root must be pending");
+        let policy = vec![0.25f32; 16];
+        let value = vec![0.0f32; 4];
+        tree.expand_backup(&policy, &value);
+        tree
+    }
+
+    #[test]
+    fn root_noise_perturbs_priors_and_keeps_them_normalized() {
+        let clean = expanded_root(0.0, 9);
+        let noised = expanded_root(0.5, 9);
+        let mut any_moved = false;
+        for i in 0..4 {
+            let c = clean.root_prior(i);
+            let n = noised.root_prior(i);
+            let sum: f32 = n.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-4, "snake {i} prior sums to {sum}");
+            // Moves the mask zeroed must stay zero under noise.
+            for m in 0..4 {
+                if c[m] == 0.0 {
+                    assert_eq!(n[m], 0.0, "snake {i} move {m} revived by noise");
+                }
+            }
+            any_moved |= (0..4).any(|m| (c[m] - n[m]).abs() > 1e-3);
+        }
+        assert!(any_moved, "noise must change at least one root prior");
+    }
+
+    #[test]
+    fn root_noise_resamples_every_search() {
+        // Same tree, two consecutive turns (reset + expand): the Dirichlet
+        // draw must differ, so exploration varies turn to turn.
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(3);
+        let board = standard_start(11, 11, 4, &mut rng);
+        let mut tree = Tree::new(4, 11, 11, 1.5, -0.25, 64, 0.5, 0.3, 11);
+        let policy = vec![0.25f32; 16];
+        let value = vec![0.0f32; 4];
+        let mut draws = Vec::new();
+        for _ in 0..2 {
+            tree.reset(&board);
+            tree.select();
+            tree.expand_backup(&policy, &value);
+            draws.push((0..4).map(|i| tree.root_prior(i)).collect::<Vec<_>>());
+        }
+        assert_ne!(draws[0], draws[1], "root noise must be fresh per search");
+    }
+
+    #[test]
+    fn non_root_nodes_get_no_noise() {
+        // Descend to a child and expand it: with a uniform net policy its
+        // priors must be exactly uniform over the safe candidates (no noise).
+        let mut tree = expanded_root(1.0, 5);
+        tree.select();
+        if tree.pending_board().is_some() {
+            let policy = vec![0.25f32; 16];
+            let value = vec![0.0f32; 4];
+            let id = tree.pending.unwrap();
+            tree.expand_backup(&policy, &value);
+            let node = &tree.nodes[id];
+            for i in 0..4 {
+                let k = node.ncand[i];
+                let support: Vec<f32> = node.prior[i][..k].iter().copied().filter(|&p| p > EPS).collect();
+                for &p in &support {
+                    assert!(
+                        (p - support[0]).abs() < 1e-6,
+                        "child prior must be the un-noised uniform: {:?}",
+                        &node.prior[i][..k]
+                    );
+                }
             }
         }
     }

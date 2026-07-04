@@ -8,9 +8,8 @@
 
 use super::gpu::Gpu;
 use super::materialize::game_sample_count;
-use super::rules::{
-    add_exploration_noise, mask_obvious_immediate_deaths, sample_move, terminal_value,
-};
+use super::rules::{argmax_move, mask_obvious_immediate_deaths, sample_move, terminal_value};
+use rand::Rng;
 use super::tree::Tree;
 use crate::config::RunConfig;
 use crate::metrics::Counters;
@@ -72,7 +71,19 @@ pub(super) fn play_chunk(
     let cap = sims + 4;
 
     let mut trees: Vec<Tree> = (0..games)
-        .map(|_| Tree::new(n, board, board, cfg.c_puct, cfg.draw_value, cap))
+        .map(|_| {
+            Tree::new(
+                n,
+                board,
+                board,
+                cfg.c_puct,
+                cfg.draw_value,
+                cap,
+                cfg.dirichlet_frac,
+                cfg.dirichlet_alpha,
+                rng.gen(),
+            )
+        })
         .collect();
 
     let mut obs = vec![0.0f32; rows * obs_len];
@@ -164,19 +175,19 @@ pub(super) fn play_chunk(
         for g in 0..games {
             trees[g].root_targets(&mut root_pol, &mut root_val);
 
-            // Choose moves (masked visit policy + exploration noise).
+            // Choose moves the AlphaZero way: the exploration already happened
+            // inside the search (root Dirichlet noise), so play IS the masked
+            // visit policy — sampled (temperature 1) for the opening turns,
+            // strict argmax after.
             for s in 0..n {
-                let mut play =
+                let play =
                     mask_obvious_immediate_deaths(&bslice[g], s, &root_pol[s * 4..s * 4 + 4]);
-                add_exploration_noise(
-                    &mut play,
-                    cfg.dirichlet_frac,
-                    cfg.dirichlet_alpha,
-                    cfg.exploration_prob,
-                    &mut rng,
-                );
                 play_pols[s].copy_from_slice(&play);
-                actions[s] = sample_move(&play, &mut rng);
+                actions[s] = if tslice[g] < cfg.sample_turns {
+                    sample_move(&play, &mut rng)
+                } else {
+                    argmax_move(&play)
+                };
             }
 
             // Record this turn's frame (pre-step board + search readout). Every

@@ -12,13 +12,21 @@ pub struct RunConfig {
     /// concurrency is derived from this — see [`RunConfig::concurrent_games`].
     pub gpu_batch_games: usize,
     pub samples_per_gen: usize,
-    pub exploration_prob: f32,
-    /// Dirichlet exploration noise on the played policy (the training target
-    /// stays the clean search policy): play = (1-frac)*policy + frac*Dir(alpha)
-    /// over the legal moves, applied before the uniform `exploration_prob`
-    /// floor. Ported from the archived Python trainer, where it was added to
-    /// break an all-draws plateau (a65fea4); the Rust rewrite dropped it.
-    /// 0 disables.
+    /// Opening turns whose move is sampled from the visit-count policy
+    /// (temperature 1); from this turn on play is strict argmax. AlphaZero's
+    /// move-selection temperature schedule — they sampled 30 of ~80 chess
+    /// plies; snek games run ~60–130 turns, so 20 keeps a similar fraction.
+    #[serde(default = "default_sample_turns")]
+    pub sample_turns: usize,
+    /// AlphaZero root exploration noise, applied INSIDE the search: at the
+    /// root of every self-play search, per snake,
+    /// prior = (1-frac)*prior + frac*Dir(alpha) over the masked-legal moves,
+    /// sampled fresh each turn. Because the noise shapes where simulations go,
+    /// the visit-count training target itself explores moves the raw prior
+    /// dislikes — the mechanism AlphaZero relies on to escape policy local
+    /// optima. (Noise applied only to the played move — what this trainer and
+    /// the archived Python one did through snek3-14 — diversifies states but
+    /// never the targets; that run's Elo froze by gen ~70.) 0 disables.
     #[serde(default = "default_dirichlet_frac")]
     pub dirichlet_frac: f32,
     #[serde(default = "default_dirichlet_alpha")]
@@ -43,12 +51,11 @@ pub struct RunConfig {
     /// (`alias`: pre-league configs called this eval_turns.)
     #[serde(default = "default_league_entrant_gens", alias = "eval_turns")]
     pub league_entrant_gens: usize,
-    /// Fixed MCTS sims per eval move (deterministic, CPU).
+    /// Fixed MCTS sims per eval move (deterministic, CPU). The league's CPU
+    /// allotment and concurrent-game count are derived from the machine, not
+    /// configured — see `eval::league_layout`.
     #[serde(default = "default_eval_sims")]
     pub eval_sims: usize,
-    /// CPU cores (worker threads) pinned to each net in a league game.
-    #[serde(default = "default_eval_cores")]
-    pub eval_cores: usize,
     /// External API players holding permanent league seats, as "name=url"
     /// entries. The url is the base of a Battlesnake-protocol HTTP server
     /// (the arena POSTs {url}/move). The name is the player's stable league
@@ -57,6 +64,10 @@ pub struct RunConfig {
     /// re-added without corrupting history.
     #[serde(default)]
     pub league_api_players: Vec<String>,
+}
+
+fn default_sample_turns() -> usize {
+    20
 }
 
 fn default_dirichlet_frac() -> f32 {
@@ -77,10 +88,6 @@ fn default_league_entrant_gens() -> usize {
 
 fn default_eval_sims() -> usize {
     64
-}
-
-fn default_eval_cores() -> usize {
-    1
 }
 
 /// How many GPU-batch-sized groups of games are kept in flight at once. Two is a
@@ -107,7 +114,7 @@ impl Default for RunConfig {
             c_puct: 1.5,
             gpu_batch_games: 128,
             samples_per_gen: 12_000,
-            exploration_prob: 0.25,
+            sample_turns: default_sample_turns(),
             dirichlet_frac: default_dirichlet_frac(),
             dirichlet_alpha: default_dirichlet_alpha(),
             max_turns: 0, // 0 = uncapped (games run to a natural terminal)
@@ -124,7 +131,6 @@ impl Default for RunConfig {
             sample_games: default_sample_games(),
             league_entrant_gens: default_league_entrant_gens(),
             eval_sims: default_eval_sims(),
-            eval_cores: default_eval_cores(),
             league_api_players: Vec::new(),
         }
     }
