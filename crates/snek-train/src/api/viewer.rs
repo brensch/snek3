@@ -92,6 +92,7 @@ fn league(root: &Path) -> Vec<proto::LeagueRating> {
             games: r.games,
             wins: r.wins,
             avg_rank: r.avg_rank,
+            placements: r.placements,
             // Older ratings files predate names; fall back to the id.
             name: if r.name.is_empty() {
                 crate::eval::player_name(r.gen)

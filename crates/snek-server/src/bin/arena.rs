@@ -34,6 +34,7 @@ struct Args {
     leaves_per_sim: usize,
     virtual_loss: f32,
     gpu: bool,
+    torch_threads: usize,
     out: Option<String>,
     record: Option<String>,
     record_gen: u32,
@@ -73,6 +74,8 @@ search:
   --virtual-loss X    virtual loss for batched selection (1.0)
   --eval-chunk N      max rows per net forward (4096)
   --gpu               allow CUDA (don't use while training runs; default CPU)
+  --torch-threads N   intra-op libtorch threads per seat worker (1); use the
+                      serving binary's setting to benchmark serve latency
 
 output:
   --out PATH          write full results (placements per game) as JSON
@@ -82,6 +85,18 @@ output:
   --record-gen N      the generation label stamped into --record (0)"
     );
     std::process::exit(2);
+}
+
+/// English ordinal suffix for a 1-based rank ("1st", "2nd", "3rd", "4th", ...).
+fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (1, 11) | (2, 12) | (3, 13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }
 
 fn parse_num<T: std::str::FromStr>(s: &str, flag: &str) -> T {
@@ -110,6 +125,7 @@ fn parse_args() -> Args {
     let mut leaves_per_sim = 8usize;
     let mut virtual_loss = 1.0f32;
     let mut gpu = false;
+    let mut torch_threads = 1usize;
     let mut out = None;
     let mut record = None;
     let mut record_gen = 0u32;
@@ -158,6 +174,9 @@ fn parse_args() -> Args {
             }
             "--virtual-loss" => virtual_loss = parse_num(&val("--virtual-loss"), "--virtual-loss"),
             "--gpu" => gpu = true,
+            "--torch-threads" => {
+                torch_threads = parse_num::<usize>(&val("--torch-threads"), "--torch-threads").max(1)
+            }
             "--out" => out = Some(val("--out")),
             "--record" => record = Some(val("--record")),
             "--record-gen" => record_gen = parse_num(&val("--record-gen"), "--record-gen"),
@@ -211,6 +230,7 @@ fn parse_args() -> Args {
         leaves_per_sim,
         virtual_loss,
         gpu,
+        torch_threads,
         out,
         record,
         record_gen,
@@ -267,6 +287,7 @@ fn main() {
             virtual_loss: args.virtual_loss,
         },
         budget: args.budget,
+        torch_threads: args.torch_threads,
     });
     let budget_desc = match args.budget {
         Budget::Sims(n) => format!("{n} sims/move"),
@@ -345,13 +366,14 @@ fn main() {
 
     let started = Instant::now();
     let mut results: Vec<GameResult> = Vec::with_capacity(args.games);
-    // Per-player running tallies: games, rank-1 finishes, summed rank.
-    let mut tally = vec![(0u32, 0u32, 0u64); n_players];
+    // Per-player running tallies: games, count at each rank (index r-1 =
+    // number of r-th-place finishes), summed rank.
+    let mut tally = vec![(0u32, vec![0u32; args.seats], 0u64); n_players];
     while let Ok(res) = result_rx.recv() {
         for p in &res.outcome.placements {
             let t = &mut tally[p.player as usize];
             t.0 += 1;
-            t.1 += (p.rank == 1) as u32;
+            t.1[(p.rank as usize - 1).min(args.seats - 1)] += 1;
             t.2 += p.rank as u64;
         }
         let mut order: Vec<&Placement> = res.outcome.placements.iter().collect();
@@ -389,9 +411,15 @@ fn main() {
         n_players,
         wall / 60.0
     );
-    for (player, (played, firsts, rank_sum)) in tally.iter().enumerate() {
+    for (player, (played, rank_counts, rank_sum)) in tally.iter().enumerate() {
+        let breakdown = rank_counts
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{c} {}", ordinal(i + 1)))
+            .collect::<Vec<_>>()
+            .join(", ");
         println!(
-            "  {name:<24} {played} games, {firsts} wins, avg rank {avg:.2}",
+            "  {name:<24} {played} games · {breakdown} · avg rank {avg:.2}",
             name = names[player],
             avg = if *played > 0 {
                 *rank_sum as f64 / *played as f64
@@ -422,7 +450,9 @@ fn main() {
                 "players": (0..n_players).map(|i| json!({
                     "name": names[i],
                     "games": tally[i].0,
-                    "wins": tally[i].1,
+                    "wins": tally[i].1[0],
+                    // placements[r-1] = number of r-th-place finishes.
+                    "placements": tally[i].1,
                     "avg_rank": if tally[i].0 > 0 { tally[i].2 as f64 / tally[i].0 as f64 } else { 0.0 },
                 })).collect::<Vec<_>>(),
                 "avg_turns": avg_turns,

@@ -59,6 +59,17 @@ pub struct RunConfig {
     /// snake), records it, and immediately starts the next.
     #[serde(default = "default_league_games")]
     pub league_games: usize,
+    /// GPU burst arena: every `league_entrant_gens` generations — right after
+    /// the new entrant's checkpoint is saved — the trainer borrows the GPU for
+    /// one cycle and plays this many league games with per-net batched
+    /// forwards (hundreds of times the CPU slots' throughput). The games land
+    /// in the same summary/ratings as the CPU league's. 0 disables bursts.
+    #[serde(default = "default_burst_games")]
+    pub burst_games: usize,
+    /// Sims per move in burst games. 0 means `eval_sims`, keeping burst games
+    /// statistically interchangeable with the CPU league's.
+    #[serde(default)]
+    pub burst_sims: usize,
     /// External API players holding permanent league seats, as "name=url"
     /// entries. The url is the base of a Battlesnake-protocol HTTP server
     /// (the arena POSTs {url}/move). The name is the player's stable league
@@ -95,6 +106,10 @@ fn default_eval_sims() -> usize {
 
 fn default_league_games() -> usize {
     4
+}
+
+fn default_burst_games() -> usize {
+    256
 }
 
 /// How many GPU-batch-sized groups of games are kept in flight at once. Two is a
@@ -139,6 +154,8 @@ impl Default for RunConfig {
             league_entrant_gens: default_league_entrant_gens(),
             eval_sims: default_eval_sims(),
             league_games: default_league_games(),
+            burst_games: default_burst_games(),
+            burst_sims: 0,
             league_api_players: Vec::new(),
         }
     }

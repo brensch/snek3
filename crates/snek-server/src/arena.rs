@@ -238,6 +238,10 @@ pub struct GameSettings {
     pub max_turns: u32,
     pub cfg: Config,
     pub budget: Budget,
+    /// Intra-op libtorch threads per seat worker. The league uses 1 (never
+    /// steal cores from training); benchmarking serving latency wants the
+    /// serving binary's setting (4 on CPU).
+    pub torch_threads: usize,
 }
 
 /// One recorded board turn. Field-for-field the schema of one frame of the
@@ -345,13 +349,14 @@ pub fn play_game(
             let done = done_tx.clone();
             let cfg = &settings.cfg;
             let budget = settings.budget;
+            let torch_threads = settings.torch_threads.max(1) as i32;
             std::thread::Builder::new()
                 .name(format!("seat-worker-{pi}"))
                 .spawn_scoped(scope, move || {
                     // Intra-op parallelism is a per-thread setting; without
                     // this, the first forward on this thread spawns an
                     // idle-spinning OpenMP team sized to the machine.
-                    tch::set_num_threads(1);
+                    tch::set_num_threads(torch_threads);
                     while let Ok((board, seat)) = job_rx.recv() {
                         let decision = player.decide(cfg, budget, &board, seat);
                         if done.send((seat, decision)).is_err() {

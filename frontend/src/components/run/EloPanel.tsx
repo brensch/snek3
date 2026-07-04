@@ -12,10 +12,11 @@ const EXTERNAL_COLORS = [series.yellow, series.orange, series.magenta, series.aq
 const displayName = (r: LeagueRating) => r.name || playerName(r.gen);
 
 // The run's headline: fitted league Elo (Plackett–Luce over every game,
-// anchored at the earliest checkpoint = 0). A hero figure for the newest
-// checkpoint next to the external players' Elo (fixed heuristics and API
-// snakes that never learn — the run works iff the gap keeps widening), the
-// Elo-by-checkpoint curve, and the leaderboard.
+// anchored at the earliest checkpoint = 0). The hero card shows the latest
+// net's margin over the strongest fixed baseline (green ahead / red behind),
+// its absolute Elo and improvement trend, and the three fixed competitors
+// (heuristics and API snakes that never learn — the run works iff the gap
+// keeps widening). Beside it: the Elo-by-checkpoint curve and the leaderboard.
 export function EloPanel({ league }: { league: LeagueRating[] }) {
   // On phones the leaderboard is behind a toggle under the chart; on md+ it is
   // always visible.
@@ -32,28 +33,51 @@ export function EloPanel({ league }: { league: LeagueRating[] }) {
   }
   const latest = nets[nets.length - 1];
   const prev = nets.length > 1 ? nets[nets.length - 2] : null;
-  const best = [...nets].sort((a, b) => b.elo - a.elo)[0];
+  // The strongest fixed baseline — the bar the net has to clear. The headline
+  // figure is our latest Elo relative to it.
+  const bestExt = externals.length ? [...externals].sort((a, b) => b.elo - a.elo)[0] : null;
+  const margin = bestExt ? latest.elo - bestExt.elo : null;
+  const trend = prev ? latest.elo - prev.elo : null;
 
   return (
-    <div className="grid gap-2.5 md:grid-cols-[10.5rem_minmax(0,1fr)] xl:grid-cols-[10.5rem_minmax(0,1fr)_13rem]">
-      <div className="card flex flex-row items-center justify-between gap-2 p-3 md:flex-col md:items-stretch">
+    <div className="grid gap-2.5 md:grid-cols-[10.5rem_minmax(0,1fr)] xl:grid-cols-[10.5rem_minmax(0,1fr)_20rem]">
+      <div className="card flex flex-col justify-between gap-3 p-3">
         <span className="card-title">League Elo</span>
+
+        {/* Headline: how far the latest net sits above (green) or below (red)
+            the strongest non-learning competitor. */}
         <div>
-          <div className="text-4xl font-semibold leading-none text-ink">{signed(latest.elo)}</div>
-          <div className="mt-1.5 text-xs text-ink-3">gen_{String(latest.gen).padStart(4, "0")}</div>
-          {prev && (
-            <div className={`mt-1 text-xs font-medium ${latest.elo - prev.elo >= 0 ? "text-good" : "text-bad"}`}>
-              {signed(latest.elo - prev.elo)} vs g{prev.gen}
-            </div>
+          {margin != null ? (
+            <>
+              <div className={`text-4xl font-semibold leading-none ${margin >= 0 ? "text-good" : "text-bad"}`}>
+                {signed(margin)}
+              </div>
+              <div className="mt-1 text-xs text-ink-3">
+                {margin >= 0 ? "ahead of" : "behind"} {displayName(bestExt!)}
+              </div>
+            </>
+          ) : (
+            <div className="text-4xl font-semibold leading-none text-ink">{signed(latest.elo)}</div>
           )}
+          <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
+            <span className="font-mono text-ink-2">{signed(latest.elo)} elo</span>
+            <span className="text-ink-3">gen_{String(latest.gen).padStart(4, "0")}</span>
+            {trend != null && (
+              <span className={`font-medium ${trend >= 0 ? "text-good" : "text-bad"}`}>
+                {trend >= 0 ? "▲" : "▼"} {signed(trend)}
+              </span>
+            )}
+          </div>
         </div>
-        <div className="text-right text-[11px] leading-tight text-ink-3 md:text-left">
+
+        {/* The three fixed competitors (Elo, anchored at the first checkpoint). */}
+        <div className="space-y-0.5 text-[11px] leading-tight">
           {externals.map((r) => (
-            <div key={r.gen}>
-              {displayName(r)} <span className="font-mono text-ink-2">{signed(r.elo)}</span>
+            <div key={r.gen} className="flex justify-between gap-2 text-ink-3">
+              <span className="truncate">{displayName(r)}</span>
+              <span className="font-mono text-ink-2">{signed(r.elo)}</span>
             </div>
           ))}
-          best {signed(best.elo)} at g{best.gen}
         </div>
       </div>
 
@@ -68,7 +92,7 @@ export function EloPanel({ league }: { league: LeagueRating[] }) {
           })),
         ]}
         xValues={nets.map((r) => r.gen)}
-        height={168}
+        height={288}
         area
         format={signed}
       />
@@ -88,23 +112,39 @@ export function EloPanel({ league }: { league: LeagueRating[] }) {
   );
 }
 
-// Every rated player ranked by fitted Elo — wins are rank-1 finishes.
+// Ordinal header for a 1-based rank column ("1st", "2nd", "3rd", "4th", ...).
+const ordinal = (n: number) => {
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`;
+};
+
+// Every rated player ranked by fitted Elo, with each player's finishes broken
+// out by place (1sts, 2nds, 3rds, ...) instead of just rank-1 wins.
 function Leaderboard({ league }: { league: LeagueRating[] }) {
   const rows = [...league].sort((a, b) => b.elo - a.elo);
+  // Widest placement histogram across all rows = number of rank columns.
+  const maxRanks = rows.reduce((m, r) => Math.max(m, r.placements.length), 0);
+  const ranks = Array.from({ length: maxRanks }, (_, i) => i);
   return (
     <div className="card flex h-full min-h-0 flex-col">
       <div className="border-b border-white/10 px-3 py-1.5">
         <span className="card-title">Leaderboard</span>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto" style={{ maxHeight: 200 }}>
+      <div className="min-h-0 flex-1 overflow-y-auto" style={{ maxHeight: 320 }}>
         <table className="w-full text-[11px]">
           <thead className="sticky top-0 bg-surface">
             <tr className="text-[9px] uppercase text-ink-3/70">
               <th className="px-2 py-1 text-left font-medium">#</th>
               <th className="text-left font-medium">player</th>
               <th className="text-right font-medium">elo</th>
-              <th className="pr-2 text-right font-medium" title="rank-1 finishes / games">
-                wins
+              {ranks.map((i) => (
+                <th key={i} className="text-right font-medium" title={`${ordinal(i + 1)}-place finishes`}>
+                  {ordinal(i + 1)}
+                </th>
+              ))}
+              <th className="pr-2 text-right font-medium" title="games played">
+                gp
               </th>
             </tr>
           </thead>
@@ -116,8 +156,13 @@ function Leaderboard({ league }: { league: LeagueRating[] }) {
                   {displayName(r)}
                 </td>
                 <td className="text-right text-ink">{signed(r.elo)}</td>
+                {ranks.map((idx) => (
+                  <td key={idx} className={`text-right ${idx === 0 ? "text-ink" : "text-ink-3"}`}>
+                    {r.placements[idx] ?? 0}
+                  </td>
+                ))}
                 <td className="pr-2 text-right text-ink-3" title={`avg rank ${r.avgRank.toFixed(2)}`}>
-                  {r.wins}/{r.games}
+                  {r.games}
                 </td>
               </tr>
             ))}

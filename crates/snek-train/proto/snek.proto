@@ -8,6 +8,9 @@ enum Phase {
   CHECKPOINT = 3;
   STOPPING = 4;
   STOPPED = 5;
+  // GPU burst arena: the trainer is spending a cycle playing league games
+  // (one burst per league entrant, right after its checkpoint saves).
+  ARENA = 6;
 }
 
 message StatsFrame {
@@ -33,6 +36,10 @@ message StatsFrame {
   // at 0 on a fresh generation and climbs as games advance, dipping as games
   // finish and reset. Instantaneous (not smoothed).
   double avg_inflight_turn = 18;
+  // GPU burst arena progress: games finished / games targeted this burst.
+  // Both zero outside the ARENA phase.
+  uint32 arena_done = 19;
+  uint32 arena_target = 20;
 }
 
 message RunState {

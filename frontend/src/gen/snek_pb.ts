@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file snek.proto.
  */
 export const file_snek: GenFile = /*@__PURE__*/
-  fileDesc("CgpzbmVrLnByb3RvEgRzbmVrIr4DCgpTdGF0c0ZyYW1lEhEKCXRfdW5peF9tcxgBIAEoBBISCgpnZW5lcmF0aW9uGAIgASgNEhoKBXBoYXNlGAMgASgOMgsuc25lay5QaGFzZRIaChJpbmZlcmVuY2VzX3Blcl9zZWMYBCABKAESFQoNZ2FtZXNfcGVyX3NlYxgFIAEoARIdChVjb21wbGV0ZWRfZ2FtZXNfdG90YWwYBiABKAQSGQoRc2FtcGxlc19jb2xsZWN0ZWQYByABKA0SFgoOc2FtcGxlc190YXJnZXQYCCABKA0SFAoMZ3B1X2J1c3lfcGN0GAkgASgBEhYKDmJhdGNoX2F2Z19yb3dzGAogASgNEhMKC3BvbGljeV9sb3NzGAsgASgBEhIKCnZhbHVlX2xvc3MYDCABKAESFgoOdGFyZ2V0X2VudHJvcHkYDSABKAESGAoQZ3B1X3Jvd3NfcGVyX3NlYxgOIAEoARISCgp0cmFpbl9zdGVwGA8gASgNEhkKEXRyYWluX3N0ZXBzX3RvdGFsGBAgASgNEhUKDWF2Z19nYW1lX3R1cm4YESABKAESGQoRYXZnX2luZmxpZ2h0X3R1cm4YEiABKAEiWwoIUnVuU3RhdGUSGgoFcGhhc2UYASABKA4yCy5zbmVrLlBoYXNlEhIKCmdlbmVyYXRpb24YAiABKA0SDgoGcnVuX2lkGAMgASgJEg8KB3J1bm5pbmcYBCABKAgqVwoFUGhhc2USCAoESURMRRAAEgsKB1BMQVlJTkcQARIMCghUUkFJTklORxACEg4KCkNIRUNLUE9JTlQQAxIMCghTVE9QUElORxAEEgsKB1NUT1BQRUQQBWIGcHJvdG8z");
+  fileDesc("CgpzbmVrLnByb3RvEgRzbmVrIugDCgpTdGF0c0ZyYW1lEhEKCXRfdW5peF9tcxgBIAEoBBISCgpnZW5lcmF0aW9uGAIgASgNEhoKBXBoYXNlGAMgASgOMgsuc25lay5QaGFzZRIaChJpbmZlcmVuY2VzX3Blcl9zZWMYBCABKAESFQoNZ2FtZXNfcGVyX3NlYxgFIAEoARIdChVjb21wbGV0ZWRfZ2FtZXNfdG90YWwYBiABKAQSGQoRc2FtcGxlc19jb2xsZWN0ZWQYByABKA0SFgoOc2FtcGxlc190YXJnZXQYCCABKA0SFAoMZ3B1X2J1c3lfcGN0GAkgASgBEhYKDmJhdGNoX2F2Z19yb3dzGAogASgNEhMKC3BvbGljeV9sb3NzGAsgASgBEhIKCnZhbHVlX2xvc3MYDCABKAESFgoOdGFyZ2V0X2VudHJvcHkYDSABKAESGAoQZ3B1X3Jvd3NfcGVyX3NlYxgOIAEoARISCgp0cmFpbl9zdGVwGA8gASgNEhkKEXRyYWluX3N0ZXBzX3RvdGFsGBAgASgNEhUKDWF2Z19nYW1lX3R1cm4YESABKAESGQoRYXZnX2luZmxpZ2h0X3R1cm4YEiABKAESEgoKYXJlbmFfZG9uZRgTIAEoDRIUCgxhcmVuYV90YXJnZXQYFCABKA0iWwoIUnVuU3RhdGUSGgoFcGhhc2UYASABKA4yCy5zbmVrLlBoYXNlEhIKCmdlbmVyYXRpb24YAiABKA0SDgoGcnVuX2lkGAMgASgJEg8KB3J1bm5pbmcYBCABKAgqYgoFUGhhc2USCAoESURMRRAAEgsKB1BMQVlJTkcQARIMCghUUkFJTklORxACEg4KCkNIRUNLUE9JTlQQAxIMCghTVE9QUElORxAEEgsKB1NUT1BQRUQQBRIJCgVBUkVOQRAGYgZwcm90bzM");
 
 /**
  * @generated from message snek.StatsFrame
@@ -111,6 +111,19 @@ export type StatsFrame = Message<"snek.StatsFrame"> & {
    * @generated from field: double avg_inflight_turn = 18;
    */
   avgInflightTurn: number;
+
+  /**
+   * GPU burst arena progress: games finished / games targeted this burst.
+   * Both zero outside the ARENA phase.
+   *
+   * @generated from field: uint32 arena_done = 19;
+   */
+  arenaDone: number;
+
+  /**
+   * @generated from field: uint32 arena_target = 20;
+   */
+  arenaTarget: number;
 };
 
 /**
@@ -185,6 +198,14 @@ export enum Phase {
    * @generated from enum value: STOPPED = 5;
    */
   STOPPED = 5,
+
+  /**
+   * GPU burst arena: the trainer is spending a cycle playing league games
+   * (one burst per league entrant, right after its checkpoint saves).
+   *
+   * @generated from enum value: ARENA = 6;
+   */
+  ARENA = 6,
 }
 
 /**

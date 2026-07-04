@@ -19,8 +19,8 @@
 
 mod gpu;
 mod materialize;
-mod rules;
-mod tree;
+pub(crate) mod rules;
+pub(crate) mod tree;
 mod worker;
 
 use crate::config::RunConfig;
@@ -36,8 +36,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tch::Device;
 
-const MAXC: usize = 4; // max candidate moves per snake
-const EPS: f32 = 1e-8;
+pub(crate) const MAXC: usize = 4; // max candidate moves per snake
+pub(crate) const EPS: f32 = 1e-8;
 
 pub struct SelfPlayNet<'a> {
     pub net: &'a snek_tch::AZNet,

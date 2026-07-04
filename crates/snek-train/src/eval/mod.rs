@@ -25,6 +25,8 @@
 //! summary log and ratings are kept forever. The league stops (abandoning any
 //! in-flight game) when the run pauses, and resumes with it.
 
+pub mod burst;
+
 use crate::config::RunConfig;
 use crate::state::RunPaths;
 use crate::trainer::TrainerHandle;
@@ -253,9 +255,13 @@ pub struct LeagueRating {
     /// generation is 0.
     pub elo: f64,
     pub games: u32,
-    /// Rank-1 finishes (shared firsts count).
+    /// Rank-1 finishes (shared firsts count == placements[0]).
     pub wins: u32,
     pub avg_rank: f64,
+    /// Finishes by rank: placements[r-1] = number of r-th-place finishes.
+    /// Length is the deepest rank this net ever reached. Empty in older files.
+    #[serde(default)]
+    pub placements: Vec<u32>,
 }
 
 /// Real-time state of the in-flight league games, published to the frontend
@@ -325,26 +331,47 @@ fn set_live(update: impl FnOnce(&mut LiveEval)) {
 
 /// Start the league for the active run. Returns immediately; the supervisor
 /// thread and its game slots exit when `stop` is set (abandoning any
-/// in-flight game).
-pub fn start_league(paths: RunPaths, trainer: TrainerHandle, stop: Arc<AtomicBool>) {
+/// in-flight game). The returned context is shared with the GPU burst arena
+/// (see [`burst`]) so burst games land in the same records/ratings as the
+/// CPU slots'.
+pub fn start_league(
+    paths: RunPaths,
+    trainer: TrainerHandle,
+    stop: Arc<AtomicBool>,
+) -> Arc<LeagueCtx> {
+    let mut records = read_summaries(&paths.root);
+    records.sort_by_key(|r| r.seq);
+    let next_seq = records.iter().map(|m| m.seq + 1).max().unwrap_or(0);
+    let ctx = Arc::new(LeagueCtx {
+        paths,
+        trainer,
+        stop: stop.clone(),
+        records: Mutex::new(records),
+        next_seq: AtomicU64::new(next_seq),
+        registry: Mutex::new(()),
+        logged_errors: Mutex::new(Default::default()),
+        announced: AtomicBool::new(false),
+    });
+    let loop_ctx = Arc::clone(&ctx);
     std::thread::Builder::new()
         .name("eval-league".into())
         .spawn(move || {
             // Wait for a previous run's league (same process) to wind down.
             while LEAGUE_ACTIVE.swap(true, Ordering::SeqCst) {
-                if stop.load(Ordering::Relaxed) {
+                if loop_ctx.stop.load(Ordering::Relaxed) {
                     return;
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
-            league_loop(paths, trainer, stop);
+            league_loop(loop_ctx);
             LEAGUE_ACTIVE.store(false, Ordering::SeqCst);
         })
         .expect("spawn eval league thread");
+    ctx
 }
 
-/// State shared by the supervisor and every game slot.
-struct LeagueCtx {
+/// State shared by the supervisor, every game slot, and the GPU burst arena.
+pub struct LeagueCtx {
     paths: RunPaths,
     trainer: TrainerHandle,
     stop: Arc<AtomicBool>,
@@ -363,21 +390,9 @@ struct LeagueCtx {
 /// Supervisor: keeps `league_games` slot threads alive while the run is
 /// active, growing/shrinking with config changes, and tears everything down
 /// on stop.
-fn league_loop(paths: RunPaths, trainer: TrainerHandle, stop: Arc<AtomicBool>) {
-    let metrics = trainer.metrics();
-    let mut records = read_summaries(&paths.root);
-    records.sort_by_key(|r| r.seq);
-    let next_seq = records.iter().map(|m| m.seq + 1).max().unwrap_or(0);
-    let ctx = Arc::new(LeagueCtx {
-        paths,
-        trainer,
-        stop: stop.clone(),
-        records: Mutex::new(records),
-        next_seq: AtomicU64::new(next_seq),
-        registry: Mutex::new(()),
-        logged_errors: Mutex::new(Default::default()),
-        announced: AtomicBool::new(false),
-    });
+fn league_loop(ctx: Arc<LeagueCtx>) {
+    let metrics = ctx.trainer.metrics();
+    let stop = ctx.stop.clone();
 
     let mut slots: Vec<(Arc<AtomicBool>, std::thread::JoinHandle<()>)> = Vec::new();
     while !stop.load(Ordering::Relaxed) {
@@ -496,7 +511,14 @@ fn slot_loop(ctx: Arc<LeagueCtx>, slot_stop: Arc<AtomicBool>) {
         let (players, live_players) = {
             let records = ctx.records.lock().unwrap();
             let ratings = fit_ratings(&pool, &records);
-            let players = pick_players(&pool, &records, &ratings, cfg.num_snakes, seq);
+            let players = pick_players(
+                &pool,
+                &records,
+                &HashMap::new(),
+                &ratings,
+                cfg.num_snakes,
+                seq,
+            );
             let career = |gen: u32| {
                 records
                     .iter()
@@ -563,6 +585,9 @@ fn slot_loop(ctx: Arc<LeagueCtx>, slot_stop: Arc<AtomicBool>) {
                 virtual_loss: 1.0,
             },
             budget,
+            // One intra-op thread per seat worker — league searches must
+            // never fan out onto training's cores.
+            torch_threads: 1,
         };
         set_live(|l| {
             l.games.push(LiveGame {
@@ -741,14 +766,23 @@ fn participants(record: &MatchRecord) -> Vec<u32> {
 /// by uncertainty, each further seat by its summed pairwise weight against
 /// those already selected. Sampling keeps occasional cross-table games
 /// flowing, so the match graph stays connected and upsets can be detected.
+///
+/// `extra_games` are per-player counts to add on top of the record history:
+/// the burst arena picks its whole schedule up front, so it counts the games
+/// it has already *planned* to keep one under-played net from soaking up
+/// every matchup. The CPU league passes an empty map.
 fn pick_players(
     pool: &[u32],
     records: &[MatchRecord],
+    extra_games: &HashMap<u32, u32>,
     ratings: &HashMap<u32, f64>,
     seats: usize,
     seq: u64,
 ) -> Vec<u32> {
-    let mut games: HashMap<u32, u32> = pool.iter().map(|&g| (g, 0)).collect();
+    let mut games: HashMap<u32, u32> = pool
+        .iter()
+        .map(|&g| (g, extra_games.get(&g).copied().unwrap_or(0)))
+        .collect();
     for record in records {
         for g in participants(record) {
             if let Some(count) = games.get_mut(&g) {
@@ -936,31 +970,46 @@ fn write_ratings(
     fitted: &HashMap<u32, f64>,
     registry: &ExternalRegistry,
 ) -> anyhow::Result<()> {
-    // games, rank-1 finishes, rank sum per gen.
-    let mut tally: HashMap<u32, (u32, u32, u64)> = HashMap::new();
+    // Per gen: games, rank sum, and a histogram of finishes by rank
+    // (placements[r-1] = number of r-th-place finishes).
+    #[derive(Default)]
+    struct Tally {
+        games: u32,
+        rank_sum: u64,
+        placements: Vec<u32>,
+    }
+    let mut tally: HashMap<u32, Tally> = HashMap::new();
     for record in records {
         for p in &record.placements {
             let t = tally.entry(p.gen).or_default();
-            t.0 += 1;
-            t.1 += (p.rank == 1) as u32;
-            t.2 += p.rank as u64;
+            t.games += 1;
+            t.rank_sum += p.rank as u64;
+            let idx = p.rank.saturating_sub(1) as usize;
+            if idx >= t.placements.len() {
+                t.placements.resize(idx + 1, 0);
+            }
+            t.placements[idx] += 1;
         }
     }
     let mut ratings: Vec<LeagueRating> = fitted
         .iter()
         .map(|(&gen, &elo)| {
-            let (games, wins, rank_sum) = tally.get(&gen).copied().unwrap_or_default();
+            let t = tally.get(&gen);
+            let games = t.map_or(0, |t| t.games);
+            let rank_sum = t.map_or(0, |t| t.rank_sum);
+            let placements = t.map(|t| t.placements.clone()).unwrap_or_default();
             LeagueRating {
                 gen,
                 name: registry.display(gen),
                 elo,
                 games,
-                wins,
+                wins: placements.first().copied().unwrap_or(0),
                 avg_rank: if games > 0 {
                     rank_sum as f64 / games as f64
                 } else {
                     0.0
                 },
+                placements,
             }
         })
         .collect();
@@ -1024,7 +1073,11 @@ fn append_summary(path: &Path, record: &MatchRecord) -> anyhow::Result<()> {
 
 /// Read a run's game history, ascending by seq. Missing file → empty.
 pub fn read_summaries(run_root: &Path) -> Vec<MatchRecord> {
-    let path = run_root.join("eval").join("summary.jsonl");
+    read_summary_file(&run_root.join("eval").join("summary.jsonl"))
+}
+
+/// Read one summary.jsonl. Missing file → empty.
+pub fn read_summary_file(path: &Path) -> Vec<MatchRecord> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -1285,7 +1338,7 @@ mod tests {
         let ratings = fit_ratings(&pool, &records);
         let mut with_new = 0;
         for seq in 0..20 {
-            let players = pick_players(&pool, &records, &ratings, 4, seq);
+            let players = pick_players(&pool, &records, &HashMap::new(), &ratings, 4, seq);
             assert_eq!(players.len(), 4);
             let mut dedup = players.clone();
             dedup.sort_unstable();
@@ -1310,7 +1363,7 @@ mod tests {
         records.extend((5..10).map(|s| game(s, &[15, HEURISTIC_GEN, 5, 0])));
         let ratings = fit_ratings(&pool, &records);
         let with_baseline = (0..60)
-            .filter(|&seq| pick_players(&pool, &records, &ratings, 4, seq).contains(&HEURISTIC_GEN))
+            .filter(|&seq| pick_players(&pool, &records, &HashMap::new(), &ratings, 4, seq).contains(&HEURISTIC_GEN))
             .count();
         assert!(
             with_baseline > 15,
@@ -1379,7 +1432,7 @@ mod tests {
         let ratings = fit_ratings(&pool, &records);
         let (mut with_ff, mut with_vor) = (0, 0);
         for seq in 0..120 {
-            let players = pick_players(&pool, &records, &ratings, 4, seq);
+            let players = pick_players(&pool, &records, &HashMap::new(), &ratings, 4, seq);
             with_ff += players.contains(&HEURISTIC_GEN) as u32;
             with_vor += players.contains(&VORONOI_GEN) as u32;
         }
@@ -1392,7 +1445,7 @@ mod tests {
         let pool = vec![0, 5];
         let records = Vec::new();
         let ratings = fit_ratings(&pool, &records);
-        let players = pick_players(&pool, &records, &ratings, 4, 0);
+        let players = pick_players(&pool, &records, &HashMap::new(), &ratings, 4, 0);
         let mut sorted = players.clone();
         sorted.sort_unstable();
         assert_eq!(sorted, vec![0, 5]);

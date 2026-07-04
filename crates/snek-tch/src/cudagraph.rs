@@ -51,6 +51,25 @@ impl GraphedForward {
     /// work happens on a dedicated side stream (a capture requirement); that
     /// stream stays current on this thread for subsequent [`run`](Self::run)s.
     pub fn capture(net: &AZNet, device: Device, rows: i64, c: i64, h: i64, w: i64) -> Self {
+        Self::capture_with(device, rows, c, h, w, |input| {
+            let (logits, value) = net.forward(input);
+            (logits.softmax(-1, Kind::Float), value)
+        })
+    }
+
+    /// Warm up and capture an arbitrary fixed-shape step: `f` maps the static
+    /// `[rows, c, h, w]` input to `(probs [rows,4], value [rows])` — e.g. the
+    /// burst arena's whole multi-net step (several forwards over row slices,
+    /// softmaxed and concatenated) collapses to one graph launch. `f` must be
+    /// shape-static and touch no CPU-side state.
+    pub fn capture_with(
+        device: Device,
+        rows: i64,
+        c: i64,
+        h: i64,
+        w: i64,
+        mut f: impl FnMut(&Tensor) -> (Tensor, Tensor),
+    ) -> Self {
         unsafe {
             let stream = snek_stream_new();
             snek_stream_set_current(stream);
@@ -61,19 +80,14 @@ impl GraphedForward {
             // before the region we capture.
             tch::no_grad(|| {
                 for _ in 0..8 {
-                    let (logits, value) = net.forward(&input);
-                    let _p = logits.softmax(-1, Kind::Float);
-                    let _keep = (&_p, &value);
+                    let _keep = f(&input);
                 }
             });
             snek_stream_sync(stream);
 
             let graph = snek_graph_new();
             snek_graph_capture_begin(graph);
-            let (probs, value) = tch::no_grad(|| {
-                let (logits, value) = net.forward(&input);
-                (logits.softmax(-1, Kind::Float), value)
-            });
+            let (probs, value) = tch::no_grad(|| f(&input));
             snek_graph_capture_end(graph);
             snek_stream_sync(stream);
 

@@ -60,7 +60,7 @@ struct Edge {
     action: [u8; MAX_SNAKES],
 }
 
-pub(super) struct Tree {
+pub(crate) struct Tree {
     nodes: Vec<Node>,
     len: usize,
     n: usize,
@@ -82,7 +82,7 @@ pub(super) struct Tree {
 
 impl Tree {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
+    pub(crate) fn new(
         n: usize,
         w: i8,
         h: i8,
@@ -113,7 +113,7 @@ impl Tree {
         }
     }
 
-    pub(super) fn reset(&mut self, board: &Board) {
+    pub(crate) fn reset(&mut self, board: &Board) {
         self.nodes[0].board.clone_from(board);
         self.nodes[0].reset_leaf_flags(self.draw);
         self.len = 1;
@@ -123,7 +123,7 @@ impl Tree {
 
     /// The board of the leaf awaiting a network evaluation, if any. The play loop
     /// encodes it into the batch; a terminal descent leaves no pending leaf.
-    pub(super) fn pending_board(&self) -> Option<&Board> {
+    pub(crate) fn pending_board(&self) -> Option<&Board> {
         self.pending.map(|id| &self.nodes[id].board)
     }
 
@@ -190,7 +190,7 @@ impl Tree {
     }
 
     /// Descend to a leaf; terminal leaves are backed up immediately (pending=None).
-    pub(super) fn select(&mut self) {
+    pub(crate) fn select(&mut self) {
         self.path.clear();
         self.pending = None;
         let mut id = 0usize;
@@ -256,7 +256,7 @@ impl Tree {
 
     /// Expand the pending leaf with the network's `policy`/`value` and back the
     /// value up the path. A no-op if there is no pending leaf (terminal descent).
-    pub(super) fn expand_backup(&mut self, policy: &[f32], value: &[f32]) {
+    pub(crate) fn expand_backup(&mut self, policy: &[f32], value: &[f32]) {
         let Some(id) = self.pending.take() else {
             return;
         };
@@ -333,7 +333,7 @@ impl Tree {
     }
 
     /// Root visit-count policy (`[n,4]`) and mean root value (`[n]`).
-    pub(super) fn root_targets(&self, pol: &mut [f32], val: &mut [f32]) {
+    pub(crate) fn root_targets(&self, pol: &mut [f32], val: &mut [f32]) {
         for v in pol.iter_mut() {
             *v = 0.0;
         }

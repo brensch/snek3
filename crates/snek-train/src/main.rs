@@ -35,6 +35,27 @@ struct Args {
     /// Directory of built frontend assets to serve at /. Skipped if missing.
     #[arg(long, default_value = "frontend/dist")]
     static_dir: PathBuf,
+    /// Run one GPU burst of league games against this run id, then exit (no
+    /// server). Results land in `<runs_dir>/<run>/<burst_out>/`.
+    #[arg(long)]
+    burst: Option<String>,
+    /// Games to play in the standalone burst (default: the run config's
+    /// `burst_games`).
+    #[arg(long)]
+    burst_games: Option<usize>,
+    /// Sims per move in the standalone burst (default: the run config's
+    /// `burst_sims`, falling back to `eval_sims`).
+    #[arg(long)]
+    burst_sims: Option<usize>,
+    /// Output subdir under the run for standalone burst records. Kept apart
+    /// from the canonical `eval/` so a mirror of a live run never diverges
+    /// from the trainer's own files.
+    #[arg(long, default_value = "eval-burst")]
+    burst_out: String,
+    /// Run this many back-to-back bursts, carrying the in-flight arena
+    /// between them (exercises the trainer's freeze/thaw path).
+    #[arg(long, default_value_t = 1)]
+    burst_repeat: usize,
 }
 
 #[tokio::main]
@@ -47,6 +68,9 @@ async fn main() -> anyhow::Result<()> {
     tch::Cuda::cudnn_set_benchmark(std::env::var("SNEK_CUDNN_BENCH").as_deref() != Ok("0"));
     let args = Args::parse();
     let metrics = Metrics::new();
+    if let Some(run_id) = args.burst.as_deref() {
+        return standalone_burst(&args, run_id, metrics);
+    }
     let trainer = TrainerHandle::new(args.runs_dir, metrics.clone(), RunConfig::default());
     tokio::spawn(metrics.run_samplers());
     if args.start {
@@ -72,4 +96,92 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// `--burst <run>`: play one GPU burst of league games against a run
+/// directory and exit. Reads the run's config (with optional CLI overrides),
+/// seeds match history from the canonical eval dir plus the output dir, and
+/// writes summary/ratings/game files to the output dir only.
+fn standalone_burst(args: &Args, run_id: &str, metrics: Metrics) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        tch::Cuda::is_available(),
+        "burst needs CUDA; check LD_PRELOAD/LD_LIBRARY_PATH"
+    );
+    let device = tch::Device::Cuda(0);
+    let out_dir = eval::burst::standalone_out_dir(&args.runs_dir, run_id, &args.burst_out);
+    let (ctx, mut cfg) = eval::burst::standalone_ctx(&args.runs_dir, run_id, &out_dir, metrics.clone())?;
+    if let Some(games) = args.burst_games {
+        cfg.burst_games = games;
+    }
+    if let Some(sims) = args.burst_sims {
+        cfg.burst_sims = sims;
+    }
+    let sims = if cfg.burst_sims > 0 { cfg.burst_sims } else { cfg.eval_sims };
+    tracing::info!(
+        run_id,
+        games = cfg.burst_games,
+        sims,
+        out = %out_dir.display(),
+        "standalone burst starting"
+    );
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    // Progress ticker: a line every few seconds with rates over the interval,
+    // so slow spots are visible immediately.
+    let done_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ticker = {
+        let counters = metrics.counters();
+        let done = std::sync::Arc::clone(&done_flag);
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering::Relaxed;
+            let (mut last_done, mut last_inf, mut last_rows, mut last_reqs, mut last_fwd_us) =
+                (0u32, 0u64, 0u64, 0u64, 0u64);
+            let mut last_t = std::time::Instant::now();
+            while !done.load(Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let dt = last_t.elapsed().as_secs_f64().max(1e-9);
+                last_t = std::time::Instant::now();
+                let games = counters.arena_done.load(Relaxed);
+                let target = counters.arena_target.load(Relaxed);
+                let inf = counters.inferences.load(Relaxed);
+                let rows = counters.gpu_rows.load(Relaxed);
+                let reqs = counters.gpu_requests.load(Relaxed);
+                let fwd_us = counters.gpu_forward_us.load(Relaxed);
+                println!(
+                    "[{:>5.0}s] {games}/{target} games ({:.1} games/min) · {:.0}k inf/s · {} rows/fwd · gpu fwd {:.0}%",
+                    started.elapsed().as_secs_f64(),
+                    60.0 * (games.saturating_sub(last_done)) as f64 / dt,
+                    (inf - last_inf) as f64 / dt / 1000.0,
+                    (rows - last_rows) / (reqs - last_reqs).max(1),
+                    100.0 * ((fwd_us - last_fwd_us) as f64 / 1e6) / dt,
+                );
+                (last_done, last_inf, last_rows, last_reqs, last_fwd_us) =
+                    (games, inf, rows, reqs, fwd_us);
+            }
+        })
+    };
+    let mut arena = eval::burst::ArenaState::default();
+    let mut result = Ok(());
+    for i in 0..args.burst_repeat.max(1) {
+        match eval::burst::run_burst(&ctx, &cfg, device, &metrics, &stop, &out_dir, &mut arena) {
+            Ok(report) => println!(
+                "burst {n}/{total} done: {games} games @{sims} sims, {turns} turns in {secs:.0}s ({gpm:.1} games/min, {inf:.0}k inf/s) -> {out}",
+                n = i + 1,
+                total = args.burst_repeat.max(1),
+                games = report.games,
+                turns = report.turns,
+                secs = report.seconds,
+                gpm = 60.0 * report.games as f64 / report.seconds.max(1e-9),
+                inf = report.inferences as f64 / report.seconds.max(1e-9) / 1000.0,
+                out = out_dir.display(),
+            ),
+            Err(err) => {
+                result = Err(err);
+                break;
+            }
+        }
+    }
+    done_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = ticker.join();
+    result
 }

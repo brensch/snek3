@@ -21,6 +21,8 @@ type Props = {
   area?: boolean;
   /** Pin the y-domain (e.g. 0–100 for percentages). */
   domain?: [number, number];
+  /** Symmetric y-domain around 0 (0 lands dead centre) with a marked zero line. */
+  centerZero?: boolean;
   className?: string;
 };
 
@@ -38,6 +40,7 @@ export function LineChart({
   format = compact,
   area = false,
   domain,
+  centerZero = false,
   className = "",
 }: Props) {
   const [hover, setHover] = useState<number | null>(null);
@@ -50,9 +53,14 @@ export function LineChart({
     if (!finite.length) return [0, 1];
     const max = Math.max(...finite);
     const min = Math.min(...finite);
+    // Symmetric around zero so 0 sits dead centre and up/down read equally.
+    if (centerZero) {
+      const m = niceCeil(Math.max(Math.abs(min), Math.abs(max))) || 1;
+      return [-m, m] as [number, number];
+    }
     // Anchor at zero unless the data goes negative (Elo can).
     return [Math.min(0, niceFloor(min)), niceCeil(max)] as [number, number];
-  }, [series, domain]);
+  }, [series, domain, centerZero]);
 
   const px = (i: number) => (len <= 1 ? 50 : (i / (len - 1)) * 100);
   const py = (v: number) => 100 - ((Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo || 1)) * 100;
@@ -107,6 +115,18 @@ export function LineChart({
               {gridYs.map((y) => (
                 <line key={y} x1="0" x2="100" y1={y} y2={y} stroke={chrome.grid} strokeWidth="1" vectorEffect="non-scaling-stroke" />
               ))}
+              {centerZero && lo < 0 && hi > 0 && (
+                <line
+                  x1="0"
+                  x2="100"
+                  y1={py(0)}
+                  y2={py(0)}
+                  stroke={chrome.ink3}
+                  strokeWidth="1"
+                  strokeDasharray="3 2"
+                  vectorEffect="non-scaling-stroke"
+                />
+              )}
               {area && series.length === 1 && len > 1 && (
                 <polygon
                   points={`0,100 ${series[0].values.map((v, i) => `${px(i)},${py(v)}`).join(" ")} 100,100`}

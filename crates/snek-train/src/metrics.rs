@@ -36,6 +36,10 @@ pub struct Counters {
     pub gpu_forward_us: AtomicU64,
     pub gpu_requests: AtomicU64,
     pub gpu_rows: AtomicU64,
+    /// GPU burst arena progress (games finished / targeted); zero outside a
+    /// burst.
+    pub arena_done: AtomicU32,
+    pub arena_target: AtomicU32,
     pub policy_loss_bits: AtomicU64,
     pub value_loss_bits: AtomicU64,
     pub target_entropy_bits: AtomicU64,
@@ -187,6 +191,8 @@ impl Metrics {
                 gpu_rows_per_sec,
                 avg_game_turn: avg_turn_ema,
                 avg_inflight_turn,
+                arena_done: self.counters.arena_done.load(Ordering::Relaxed),
+                arena_target: self.counters.arena_target.load(Ordering::Relaxed),
             };
             last_at = now;
             last_inf = inf;
@@ -207,6 +213,7 @@ pub fn phase_from_u32(v: u32) -> Phase {
         3 => Phase::Checkpoint,
         4 => Phase::Stopping,
         5 => Phase::Stopped,
+        6 => Phase::Arena,
         _ => Phase::Idle,
     }
 }

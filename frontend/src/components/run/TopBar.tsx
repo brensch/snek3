@@ -27,6 +27,7 @@ const PHASE_DOT: Record<Phase, string> = {
   [Phase.CHECKPOINT]: "#9085e9",
   [Phase.STOPPING]: "#ec835a",
   [Phase.STOPPED]: "#898781",
+  [Phase.ARENA]: "#2ba198",
 };
 
 // The always-visible answer to "is it alive?", in two fixed rows so nothing
@@ -61,6 +62,10 @@ export function TopBar({
     current = stats.trainStep;
     total = stats.trainStepsTotal;
     unit = "steps";
+  } else if (phase === Phase.ARENA && stats) {
+    current = stats.arenaDone;
+    total = stats.arenaTarget;
+    unit = "arena games";
   }
   const pct = total > 0 ? Math.max(0, Math.min(100, (current / total) * 100)) : 0;
 

@@ -11,7 +11,7 @@ use snek_core::{Board, Move, MAX_SNAKES};
 /// Legal candidate move indices (0..4) for snake `i`, plus their count. Drops
 /// reversing-onto-neck and off-board moves; a trapped snake keeps all four.
 #[inline]
-pub(super) fn candidates(board: &Board, i: usize) -> ([u8; MAXC], usize) {
+pub(crate) fn candidates(board: &Board, i: usize) -> ([u8; MAXC], usize) {
     let mut out = [0u8; MAXC];
     let s = &board.snakes[i];
     if !s.alive() {
@@ -42,7 +42,7 @@ pub(super) fn candidates(board: &Board, i: usize) -> ([u8; MAXC], usize) {
 }
 
 #[inline]
-pub(super) fn terminal_values(board: &Board, draw: f32) -> [f32; MAX_SNAKES] {
+pub(crate) fn terminal_values(board: &Board, draw: f32) -> [f32; MAX_SNAKES] {
     let mut v = [0.0f32; MAX_SNAKES];
     match board.winner() {
         Some(w) => {
@@ -61,7 +61,7 @@ pub(super) fn terminal_values(board: &Board, draw: f32) -> [f32; MAX_SNAKES] {
 
 /// Would `mv` walk snake `snake_idx` straight into a wall, its own body, or a
 /// non-tail segment of another snake? Used to mask hopeless priors/plays.
-pub(super) fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
+pub(crate) fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move) -> bool {
     let Some(snake) = board.snakes.get(snake_idx) else {
         return false;
     };
@@ -91,7 +91,7 @@ pub(super) fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move)
 }
 
 /// Renormalise `probs` (4 moves) onto the non-obviously-fatal moves.
-pub(super) fn mask_obvious_immediate_deaths(
+pub(crate) fn mask_obvious_immediate_deaths(
     board: &Board,
     snake_idx: usize,
     probs: &[f32],
@@ -141,7 +141,7 @@ pub(super) fn mask_obvious_immediate_deaths(
 
 /// Training value for one sample: winner +1, losers -1, draw configurable.
 #[inline]
-pub(super) fn terminal_value(
+pub(crate) fn terminal_value(
     winner: Option<usize>,
     snake: usize,
     alive_final: bool,
@@ -161,7 +161,7 @@ pub(super) fn terminal_value(
 /// only, BEFORE the simulations run, so the visit-count training target itself
 /// explores moves the raw prior dislikes. `slots` is the candidate count; the
 /// support is the subset with mass.
-pub(super) fn mix_root_dirichlet<R: Rng>(
+pub(crate) fn mix_root_dirichlet<R: Rng>(
     prior: &mut [f32; MAXC],
     slots: usize,
     frac: f32,
@@ -191,7 +191,7 @@ pub(super) fn mix_root_dirichlet<R: Rng>(
 }
 
 /// Sample a move from the play policy.
-pub(super) fn sample_move<R: Rng>(policy: &[f32], rng: &mut R) -> Move {
+pub(crate) fn sample_move<R: Rng>(policy: &[f32], rng: &mut R) -> Move {
     let idx = WeightedIndex::new(policy)
         .map(|d| d.sample(rng))
         .unwrap_or_else(|_| rng.gen_range(0..4));
@@ -199,7 +199,7 @@ pub(super) fn sample_move<R: Rng>(policy: &[f32], rng: &mut R) -> Move {
 }
 
 /// The play policy's argmax (post-opening move selection, temperature → 0).
-pub(super) fn argmax_move(policy: &[f32]) -> Move {
+pub(crate) fn argmax_move(policy: &[f32]) -> Move {
     let mut best = 0usize;
     for i in 1..policy.len().min(4) {
         if policy[i] > policy[best] {

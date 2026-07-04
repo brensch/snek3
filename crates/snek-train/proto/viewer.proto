@@ -83,11 +83,14 @@ message LeagueRating {
   uint32 gen = 1;
   double elo = 2;
   uint32 games = 3;
-  uint32 wins = 4;      // rank-1 finishes
+  uint32 wins = 4;      // rank-1 finishes (== placements[0])
   double avg_rank = 5;
   // Display name ("gen_0042", "floodfill", or a configured API player's
   // name). Empty for ratings written before names existed.
   string name = 6;
+  // Finishes by rank: placements[r-1] = number of r-th-place finishes. Length
+  // is the deepest rank this net ever reached. Empty in older ratings files.
+  repeated uint32 placements = 7;
 }
 
 message RunDetail {

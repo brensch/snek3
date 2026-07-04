@@ -7,6 +7,7 @@ const LABELS: Record<Phase, string> = {
   [Phase.CHECKPOINT]: "checkpoint",
   [Phase.STOPPING]: "stopping",
   [Phase.STOPPED]: "stopped",
+  [Phase.ARENA]: "arena",
 };
 
 export function phaseLabel(phase: Phase | undefined | null): string {

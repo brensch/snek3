@@ -249,8 +249,14 @@ impl TrainerHandle {
         ));
         // Continuous CPU evaluation league: plays checkpoint-vs-checkpoint arena
         // matches on pinned cores for as long as the run is active, maintaining
-        // Bradley–Terry Elo ratings in runs/<id>/eval/. Stops when we stop.
-        crate::eval::start_league(paths.clone(), self.clone(), self.stop.clone());
+        // Bradley–Terry Elo ratings in runs/<id>/eval/. Stops when we stop. The
+        // returned context is shared with the GPU burst arena below so burst
+        // games land in the same records.
+        let league = crate::eval::start_league(paths.clone(), self.clone(), self.stop.clone());
+        // The GPU burst arena's carried state: in-flight cross-generation
+        // games persist across bursts (and generations), so each burst
+        // resumes a saturated buffer instead of cold-starting.
+        let mut arena = crate::eval::burst::ArenaState::default();
 
         while !self.stop.load(Ordering::Relaxed) {
             let cfg = self.config();
@@ -378,6 +384,51 @@ impl TrainerHandle {
                 ploss = losses.policy_loss,
                 vloss = losses.value_loss,
             ));
+            // GPU burst arena: the generation whose checkpoint just landed is a
+            // new league entrant every `league_entrant_gens` — spend one cycle
+            // rating it (and back-filling the pool) at self-play throughput
+            // before the next generation starts.
+            if cfg.burst_games > 0
+                && cfg.league_entrant_gens > 0
+                && (state.generation as usize).is_multiple_of(cfg.league_entrant_gens)
+                && !self.stop.load(Ordering::Relaxed)
+            {
+                self.metrics.set_phase(crate::proto::Phase::Arena);
+                let eval_dir = paths.root.join("eval");
+                // A burst must never take training down: on panic, drop the
+                // carried arena (it may be half-thawed) and move on — the next
+                // entrant gets a fresh buffer.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::eval::burst::run_burst(
+                        &league,
+                        &cfg,
+                        device,
+                        &self.metrics,
+                        &self.stop,
+                        &eval_dir,
+                        &mut arena,
+                    )
+                }))
+                .unwrap_or_else(|_| {
+                    arena = Default::default();
+                    Err(anyhow::anyhow!("burst panicked; arena state discarded"))
+                });
+                match result {
+                    Ok(report) => self.log(format!(
+                        "arena burst gen {gen}: {games} games @{sims} sims in {secs:.0}s ({gpm:.0} games/min, {inf:.0}k inf/s)",
+                        gen = state.generation,
+                        games = report.games,
+                        sims = if cfg.burst_sims > 0 { cfg.burst_sims } else { cfg.eval_sims },
+                        secs = report.seconds,
+                        gpm = 60.0 * safe_div(report.games as f64, report.seconds),
+                        inf = safe_div(report.inferences as f64, report.seconds) / 1000.0,
+                    )),
+                    Err(err) => self.log(format!(
+                        "arena burst gen {gen} failed: {err}",
+                        gen = state.generation
+                    )),
+                }
+            }
             state.generation += 1;
             save_trainer_state(&paths.trainer_state, &state)?;
         }

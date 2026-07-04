@@ -66,7 +66,23 @@ export function RunView() {
   // Make external players (API snakes) nameable anywhere an id appears.
   registerPlayerNames(league);
   const gens = metrics.map((m) => m.generation);
-  const lrRows = metrics.filter((m) => m.lr > 0);
+
+  // Loss falls slowly and noisily, so "is it still trending down?" is hard to
+  // read off the raw curve. The slope of a local least-squares fit answers it
+  // directly: negative = still improving, hovering at zero = plateaued. The
+  // window smooths out per-gen noise without the lag of an EMA.
+  // The first few gens drop loss steeply, so their slopes dwarf everything
+  // after and flatten the recent trend against the axis. Fit on the full
+  // history (so the window has context at the boundary) but only plot the tail.
+  const lossSlopes = useMemo(() => {
+    const half = Math.min(15, Math.max(4, Math.round(metrics.length * 0.03)));
+    const tail = Math.max(0, metrics.length - 50);
+    return {
+      gens: gens.slice(tail),
+      policy: rollingSlope(metrics.map((m) => m.policyLoss), gens, half).slice(tail),
+      value: rollingSlope(metrics.map((m) => m.valueLoss), gens, half).slice(tail),
+    };
+  }, [metrics, gens]);
 
   return (
     <div className="min-h-screen">
@@ -122,6 +138,17 @@ export function RunView() {
                   xValues={gens}
                 />
                 <LineChart
+                  title="Loss slope (Δ/gen)"
+                  height={112}
+                  series={[
+                    { name: "policy", color: series.blue, values: lossSlopes.policy },
+                    { name: "value", color: series.aqua, values: lossSlopes.value },
+                  ]}
+                  xValues={lossSlopes.gens}
+                  centerZero
+                  format={(v) => (v === 0 ? "0" : v.toExponential(1))}
+                />
+                <LineChart
                   title="Target entropy"
                   height={112}
                   series={[{ name: "entropy", color: series.violet, values: metrics.map((m) => m.targetEntropy) }]}
@@ -133,15 +160,6 @@ export function RunView() {
                   series={[{ name: "avg turns", color: series.aqua, values: metrics.map((m) => m.avgGameTurn) }]}
                   xValues={gens}
                 />
-                {lrRows.length > 0 && (
-                  <LineChart
-                    title="Learning rate"
-                    height={112}
-                    series={[{ name: "lr", color: series.orange, values: lrRows.map((m) => m.lr) }]}
-                    xValues={lrRows.map((m) => m.generation)}
-                    format={(v) => v.toExponential(1)}
-                  />
-                )}
               </div>
             </section>
 
@@ -196,4 +214,34 @@ export function RunView() {
       </main>
     </div>
   );
+}
+
+// Smoothed derivative: for each point, the slope of a least-squares line fit
+// through the surrounding [-half, +half] window (x = generation, y = value).
+// Fitting a window rather than differencing neighbours is what does the
+// smoothing — one noisy point barely tilts the local line. Points without
+// enough finite neighbours stay NaN and the chart just skips them.
+function rollingSlope(values: number[], xs: number[], half: number): number[] {
+  const n = values.length;
+  const out = new Array<number>(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    let sx = 0,
+      sy = 0,
+      sxx = 0,
+      sxy = 0,
+      cnt = 0;
+    for (let j = Math.max(0, i - half); j <= Math.min(n - 1, i + half); j++) {
+      const y = values[j];
+      if (!Number.isFinite(y)) continue;
+      const x = xs[j];
+      sx += x;
+      sy += y;
+      sxx += x * x;
+      sxy += x * y;
+      cnt++;
+    }
+    const denom = cnt * sxx - sx * sx;
+    if (cnt >= 2 && denom !== 0) out[i] = (cnt * sxy - sx * sy) / denom;
+  }
+  return out;
 }
