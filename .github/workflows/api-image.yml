@@ -45,7 +45,14 @@ jobs:
           # zstd layers pull smaller and decompress much faster than gzip.
           # Pulling requires a containerd-backed docker on the host; if the
           # deploy box ever fails to pull, drop this back to `push: true`.
-          outputs: type=image,push=true,oci-mediatypes=true,compression=zstd,compression-level=19,force-compression=true
+          # No force-compression: unchanged layers (notably the ~2GB libtorch
+          # one) reuse their existing compressed blobs instead of being
+          # re-squeezed at level 19 every build.
+          outputs: type=image,push=true,oci-mediatypes=true,compression=zstd,compression-level=19
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha,scope=api
-          cache-to: type=gha,mode=max,scope=api
+          # Registry cache instead of type=gha: the Actions cache is capped at
+          # 10GB/repo, which the trainer+api layer sets blow past, so every
+          # build re-uploaded gigabytes after eviction. GHCR dedups by digest,
+          # so unchanged layers cost nothing to "upload".
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/snek3-api:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/snek3-api:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,compression=zstd
