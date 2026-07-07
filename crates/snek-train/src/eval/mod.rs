@@ -71,6 +71,19 @@ pub fn is_external(gen: u32) -> bool {
 /// information-gain sampling on top of this).
 const EXTERNAL_PLAY_PROB: f64 = 1.0 / 3.0;
 
+/// Persistent per-net sampling floor for the top of the leaderboard, on top
+/// of the 1/(1+games) exploration weight. Pure exploration collapses
+/// attention onto whichever net has simply played least, so an aged leader
+/// (few games relative to fresh entrants, but decision-critical) stops being
+/// sampled and its rating ossifies on a thin, stale set. A leader floor keeps
+/// the current best nets — the ones the run's decisions hinge on, and the
+/// ones a fresh entrant must beat to count as progress — continuously
+/// re-tested against the changing field. Scaled by the net's squared
+/// leaderboard percentile, so it concentrates on the very top: the #1 net
+/// gets the full floor (≈ a net with `1/FLOOR` games' worth of pull), the
+/// median net almost none.
+const LEADER_ATTENTION_FLOOR: f64 = 0.1;
+
 /// One external league player: a built-in heuristic agent or a configured
 /// Battlesnake-protocol API server. `spec` is the player spec string that
 /// seats it (a heuristic token or an http url).
@@ -796,6 +809,31 @@ fn pick_players(
         let p = 1.0 / (1.0 + 10f64.powf((elo(b) - elo(a)) / 400.0));
         p * (1.0 - p)
     };
+    // Leaderboard percentile among the *nets* (externals are fixed references,
+    // not the thing we're trying to rate precisely), 0 at the bottom to 1 at
+    // the top. Drives the leader floor below.
+    let mut nets_by_elo: Vec<u32> = pool.iter().copied().filter(|&g| !is_external(g)).collect();
+    nets_by_elo.sort_by(|&a, &b| elo(a).partial_cmp(&elo(b)).unwrap_or(std::cmp::Ordering::Equal));
+    let leader_pct: HashMap<u32, f64> = nets_by_elo
+        .iter()
+        .enumerate()
+        .map(|(i, &g)| {
+            let p = if nets_by_elo.len() > 1 {
+                i as f64 / (nets_by_elo.len() - 1) as f64
+            } else {
+                1.0
+            };
+            (g, p)
+        })
+        .collect();
+    // Sampling attention for a player: exploration (cover the under-played)
+    // plus a persistent floor on the leaderboard's top so aged leaders keep
+    // being pressure-tested instead of dropping out once younger nets have
+    // fewer games. Used both to anchor a match and to draw its opponents.
+    let attention = |g: u32| {
+        let pct = leader_pct.get(&g).copied().unwrap_or(0.0);
+        uncertainty(g) + LEADER_ATTENTION_FLOOR * pct * pct
+    };
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seq.wrapping_mul(0x9E37_79B9_7F4A_7C15));
     let sample = |rng: &mut Xoshiro256PlusPlus, cands: &[u32], weights: &[f64]| -> u32 {
         let total: f64 = weights.iter().sum();
@@ -819,7 +857,7 @@ fn pick_players(
         selected.push(externals[rng.gen_range(0..externals.len())]);
     }
     if selected.is_empty() {
-        let weights: Vec<f64> = pool.iter().map(|&g| uncertainty(g)).collect();
+        let weights: Vec<f64> = pool.iter().map(|&g| attention(g)).collect();
         selected.push(sample(&mut rng, pool, &weights));
     }
     while selected.len() < k {
@@ -833,7 +871,7 @@ fn pick_players(
             .map(|&c| {
                 selected
                     .iter()
-                    .map(|&s| info(c, s) * (uncertainty(c) + uncertainty(s)))
+                    .map(|&s| info(c, s) * (attention(c) + attention(s)))
                     .sum::<f64>()
             })
             .collect();

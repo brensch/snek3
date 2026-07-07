@@ -158,6 +158,24 @@ pub fn run_burst(
     if let Some(&newest) = net_pool.last() {
         want.push(newest);
     }
+    // The current top nets by Elo always defend: a burst's job is to test the
+    // newest entrant against the best-so-far and to keep the leaders' ratings
+    // sharp, so the champions must be loaded even once they're well-played
+    // (career-based cycling alone would freeze them out). Two leaders plus the
+    // entrant still leaves most stations for exploration below.
+    let mut by_elo: Vec<u32> = net_pool.clone();
+    by_elo.sort_by(|&a, &b| {
+        ratings
+            .get(&b)
+            .unwrap_or(&0.0)
+            .partial_cmp(ratings.get(&a).unwrap_or(&0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for &leader in by_elo.iter().take(2) {
+        if !want.contains(&leader) {
+            want.push(leader);
+        }
+    }
     // The pool's least-played net cycles in, covering the pool across bursts.
     if let Some(&starved) = net_pool
         .iter()
