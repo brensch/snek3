@@ -353,6 +353,7 @@ impl TrainerHandle {
                     policy_loss: losses.policy_loss,
                     value_loss: losses.value_loss,
                     target_entropy: losses.target_entropy,
+                    net_entropy: losses.net_entropy,
                     lr,
                     win_rate: 0.0,
                     completed_games: gen_completed_games,
@@ -457,6 +458,9 @@ struct GenRecord {
     policy_loss: f64,
     value_loss: f64,
     target_entropy: f64,
+    /// Entropy of the net's own policy output (nats), avg over the last train
+    /// batch. Compare to `target_entropy`; the entropy floor defends this.
+    net_entropy: f64,
     /// Learning rate this generation actually trained at (after decay).
     lr: f64,
     win_rate: f64,

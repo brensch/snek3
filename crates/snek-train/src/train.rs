@@ -12,6 +12,9 @@ pub struct TrainMetrics {
     pub policy_loss: f64,
     pub value_loss: f64,
     pub target_entropy: f64,
+    /// Entropy (nats) of the net's own policy output, averaged over the batch.
+    /// The quantity the entropy floor defends; watch it against `target_entropy`.
+    pub net_entropy: f64,
 }
 
 pub fn train_steps(
@@ -35,7 +38,15 @@ pub fn train_steps(
         else {
             break;
         };
-        last = train_one(net, vs.device(), opt, &batch, cfg.value_weight)?;
+        last = train_one(
+            net,
+            vs.device(),
+            opt,
+            &batch,
+            cfg.value_weight,
+            cfg.entropy_floor,
+            cfg.entropy_coef,
+        )?;
         counters
             .train_step
             .store((step + 1) as u32, Ordering::Relaxed);
@@ -70,6 +81,8 @@ fn train_one(
     opt: &mut nn::Optimizer,
     batch: &Samples,
     value_weight: f64,
+    entropy_floor: f32,
+    entropy_coef: f32,
 ) -> anyhow::Result<TrainMetrics> {
     let b = batch.len();
     let [c, h, w] = batch.obs_shape;
@@ -82,11 +95,24 @@ fn train_one(
     let target_z = Tensor::from_slice(&batch.z).to_device(device);
     let (logits, value) = net.forward(&obs);
     let logp = logits.log_softmax(-1, Kind::Float);
+    // Per-sample entropy of the net's own policy, H(pi) = -sum(pi * log pi).
+    // Computed before `logp` is moved into the policy loss below.
+    let net_ent_per = -(logp.exp() * logp.shallow_clone())
+        .sum_dim_intlist(&[1i64][..], false, Kind::Float);
+    let net_entropy = net_ent_per.mean(Kind::Float);
     let policy_loss = -(target_pol.shallow_clone() * logp)
         .sum_dim_intlist(&[1i64][..], false, Kind::Float)
         .mean(Kind::Float);
     let value_loss = value.mse_loss(&target_z, Reduction::Mean);
-    let loss = &policy_loss + &value_loss * value_weight;
+    let mut loss = &policy_loss + &value_loss * value_weight;
+    if entropy_coef > 0.0 {
+        // Hinge: penalize only the samples whose policy entropy dips below the
+        // floor — relu(floor - H(pi)), averaged over the batch.
+        let deficit = (net_ent_per.neg() + entropy_floor as f64)
+            .clamp_min(0.0)
+            .mean(Kind::Float);
+        loss = loss + deficit * entropy_coef as f64;
+    }
     opt.backward_step(&loss);
     let entropy = -(target_pol.shallow_clone() * target_pol.clamp_min(1e-8).log())
         .sum_dim_intlist(&[1i64][..], false, Kind::Float)
@@ -95,5 +121,6 @@ fn train_one(
         policy_loss: policy_loss.double_value(&[]),
         value_loss: value_loss.double_value(&[]),
         target_entropy: entropy.double_value(&[]),
+        net_entropy: net_entropy.double_value(&[]),
     })
 }
