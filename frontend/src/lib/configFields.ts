@@ -23,8 +23,6 @@ export const configFields: Array<{ key: keyof RunConfig; label: string; hint?: s
   { key: "recency", label: "Recency", hint: "1 = uniform sampling" },
   { key: "buffer_size", label: "Buffer" },
   { key: "value_weight", label: "Value weight" },
-  { key: "entropy_floor", label: "Entropy floor", hint: "nats · coef 0 = off" },
-  { key: "entropy_coef", label: "Entropy coef" },
   { key: "weight_decay", label: "Weight decay", hint: "AdamW · AZ L2 = 1e-4" },
   { key: "lr_half_life_samples", label: "LR half-life", hint: "samples per LR halving" },
   { key: "search_threads", label: "Threads" },

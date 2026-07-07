@@ -460,7 +460,7 @@ struct GenRecord {
     value_loss: f64,
     target_entropy: f64,
     /// Entropy of the net's own policy output (nats), avg over the last train
-    /// batch. Compare to `target_entropy`; the entropy floor defends this.
+    /// batch. Compare to `target_entropy`.
     net_entropy: f64,
     /// Learning rate this generation actually trained at (after decay).
     lr: f64,

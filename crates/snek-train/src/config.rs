@@ -56,23 +56,6 @@ pub struct RunConfig {
     /// Old run configs deserialize to the 5M they trained with.
     #[serde(default = "default_lr_half_life_samples")]
     pub lr_half_life_samples: f64,
-    /// Policy-entropy floor: a hinge penalty added to the training loss,
-    /// `entropy_coef * mean(relu(entropy_floor - H(pi)))`, where `H(pi)` is the
-    /// per-sample entropy (nats, over the 4 moves; max ln4 ~= 1.386) of the
-    /// net's own policy output. Counters the AlphaZero policy-collapse spiral:
-    /// the net over-sharpens its prior -> self-play search narrows -> visit-count
-    /// targets sharpen -> the net over-sharpens further. Because it acts on the
-    /// net's output directly (not via the search target, which deep search
-    /// concentrates regardless of root noise), it is the lever root Dirichlet
-    /// cannot be. A hinge, so it only bites once the net drifts below the floor,
-    /// leaving legitimately decisive positions alone. `entropy_coef` = 0
-    /// (default) disables it; a floor near the healthy pre-collapse entropy
-    /// (~0.6-0.65) with coef ~0.1-0.3 removes the pathological over-confidence
-    /// without forcing artificial uncertainty.
-    #[serde(default)]
-    pub entropy_floor: f32,
-    #[serde(default)]
-    pub entropy_coef: f32,
     pub search_threads: usize,
     /// How many self-play games to record as browsable samples each generation.
     #[serde(default = "default_sample_games")]
@@ -191,8 +174,6 @@ impl Default for RunConfig {
             recency: 1.0,
             buffer_size: 500_000,
             value_weight: 1.0,
-            entropy_floor: 0.0,
-            entropy_coef: 0.0,
             // AlphaZero's L2 coefficient, as decoupled AdamW decay.
             weight_decay: 1e-4,
             // ~125 gens per halving at 12k samples/gen: near-base LR through
