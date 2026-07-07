@@ -216,7 +216,7 @@ impl TrainerHandle {
         } else {
             snek_tch::init_orthogonal(&vs, 2f64.sqrt());
         }
-        let mut opt = build_optimizer(&vs)?;
+        let mut opt = build_optimizer(&vs, &cfg)?;
         let mut state = if fresh {
             Default::default()
         } else {
@@ -325,9 +325,10 @@ impl TrainerHandle {
             }
 
             self.metrics.set_phase(Phase::Training);
-            // The LR schedule is code-owned (see `train::lr_for`); re-applied
-            // every generation so the decay advances with samples_seen.
-            let lr = crate::train::lr_for(state.samples_seen);
+            // The LR schedule's shape is code-owned (see `train::lr_for`);
+            // re-applied every generation so the decay advances with
+            // samples_seen.
+            let lr = crate::train::lr_for(&cfg, state.samples_seen);
             opt.set_lr(lr);
             let train_start = Instant::now();
             let losses = train_steps(

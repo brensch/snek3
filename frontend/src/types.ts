@@ -25,9 +25,18 @@ export type RunConfig = {
   trunk_blocks: number;
   train_steps: number;
   batch_size: number;
+  // Replay sampling skew: 1 = uniform over the buffer window (AlphaZero),
+  // >1 biases draws toward the newest shards.
   recency: number;
   buffer_size: number;
   value_weight: number;
+  // Hinge penalty defending the net's own policy entropy: coef 0 disables.
+  entropy_floor: number;
+  entropy_coef: number;
+  // Decoupled (AdamW) weight decay; AlphaZero's L2 is 1e-4. 0 disables.
+  weight_decay: number;
+  // LR halves every this many training samples (1e-3 down to the 1e-4 floor).
+  lr_half_life_samples: number;
   search_threads: number;
   sample_games: number;
   // Continuous CPU evaluation league: a checkpoint joins the pool every this

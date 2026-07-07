@@ -41,6 +41,21 @@ pub struct RunConfig {
     pub recency: f64,
     pub buffer_size: usize,
     pub value_weight: f64,
+    /// Decoupled (AdamW) weight decay. AlphaZero's loss carries an L2 term
+    /// (c=1e-4); without any regularizer the net is free to drift toward the
+    /// idiosyncrasies of the newest self-play shards long after real progress
+    /// has stopped — the run-15 lineage's post-peak Elo slide. 0 disables
+    /// (the pre-run-20 behavior; old run configs deserialize to 0).
+    #[serde(default)]
+    pub weight_decay: f64,
+    /// The LR halves every this many training samples seen (smooth decay from
+    /// 1e-3, floored at 1e-4). AlphaZero steps its LR down ~10x twice across a
+    /// run; the old fixed 5M half-life (~420 gens/halving at 12k samples/gen)
+    /// left updates near full size at the gen ~200 strength peak, so the net
+    /// kept taking near-base-LR steps on noisy targets long past convergence.
+    /// Old run configs deserialize to the 5M they trained with.
+    #[serde(default = "default_lr_half_life_samples")]
+    pub lr_half_life_samples: f64,
     /// Policy-entropy floor: a hinge penalty added to the training loss,
     /// `entropy_coef * mean(relu(entropy_floor - H(pi)))`, where `H(pi)` is the
     /// per-sample entropy (nats, over the 4 moves; max ln4 ~= 1.386) of the
@@ -129,6 +144,13 @@ fn default_burst_games() -> usize {
     256
 }
 
+fn default_lr_half_life_samples() -> f64 {
+    // The schedule runs at this half-life. Pre-knob it lived in train.rs as
+    // LR_HALF_LIFE_SAMPLES = 5M; old configs (no field) must keep training at
+    // the rate they always did.
+    5_000_000.0
+}
+
 /// How many GPU-batch-sized groups of games are kept in flight at once. Two is a
 /// double buffer: while one batch is on the GPU, the other is being built on the
 /// CPU. Self-play is GPU-forward-bound (the GPU never idles under the lock
@@ -163,11 +185,19 @@ impl Default for RunConfig {
             trunk_blocks: 8,
             train_steps: 128,
             batch_size: 2048,
-            recency: 2.0,
+            // 1.0 = uniform over the buffer window, AlphaZero's sampling. A
+            // recency skew (the old 2.0) doubles down on the newest shards —
+            // the noisiest data — which amplifies late-run drift.
+            recency: 1.0,
             buffer_size: 500_000,
             value_weight: 1.0,
             entropy_floor: 0.0,
             entropy_coef: 0.0,
+            // AlphaZero's L2 coefficient, as decoupled AdamW decay.
+            weight_decay: 1e-4,
+            // ~125 gens per halving at 12k samples/gen: near-base LR through
+            // the fast-improvement phase, ~1e-4 (the floor) past gen ~400.
+            lr_half_life_samples: 1_500_000.0,
             search_threads: 0,
             sample_games: default_sample_games(),
             league_entrant_gens: default_league_entrant_gens(),

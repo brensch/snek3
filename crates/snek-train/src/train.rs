@@ -54,25 +54,29 @@ pub fn train_steps(
     Ok(last)
 }
 
-// The learning rate is owned by the code, not the config: a fixed schedule with
-// nothing to tune. Adam starts at LR_BASE (a rate the net demonstrably trains
-// well at from scratch), smoothly halves every LR_HALF_LIFE_SAMPLES so
-// late-run updates settle instead of orbiting the optimum, and never drops
-// below LR_FLOOR — self-play data is non-stationary, so training must keep
-// tracking it indefinitely rather than freezing.
+// The LR schedule's shape is owned by the code: Adam(W) starts at LR_BASE (a
+// rate the net demonstrably trains well at from scratch), smoothly halves
+// every `cfg.lr_half_life_samples` so late-run updates settle instead of
+// orbiting the optimum, and never drops below LR_FLOOR — self-play data is
+// non-stationary, so training must keep tracking it indefinitely rather than
+// freezing. Only the half-life is a config knob (it decides *when* the run
+// reaches fine-tuning rates, the lever run-over-run experiments need).
 const LR_BASE: f64 = 1e-3;
-const LR_HALF_LIFE_SAMPLES: f64 = 5_000_000.0;
 const LR_FLOOR: f64 = 1e-4;
 
 /// Learning rate at a point in the run, keyed by total training samples seen.
 /// Applied by the trainer every generation, so it survives pauses/resumes (it
 /// is a pure function of the persisted `samples_seen`).
-pub fn lr_for(samples_seen: u64) -> f64 {
-    (LR_BASE * 0.5f64.powf(samples_seen as f64 / LR_HALF_LIFE_SAMPLES)).max(LR_FLOOR)
+pub fn lr_for(cfg: &RunConfig, samples_seen: u64) -> f64 {
+    let half_life = cfg.lr_half_life_samples.max(1.0);
+    (LR_BASE * 0.5f64.powf(samples_seen as f64 / half_life)).max(LR_FLOOR)
 }
 
-pub fn build_optimizer(vs: &nn::VarStore) -> anyhow::Result<nn::Optimizer> {
-    Ok(nn::Adam::default().build(vs, LR_BASE)?)
+pub fn build_optimizer(vs: &nn::VarStore, cfg: &RunConfig) -> anyhow::Result<nn::Optimizer> {
+    // AdamW: `weight_decay` is applied decoupled from the gradient, the
+    // Adam-family equivalent of AlphaZero's L2 term. With wd = 0 this is
+    // exactly the plain Adam every pre-run-20 net trained with.
+    Ok(nn::AdamW::default().wd(cfg.weight_decay).build(vs, LR_BASE)?)
 }
 
 fn train_one(
