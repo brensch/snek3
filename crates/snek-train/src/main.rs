@@ -124,7 +124,24 @@ fn standalone_burst(args: &Args, run_id: &str, metrics: Metrics) -> anyhow::Resu
         out = %out_dir.display(),
         "standalone burst starting"
     );
-    let stop = std::sync::atomic::AtomicBool::new(false);
+    // SIGINT/SIGTERM request a *graceful* stop: finish the in-flight lockstep
+    // turn, freeze the arena, and flush every finished game to summary.jsonl —
+    // an hour-long burst interrupted at game 47/50 keeps its 47 games. (The
+    // burst loop below also stops repeating once the flag is set.)
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let stop = std::sync::Arc::clone(&stop);
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            eprintln!("signal received: freezing arena and flushing finished games…");
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
     // Progress ticker: a line every few seconds with rates over the interval,
     // so slow spots are visible immediately.
     let done_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -163,6 +180,9 @@ fn standalone_burst(args: &Args, run_id: &str, metrics: Metrics) -> anyhow::Resu
     let mut arena = eval::burst::ArenaState::default();
     let mut result = Ok(());
     for i in 0..args.burst_repeat.max(1) {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
         match eval::burst::run_burst(&ctx, &cfg, device, &metrics, &stop, &out_dir, &mut arena) {
             Ok(report) => println!(
                 "burst {n}/{total} done: {games} games @{sims} sims, {turns} turns in {secs:.0}s ({gpm:.1} games/min, {inf:.0}k inf/s) -> {out}",
