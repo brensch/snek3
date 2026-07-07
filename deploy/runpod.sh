@@ -25,7 +25,7 @@
 #   seed /runs first, then start from the dashboard).
 #
 # Storage: by default pods mount the "snek3-runs" network volume (NETVOL,
-#   default sdde6lnvh6, US-NC-1) at /runs — it outlives pods, so runs survive
+#   default xvsrc62zau, US-NC-1) at /runs — it outlives pods, so runs survive
 #   termination and every new pod sees the same data. Network volumes are
 #   secure-cloud only and pin the pod to their datacenter. Set NETVOL= (empty)
 #   for a pod-local volume instead (VOLUME_GB, default 50; CLOUD selects
@@ -95,7 +95,7 @@ launch)
     RUNPOD_APIKEY=$(env_lookup RUNPOD_APIKEY)
     TS_AUTHKEY=$(env_lookup TS_AUTHKEY)
     gpu=$(gpu_id "${2:-4090}")
-    netvol=${NETVOL-sdde6lnvh6}
+    netvol=${NETVOL-xvsrc62zau}
     if [[ -n "$netvol" ]]; then
         cloud=${CLOUD:-SECURE}   # network volumes are secure-cloud only
     else
@@ -143,7 +143,7 @@ stop)
     ;;
 push)
     run_id=${2:?usage: deploy/runpod.sh push <run-id>}
-    netvol=${NETVOL:-sdde6lnvh6}
+    netvol=${NETVOL:-xvsrc62zau}
     [[ -d "$REPO_DIR/runs/$run_id" ]] || { echo "error: no runs/$run_id locally" >&2; exit 1; }
     echo "pushing runs/$run_id -> volume $netvol ..."
     s3aws sync --delete "$REPO_DIR/runs/$run_id" "s3://$netvol/$run_id"
@@ -151,13 +151,13 @@ push)
     ;;
 fetch)
     run_id=${2:?usage: deploy/runpod.sh fetch <run-id>}
-    netvol=${NETVOL:-sdde6lnvh6}
+    netvol=${NETVOL:-xvsrc62zau}
     echo "fetching volume $netvol/$run_id -> runs/$run_id ..."
     s3aws sync --delete "s3://$netvol/$run_id" "$REPO_DIR/runs/$run_id"
     echo "done"
     ;;
 ls)
-    netvol=${NETVOL:-sdde6lnvh6}
+    netvol=${NETVOL:-xvsrc62zau}
     s3aws ls "s3://$netvol/${2:-}"
     ;;
 sync)
