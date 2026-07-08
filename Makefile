@@ -23,7 +23,7 @@ LIBTORCH_PRELOAD ?= $(TORCH_LIB)/libtorch_global_deps.so:$(TORCH_LIB)/libtorch_c
 LIBTORCH_ENV := PYTHON=$(PYTHON) LIBTORCH_USE_PYTORCH=1 LIBTORCH_BYPASS_VERSION_CHECK=1 LD_PRELOAD="$(LIBTORCH_PRELOAD)$${LD_PRELOAD:+:$$LD_PRELOAD}" LD_LIBRARY_PATH="$(TORCH_LIB):$(NVIDIA_LIBS)$$LD_LIBRARY_PATH"
 
 .DEFAULT_GOAL := help
-.PHONY: help test test-rust fmt lint train train-build tunnel frontend frontend-build api-build api rungame clean
+.PHONY: help test test-rust fmt lint train train-build tunnel frontend frontend-build api-build api baseline rungame rungame4 clean
 
 help: ## Show this help
 	@echo "snek3 targets:"
@@ -74,18 +74,33 @@ A_NAME ?= challenger
 A_URL ?= http://192.168.1.22:8080
 B_NAME ?= snek3-api
 B_URL ?= http://192.168.1.8:8000
+# Optional seats 3+4; empty = 1v1. rungame4 fills them with the local baseline.
+C_NAME ?= voronoi1
+C_URL ?=
+D_NAME ?= voronoi2
+D_URL ?=
+BASELINE_PORT ?= 8100
 WSL_BROWSER ?= google-chrome
 # comm name of the running browser ($(WSL_BROWSER) is a wrapper that execs this)
 WSL_BROWSER_PROC ?= chrome
 
-rungame: ## Play A_URL vs B_URL on the browser board: make rungame [A_URL=... B_URL=...]
+baseline: ## Serve the voronoi baseline as a Battlesnake (one port serves any number of seats)
+	cargo build --release -p snek-heuristic --features server --bin snek-baseline
+	SNEK_BASELINE_PORT=$(BASELINE_PORT) ./target/release/snek-baseline
+
+rungame: ## Play A_URL vs B_URL (plus C_URL/D_URL if set) on the browser board
 	@pgrep -x $(WSL_BROWSER_PROC) >/dev/null || { \
 		echo "starting $(WSL_BROWSER) in WSL (board glitches if it cold-starts mid-game)"; \
 		nohup $(WSL_BROWSER) about:blank >/dev/null 2>&1 & sleep 3; }
 	battlesnake play -W 11 -H 11 \
 		--name $(A_NAME) --url $(A_URL) \
 		--name $(B_NAME) --url $(B_URL) \
+		$(if $(C_URL),--name $(C_NAME) --url $(C_URL),) \
+		$(if $(D_URL),--name $(D_NAME) --url $(D_URL),) \
 		--browser
+
+rungame4: ## 4-player rungame: seats 3+4 are local voronoi snakes (run `make baseline` first)
+	$(MAKE) rungame C_URL=http://localhost:$(BASELINE_PORT) D_URL=http://localhost:$(BASELINE_PORT)
 
 ARENA_GAMES ?= 100
 ARENA_SIMS ?= 1000

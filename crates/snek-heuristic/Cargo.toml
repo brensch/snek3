@@ -8,6 +8,17 @@ authors.workspace = true
 
 [dependencies]
 snek-core = { workspace = true }
+tiny_http = { version = "0.12", optional = true }
+
+[features]
+# HTTP Battlesnake wrapper (snek-baseline bin) — off by default so the library
+# stays dependency-free.
+server = ["dep:tiny_http", "snek-core/json"]
+
+[[bin]]
+name = "snek-baseline"
+path = "src/bin/baseline_server.rs"
+required-features = ["server"]
 
 [dev-dependencies]
 rand = { workspace = true }
