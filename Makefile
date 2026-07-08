@@ -23,7 +23,7 @@ LIBTORCH_PRELOAD ?= $(TORCH_LIB)/libtorch_global_deps.so:$(TORCH_LIB)/libtorch_c
 LIBTORCH_ENV := PYTHON=$(PYTHON) LIBTORCH_USE_PYTORCH=1 LIBTORCH_BYPASS_VERSION_CHECK=1 LD_PRELOAD="$(LIBTORCH_PRELOAD)$${LD_PRELOAD:+:$$LD_PRELOAD}" LD_LIBRARY_PATH="$(TORCH_LIB):$(NVIDIA_LIBS)$$LD_LIBRARY_PATH"
 
 .DEFAULT_GOAL := help
-.PHONY: help test test-rust fmt lint train train-build tunnel frontend frontend-build api-build api clean
+.PHONY: help test test-rust fmt lint train train-build tunnel frontend frontend-build api-build api rungame clean
 
 help: ## Show this help
 	@echo "snek3 targets:"
@@ -69,6 +69,23 @@ api: api-build ## Run the Battlesnake /move API server with an existing safetens
 	SNEK_TIMEOUT_MS=$(API_TIMEOUT_MS) SNEK_DEADLINE_MARGIN_MS=$(API_DEADLINE_MARGIN_MS) \
 	SNEK_THREADS=$(API_THREADS) SNEK_EVAL_CHUNK=$(API_EVAL_CHUNK) SNEK_MOVE_LOG_DIR=$(API_MOVE_LOG_DIR) \
 	./crates/snek-server/target/release/snek-server
+
+A_NAME ?= challenger
+A_URL ?= http://192.168.1.22:8080
+B_NAME ?= snek3-api
+B_URL ?= http://192.168.1.8:8000
+WSL_BROWSER ?= google-chrome
+# comm name of the running browser ($(WSL_BROWSER) is a wrapper that execs this)
+WSL_BROWSER_PROC ?= chrome
+
+rungame: ## Play A_URL vs B_URL on the browser board: make rungame [A_URL=... B_URL=...]
+	@pgrep -x $(WSL_BROWSER_PROC) >/dev/null || { \
+		echo "starting $(WSL_BROWSER) in WSL (board glitches if it cold-starts mid-game)"; \
+		nohup $(WSL_BROWSER) about:blank >/dev/null 2>&1 & sleep 3; }
+	battlesnake play -W 11 -H 11 \
+		--name $(A_NAME) --url $(A_URL) \
+		--name $(B_NAME) --url $(B_URL) \
+		--browser
 
 ARENA_GAMES ?= 100
 ARENA_SIMS ?= 1000

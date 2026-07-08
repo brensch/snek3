@@ -22,6 +22,7 @@
 //!   SNEK_MOVE_LOG_DIR per-game compressed game log dir; empty disables (default logs/api_moves)
 //!   SNEK_GAME_IDLE_SECS  finalize a silent game as incomplete after this many seconds (default 300)
 //!   SNEK_LOG_ZSTD_LEVEL  zstd level for game logs, compressed at game end (default 19)
+//!   SNEK_VERSION      image tag reported in the `/` info version (default dev)
 
 mod orchestrator;
 mod recorder;
@@ -293,7 +294,30 @@ fn content_type_for(name: &str) -> &'static str {
 }
 
 fn info_json() -> String {
-    r##"{"apiversion":"1","author":"brensch","color":"#3366ff","head":"default","tail":"default","version":"0.3.0"}"##.to_string()
+    static INFO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INFO.get_or_init(|| {
+        format!(
+            r##"{{"apiversion":"1","author":"brensch","color":"#3366ff","head":"default","tail":"default","version":"{}"}}"##,
+            build_version()
+        )
+    })
+    .clone()
+}
+
+/// Image tag (SNEK_VERSION, baked in by the api-image workflow; "dev" outside
+/// it) plus the checkpoint generation from the provenance json shipped next to
+/// the model (net.safetensors -> net.json).
+fn build_version() -> String {
+    let tag = std::env::var("SNEK_VERSION").unwrap_or_else(|_| "dev".into());
+    let model = std::env::var("SNEK_MODEL").unwrap_or_else(|_| "net.safetensors".into());
+    std::path::Path::new(&model)
+        .with_extension("json")
+        .to_str()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("generation").and_then(serde_json::Value::as_u64))
+        .map(|gen| format!("{tag} gen{gen}"))
+        .unwrap_or(tag)
 }
 
 fn handle_move(app: &App, body: &str) -> String {

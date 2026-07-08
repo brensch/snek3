@@ -47,6 +47,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # --- runtime
 FROM debian:bookworm-slim
+# Image tag passed by the api-image workflow; the server reports it (plus the
+# baked checkpoint's generation) as the version in the `/` info response.
+ARG SNEK_VERSION=dev
+ENV SNEK_VERSION=$SNEK_VERSION
 COPY --from=builder /opt/libtorch/lib /opt/torch/lib
 COPY --from=builder /usr/local/bin/snek-server /app/snek-server
 COPY checkpoints/serving.safetensors /app/net.safetensors

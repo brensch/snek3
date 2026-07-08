@@ -29,6 +29,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Version the server reports in its `/` info response: the tag for tag
+      # builds, ref + short sha for workflow_dispatch builds.
+      - id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$GITHUB_REF_NAME-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
       - id: meta
         uses: docker/metadata-action@v5
         with:
@@ -50,6 +60,8 @@ jobs:
           # re-squeezed at level 19 every build.
           outputs: type=image,push=true,oci-mediatypes=true,compression=zstd,compression-level=19
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            SNEK_VERSION=${{ steps.version.outputs.version }}
           # Registry cache instead of type=gha: the Actions cache is capped at
           # 10GB/repo, which the trainer+api layer sets blow past, so every
           # build re-uploaded gigabytes after eviction. GHCR dedups by digest,
