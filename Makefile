@@ -74,10 +74,11 @@ A_NAME ?= challenger
 A_URL ?= http://192.168.1.22:8080
 B_NAME ?= snek3-api
 B_URL ?= http://192.168.1.8:8000
-# Seats 3+4 default to the old Cloud Run snakes; set C_URL/D_URL empty for a
-# 1v1, or use rungame4 to fill them with local voronoi baselines instead.
-C_NAME ?= cloud-green
-C_URL ?= https://snake-233u62v37a-uk.a.run.app
+# Seat 3 is a local voronoi (needs `make baseline` running), seat 4 the old
+# Cloud Run snake; set C_URL/D_URL empty for a 1v1, or use rungamelocal to
+# make both voronois.
+C_NAME ?= voronoi1
+C_URL ?= http://localhost:$(BASELINE_PORT)
 D_NAME ?= cloud-orange
 D_URL ?= https://snake-uvyj55g6wa-wl.a.run.app
 BASELINE_PORT ?= 8100
