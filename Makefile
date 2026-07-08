@@ -23,7 +23,7 @@ LIBTORCH_PRELOAD ?= $(TORCH_LIB)/libtorch_global_deps.so:$(TORCH_LIB)/libtorch_c
 LIBTORCH_ENV := PYTHON=$(PYTHON) LIBTORCH_USE_PYTORCH=1 LIBTORCH_BYPASS_VERSION_CHECK=1 LD_PRELOAD="$(LIBTORCH_PRELOAD)$${LD_PRELOAD:+:$$LD_PRELOAD}" LD_LIBRARY_PATH="$(TORCH_LIB):$(NVIDIA_LIBS)$$LD_LIBRARY_PATH"
 
 .DEFAULT_GOAL := help
-.PHONY: help test test-rust fmt lint train train-build tunnel frontend frontend-build api-build api baseline rungame rungame4 clean
+.PHONY: help test test-rust fmt lint train train-build tunnel frontend frontend-build api-build api baseline rungame rungamelocal clean
 
 help: ## Show this help
 	@echo "snek3 targets:"
@@ -100,7 +100,7 @@ rungame: ## Play A_URL vs B_URL (plus C_URL/D_URL if set) on the browser board
 		$(if $(D_URL),--name $(D_NAME) --url $(D_URL),) \
 		--browser
 
-rungame4: ## rungame but seats 3+4 are local voronoi snakes (run `make baseline` first)
+rungamelocal: ## rungame with no cloud seats: players 3+4 are local voronoi snakes (run `make baseline` first)
 	$(MAKE) rungame C_NAME=voronoi1 C_URL=http://localhost:$(BASELINE_PORT) \
 		D_NAME=voronoi2 D_URL=http://localhost:$(BASELINE_PORT)
 
