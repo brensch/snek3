@@ -43,7 +43,13 @@ CPU-only (torch 2.11.0+cpu wheel) and bakes in:
 - the tracked serving checkpoint `checkpoints/serving.safetensors`
   (provenance in `checkpoints/serving.json`) — **its architecture must match
   `crates/snek-tch` in the same commit** or the container panics at startup;
-  when the net architecture changes, commit a matching checkpoint with it
+  when the net architecture changes, commit a matching checkpoint with it.
+  `make publish-serving` (deploy/publish-serving.sh) keeps this current
+  automatically: it watches the active run and pushes each new entrant net to
+  the single-commit `serving` branch (origin/main + weights, force-pushed so
+  binaries never pile up in main's history), then dispatches the api-image
+  build from that ref — `snek3-api:latest` is always current code + newest
+  rated net
 - the embedded viewer (built in a node stage)
 - CPU serve tuning measured on the deploy box (i5-1340P):
   `SNEK_TORCH_THREADS=4`, `SNEK_LEAVES_PER_SIM=2`

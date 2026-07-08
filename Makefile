@@ -51,6 +51,9 @@ train: train-build ## Run the Rust trainer/API. Add START=1 to begin immediately
 		--bind $(BIND) --runs-dir $(RUNS_DIR) \
 		$(if $(RUN_ID),--run-id $(RUN_ID),) $(if $(FRESH),--fresh,) $(if $(START),--start,)
 
+publish-serving: ## Watch the active run; push new entrant nets to the `serving` branch + rebuild snek3-api
+	deploy/publish-serving.sh --watch
+
 tunnel: ## Expose the dashboard over your tailnet (needs TS_AUTHKEY on first run)
 	DASH_PORT=$(PORT) deploy/tailscale-dashboard.sh
 
