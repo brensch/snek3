@@ -74,11 +74,12 @@ A_NAME ?= challenger
 A_URL ?= http://192.168.1.22:8080
 B_NAME ?= snek3-api
 B_URL ?= http://192.168.1.8:8000
-# Optional seats 3+4; empty = 1v1. rungame4 fills them with the local baseline.
-C_NAME ?= voronoi1
-C_URL ?=
-D_NAME ?= voronoi2
-D_URL ?=
+# Seats 3+4 default to the old Cloud Run snakes; set C_URL/D_URL empty for a
+# 1v1, or use rungame4 to fill them with local voronoi baselines instead.
+C_NAME ?= cloud-green
+C_URL ?= https://snake-233u62v37a-uk.a.run.app
+D_NAME ?= cloud-orange
+D_URL ?= https://snake-uvyj55g6wa-wl.a.run.app
 BASELINE_PORT ?= 8100
 WSL_BROWSER ?= google-chrome
 # comm name of the running browser ($(WSL_BROWSER) is a wrapper that execs this)
@@ -99,8 +100,9 @@ rungame: ## Play A_URL vs B_URL (plus C_URL/D_URL if set) on the browser board
 		$(if $(D_URL),--name $(D_NAME) --url $(D_URL),) \
 		--browser
 
-rungame4: ## 4-player rungame: seats 3+4 are local voronoi snakes (run `make baseline` first)
-	$(MAKE) rungame C_URL=http://localhost:$(BASELINE_PORT) D_URL=http://localhost:$(BASELINE_PORT)
+rungame4: ## rungame but seats 3+4 are local voronoi snakes (run `make baseline` first)
+	$(MAKE) rungame C_NAME=voronoi1 C_URL=http://localhost:$(BASELINE_PORT) \
+		D_NAME=voronoi2 D_URL=http://localhost:$(BASELINE_PORT)
 
 ARENA_GAMES ?= 100
 ARENA_SIMS ?= 1000
