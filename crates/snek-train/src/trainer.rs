@@ -347,6 +347,12 @@ impl TrainerHandle {
             vs.save(&paths.net)?;
             // Also archive this generation's weights, kept forever.
             vs.save(paths.checkpoint_net(state.generation))?;
+            // Mirror the freshest net into the repo's tracked serving slot and
+            // commit + push it, so the snek3-api image always builds with the
+            // latest weights. Best-effort: git trouble never takes training down.
+            if let Err(err) = publish_serving(&paths.net, run_id, state.generation, &cfg) {
+                self.log(format!("serving publish failed: {err:#}"));
+            }
             append_metric(
                 &paths.metrics,
                 &GenRecord {
@@ -479,6 +485,58 @@ struct GenRecord {
     turns_per_sec: f64,
     gpu_busy_pct: f64,
     avg_game_turn: f64,
+}
+
+/// Copy the current net to `checkpoints/serving.safetensors` (+ provenance
+/// json) and `git add/commit/push` the pair, keeping the repo's tracked
+/// serving checkpoint — and therefore the snek3-api container — current with
+/// the newest weights. Runs from the process cwd, which is the repo root
+/// under `make train`. Set SNEK_NO_PUBLISH=1 to disable (e.g. on pods with
+/// no git credentials); a missing checkpoints/ dir also skips quietly.
+fn publish_serving(
+    net: &Path,
+    run_id: &str,
+    generation: u32,
+    cfg: &RunConfig,
+) -> anyhow::Result<()> {
+    if std::env::var_os("SNEK_NO_PUBLISH").is_some() {
+        return Ok(());
+    }
+    let dir = Path::new("checkpoints");
+    if !dir.is_dir() {
+        return Ok(()); // not running from a repo checkout — nothing to publish
+    }
+    std::fs::copy(net, dir.join("serving.safetensors"))?;
+    let exported_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let provenance = serde_json::json!({
+        "source_run": run_id,
+        "generation": generation,
+        "exported_unix": exported_unix,
+        "trunk_channels": cfg.trunk_channels,
+        "trunk_blocks": cfg.trunk_blocks,
+        "note": "auto-committed by snek-train at checkpoint save; must ship with matching crates/snek-tch",
+    });
+    std::fs::write(dir.join("serving.json"), serde_json::to_vec_pretty(&provenance)?)?;
+    let files = ["checkpoints/serving.safetensors", "checkpoints/serving.json"];
+    let msg = format!("serve: {run_id} gen {generation}");
+    for args in [
+        vec!["add", "--", files[0], files[1]],
+        vec!["commit", "-q", "-m", &msg, "--", files[0], files[1]],
+        vec!["push", "-q"],
+    ] {
+        let out = std::process::Command::new("git").args(&args).output()?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git {}: {}",
+                args[0],
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn safe_div(a: f64, b: f64) -> f64 {
