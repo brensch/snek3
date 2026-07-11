@@ -1,6 +1,6 @@
 {
-  "exported_unix": 1783781078,
-  "generation": 1782,
+  "exported_unix": 1783781264,
+  "generation": 1783,
   "note": "auto-committed by snek-train at checkpoint save; must ship with matching crates/snek-tch",
   "source_run": "snek3-21",
   "trunk_blocks": 8,
