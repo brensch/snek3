@@ -237,6 +237,63 @@ pub fn candidates(board: &Board, i: usize) -> Vec<Move> {
     v
 }
 
+/// One move for snake `me` by a cheap, deterministic 1-ply greedy over the
+/// heuristic's leaf evaluation: for each of `me`'s safe candidates, step the
+/// board once (me takes the candidate; every other snake takes its own first
+/// safe candidate) and keep the move that maximises `me`'s evaluated value.
+///
+/// No tree and no rollouts — a handful of flood-fills per call — so it is cheap
+/// enough to evaluate at every node of the net's search as an in-tree opponent
+/// model, while still playing coherent space-control. Deterministic: fixed
+/// candidate order, ties break to the lowest move index. Uses the food-free
+/// [`Board::step`] the search uses, so it matches the lookahead exactly.
+pub fn greedy_move(kind: Baseline, board: &Board, me: usize, draw_value: f32) -> Move {
+    let engine = kind.engine();
+    if board.is_terminal() || me >= board.snakes.len() || !board.snakes[me].alive() {
+        return Move::Up;
+    }
+    let cands_for = |i: usize| -> Vec<Move> {
+        let c = if engine.prune_headon {
+            voronoi::safe_candidates(board, i)
+        } else {
+            candidates(board, i)
+        };
+        if c.is_empty() {
+            candidates(board, i)
+        } else {
+            c
+        }
+    };
+    let my_cands = cands_for(me);
+    if my_cands.len() == 1 {
+        return my_cands[0];
+    }
+    let n = board.snakes.len();
+    // Each opponent's assumed reply: its own first safe candidate. Cheap and
+    // fixed, so the greedy is a genuine (if shallow) space-control choice
+    // rather than an assumption that opponents stand still.
+    let mut opp_move = [Move::Up; MAX_SNAKES];
+    for (j, slot) in opp_move.iter_mut().enumerate().take(n) {
+        if j != me && board.snakes[j].alive() {
+            *slot = cands_for(j)[0];
+        }
+    }
+    let mut best = my_cands[0];
+    let mut best_val = f32::NEG_INFINITY;
+    for &m in &my_cands {
+        let mut nb = board.clone();
+        let mut moves = opp_move;
+        moves[me] = m;
+        nb.step(&moves[..n]);
+        let v = (engine.eval)(&nb, draw_value)[me];
+        if v > best_val {
+            best_val = v;
+            best = m;
+        }
+    }
+    best
+}
+
 /// Terminal scoring shared by every leaf eval: winner +1, losers −1, draw
 /// `draw_value` (matches the net search's convention). None for live boards.
 pub(crate) fn terminal_values(board: &Board, draw_value: f32) -> Option<[f32; MAX_SNAKES]> {

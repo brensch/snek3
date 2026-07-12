@@ -1020,6 +1020,7 @@ fn rig_seats(
                     0.0, // league play: no root exploration noise
                     cfg.dirichlet_alpha,
                     rng.gen(),
+                    None, // arena heuristics are whole-agent seats, not in-tree models
                 )));
             }
             None => {

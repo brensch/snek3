@@ -34,6 +34,11 @@ struct BoardSnap {
     snakes: Vec<SnakeSnap>,
     food: Vec<[i8; 2]>,
     hazards: Vec<[i8; 2]>,
+    /// Heuristic-seat bitmask, so a game that started with sparring partners
+    /// keeps them (and its training-exclusion) across a pause. Absent in old
+    /// snapshots -> 0 (pure net-vs-net).
+    #[serde(default)]
+    heur_mask: u8,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -73,6 +78,7 @@ impl BoardSnap {
                 .collect(),
             food: pts(&b.food),
             hazards: pts(&b.hazards),
+            heur_mask: b.heur_mask,
         }
     }
 
@@ -93,6 +99,7 @@ impl BoardSnap {
         }
         board.food = to_points(&self.food);
         board.hazards = to_points(&self.hazards);
+        board.heur_mask = self.heur_mask;
         board
     }
 }

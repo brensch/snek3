@@ -13,6 +13,10 @@ use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use snek_core::{Board, Move, MAX_SNAKES};
 
+/// Sentinel in `Node::heur_cand`: this seat is net-controlled (PUCT-selected),
+/// not a heuristic sparring partner whose move is forced.
+const NOT_HEUR: u8 = u8::MAX;
+
 struct Node {
     board: Board,
     terminal: bool,
@@ -23,6 +27,13 @@ struct Node {
     prior: [[f32; MAXC]; MAX_SNAKES],
     nvisit: [[f32; MAXC]; MAX_SNAKES],
     wsum: [[f32; MAXC]; MAX_SNAKES],
+    /// For a heuristic-controlled seat, the fixed candidate index its sparring
+    /// policy picks at this node's board (computed once at expansion); `NOT_HEUR`
+    /// for net seats. Forcing this move — instead of PUCT-selecting it — makes
+    /// the net's search anticipate the real opponent and collapses that seat's
+    /// branching to one child, so simulations aren't split across opponent moves
+    /// the opponent will never make.
+    heur_cand: [u8; MAX_SNAKES],
     children: Vec<(u32, u32)>, // (joint index -> child id); reused via clear()
 }
 
@@ -38,6 +49,7 @@ impl Node {
             prior: [[0.0; MAXC]; MAX_SNAKES],
             nvisit: [[0.0; MAXC]; MAX_SNAKES],
             wsum: [[0.0; MAXC]; MAX_SNAKES],
+            heur_cand: [NOT_HEUR; MAX_SNAKES],
             children: Vec::new(),
         }
     }
@@ -75,6 +87,10 @@ pub(crate) struct Tree {
     /// to the played move cannot (snek3-14 plateaued exactly that way).
     noise_frac: f32,
     noise_alpha: f32,
+    /// The sparring-partner policy used to force heuristic seats' moves in-tree.
+    /// `None` when no seat is heuristic; the same policy is played for real in
+    /// the game, so the search models the exact opponent it faces.
+    heur_kind: Option<snek_heuristic::Baseline>,
     rng: Xoshiro256PlusPlus,
     pending: Option<usize>,
     path: Vec<Edge>,
@@ -92,6 +108,7 @@ impl Tree {
         noise_frac: f32,
         noise_alpha: f32,
         noise_seed: u64,
+        heur_kind: Option<snek_heuristic::Baseline>,
     ) -> Self {
         let mut nodes = Vec::with_capacity(cap);
         for _ in 0..cap {
@@ -107,6 +124,7 @@ impl Tree {
             draw,
             noise_frac,
             noise_alpha,
+            heur_kind,
             rng: Xoshiro256PlusPlus::seed_from_u64(noise_seed),
             pending: None,
             path: Vec::with_capacity(64),
@@ -161,28 +179,33 @@ impl Tree {
         let mut joint = 0u32;
         for i in 0..self.n {
             let k = node.ncand[i];
-            let total_n: f32 = node.nvisit[i][..k].iter().sum();
-            let sqrt_total = total_n.max(1.0).sqrt();
-            let has_prior = node.prior[i][..k].iter().any(|&p| p > EPS);
-            let mut best_a = 0usize;
-            let mut best = f32::NEG_INFINITY;
-            for a in 0..k {
-                if has_prior && node.prior[i][a] <= EPS {
-                    continue;
+            // Heuristic seat: its move is fixed by the sparring policy (cached at
+            // expansion), so skip PUCT entirely — the search follows the real
+            // opponent down one branch instead of splitting simulations across
+            // moves it will never make.
+            let best_a = if node.heur_cand[i] != NOT_HEUR {
+                (node.heur_cand[i] as usize).min(k.saturating_sub(1))
+            } else {
+                let total_n: f32 = node.nvisit[i][..k].iter().sum();
+                let sqrt_total = total_n.max(1.0).sqrt();
+                let has_prior = node.prior[i][..k].iter().any(|&p| p > EPS);
+                let mut best_a = 0usize;
+                let mut best = f32::NEG_INFINITY;
+                for a in 0..k {
+                    if has_prior && node.prior[i][a] <= EPS {
+                        continue;
+                    }
+                    let n_a = node.nvisit[i][a];
+                    let q = if n_a > 0.0 { node.wsum[i][a] / n_a } else { 0.0 };
+                    let u = self.c_puct * node.prior[i][a] * sqrt_total / (1.0 + n_a);
+                    let score = q + u;
+                    if score > best {
+                        best = score;
+                        best_a = a;
+                    }
                 }
-                let n_a = node.nvisit[i][a];
-                let q = if n_a > 0.0 {
-                    node.wsum[i][a] / n_a
-                } else {
-                    0.0
-                };
-                let u = self.c_puct * node.prior[i][a] * sqrt_total / (1.0 + n_a);
-                let score = q + u;
-                if score > best {
-                    best = score;
-                    best_a = a;
-                }
-            }
+                best_a
+            };
             action[i] = best_a as u8;
             joint += best_a as u32 * strides[i];
         }
@@ -263,6 +286,29 @@ impl Tree {
         let n = self.n;
         let board = self.nodes[id].board.clone();
         for i in 0..n {
+            // A heuristic-controlled seat's move is forced by the sparring
+            // policy, not searched: give it a single candidate — the greedy move
+            // itself — so the tree steps exactly what the real game plays and its
+            // branching collapses to one child. Using the move directly (not an
+            // index into the net search's candidate list) means the two
+            // candidate definitions never have to agree.
+            if board.is_heuristic_seat(i) && board.snakes[i].alive() {
+                if let Some(kind) = self.heur_kind {
+                    let mv = snek_heuristic::greedy_move(kind, &board, i, self.draw);
+                    let node = &mut self.nodes[id];
+                    node.ncand[i] = 1;
+                    node.cand[i] = [mv.index() as u8; MAXC];
+                    node.prior[i] = {
+                        let mut p = [0.0f32; MAXC];
+                        p[0] = 1.0;
+                        p
+                    };
+                    node.nvisit[i] = [0.0; MAXC];
+                    node.wsum[i] = [0.0; MAXC];
+                    node.heur_cand[i] = 0;
+                    continue;
+                }
+            }
             let (cand, k) = candidates(&board, i);
             let masked = mask_obvious_immediate_deaths(&board, i, &policy[i * 4..i * 4 + 4]);
             let mut p = [0.0f32; MAXC];
@@ -297,7 +343,8 @@ impl Tree {
             }
             // Root only: AlphaZero Dirichlet exploration over the masked-legal
             // candidates, so the search (and therefore the visit-count target)
-            // is forced to try moves the raw prior dislikes.
+            // is forced to try moves the raw prior dislikes. (Heuristic seats
+            // took the `continue` above and never reach here.)
             if id == 0 && board.snakes[i].alive() {
                 mix_root_dirichlet(&mut p, k, self.noise_frac, self.noise_alpha, &mut self.rng);
             }
@@ -307,6 +354,7 @@ impl Tree {
             node.prior[i] = p;
             node.nvisit[i] = [0.0; MAXC];
             node.wsum[i] = [0.0; MAXC];
+            node.heur_cand[i] = NOT_HEUR;
         }
         self.nodes[id].expanded = true;
 
@@ -367,7 +415,7 @@ mod tests {
     fn expanded_root(noise_frac: f32, seed: u64) -> Tree {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(3);
         let board = standard_start(11, 11, 4, &mut rng);
-        let mut tree = Tree::new(4, 11, 11, 1.5, -0.25, 64, noise_frac, 0.3, seed);
+        let mut tree = Tree::new(4, 11, 11, 1.5, -0.25, 64, noise_frac, 0.3, seed, None);
         tree.reset(&board);
         tree.select();
         assert!(tree.pending_board().is_some(), "fresh root must be pending");
@@ -404,7 +452,7 @@ mod tests {
         // draw must differ, so exploration varies turn to turn.
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(3);
         let board = standard_start(11, 11, 4, &mut rng);
-        let mut tree = Tree::new(4, 11, 11, 1.5, -0.25, 64, 0.5, 0.3, 11);
+        let mut tree = Tree::new(4, 11, 11, 1.5, -0.25, 64, 0.5, 0.3, 11, None);
         let policy = vec![0.25f32; 16];
         let value = vec![0.0f32; 4];
         let mut draws = Vec::new();
@@ -415,6 +463,63 @@ mod tests {
             draws.push((0..4).map(|i| tree.root_prior(i)).collect::<Vec<_>>());
         }
         assert_ne!(draws[0], draws[1], "root noise must be fresh per search");
+    }
+
+    fn run_uniform(tree: &mut Tree, sims: usize) {
+        let policy = vec![0.25f32; 16];
+        let value = vec![0.0f32; 4];
+        for _ in 0..sims {
+            tree.select();
+            if tree.pending_board().is_some() {
+                tree.expand_backup(&policy, &value);
+            }
+        }
+    }
+
+    #[test]
+    fn heuristic_seat_is_forced_to_greedy_move() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(7);
+        let mut board = standard_start(11, 11, 4, &mut rng);
+        board.heur_mask = 0b0010; // seat 1 is the sparring partner
+        let kind = snek_heuristic::Baseline::Voronoi;
+        let mut tree = Tree::new(4, 11, 11, 1.5, -0.25, 4096, 0.25, 0.3, 1, Some(kind));
+        tree.reset(&board);
+        run_uniform(&mut tree, 64);
+
+        let mut pol = vec![0.0f32; 16];
+        let mut val = vec![0.0f32; 4];
+        tree.root_targets(&mut pol, &mut val);
+
+        // Seat 1's visit policy is one-hot on exactly the greedy move: every
+        // simulation forced that seat down the same branch.
+        let forced = snek_heuristic::greedy_move(kind, &board, 1, -0.25).index();
+        for m in 0..4 {
+            if m == forced {
+                assert!(pol[4 + m] > 0.99, "forced move should hold ~all visits");
+            } else {
+                assert_eq!(pol[4 + m], 0.0, "non-forced seat-1 move got visits");
+            }
+        }
+        // The net seat (0) is not collapsed to one move — it explores.
+        assert!((0..4).filter(|&m| pol[m] > 0.0).count() >= 1);
+    }
+
+    #[test]
+    fn no_heuristic_seat_leaves_search_unchanged() {
+        // With heur_mask == 0 the forced-move path never triggers, so a tree
+        // built with a heur_kind behaves identically to one without.
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(3);
+        let board = standard_start(11, 11, 4, &mut rng);
+        let run = |kind: Option<snek_heuristic::Baseline>| {
+            let mut t = Tree::new(4, 11, 11, 1.5, -0.25, 4096, 0.0, 0.3, 5, kind);
+            t.reset(&board);
+            run_uniform(&mut t, 48);
+            let mut p = vec![0.0f32; 16];
+            let mut v = vec![0.0f32; 4];
+            t.root_targets(&mut p, &mut v);
+            p
+        };
+        assert_eq!(run(None), run(Some(snek_heuristic::Baseline::Voronoi)));
     }
 
     #[test]

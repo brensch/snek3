@@ -99,6 +99,29 @@ pub enum GenOutcome {
 /// finished games are materialised into whole-game training samples and a random
 /// `sample_games` of them are returned for the dashboard; on interrupt everything
 /// is left in `state` for a seamless resume.
+/// Choose the heuristic-seat bitmask for a fresh game. With probability
+/// `heuristic_opponent_prob` (and only when a valid heuristic kind is set) it
+/// seats `heuristic_opponent_seats` sparring partners on distinct random seats,
+/// always leaving at least one net seat (the only seat that yields training
+/// data). Returns 0 for a pure net-vs-net game — the default and every
+/// pre-existing run.
+pub(super) fn assign_heur_seats<R: rand::Rng>(cfg: &RunConfig, rng: &mut R) -> u8 {
+    let n = cfg.num_snakes;
+    if cfg.heuristic_opponent().is_none() || rng.gen::<f64>() >= cfg.heuristic_opponent_prob {
+        return 0;
+    }
+    let k = cfg.heuristic_opponent_seats.clamp(1, n.saturating_sub(1));
+    // Partial Fisher–Yates over seat indices for k distinct seats.
+    let mut seats: Vec<usize> = (0..n).collect();
+    let mut mask = 0u8;
+    for i in 0..k {
+        let j = i + rng.gen_range(0..(n - i));
+        seats.swap(i, j);
+        mask |= 1u8 << seats[i];
+    }
+    mask
+}
+
 pub fn generate(
     net: &SelfPlayNet<'_>,
     cfg: &RunConfig,
@@ -163,7 +186,9 @@ pub fn generate(
     // Too few (the slot count grew, or we dropped some above): fill the empty slots
     // with fresh starts.
     while state.boards.len() < count {
-        state.boards.push(standard_start(board, board, n, &mut init_rng));
+        let mut b = standard_start(board, board, n, &mut init_rng);
+        b.heur_mask = assign_heur_seats(cfg, &mut init_rng);
+        state.boards.push(b);
         state.turns.push(0);
         state.rec.push(Vec::new());
     }

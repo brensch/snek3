@@ -25,6 +25,13 @@
 //!   11 food
 //!   12 hazards
 //!   13 board_mask           (1 over real board cells)
+//!
+//! The observation is deliberately *opponent-type agnostic*: it encodes the
+//! board, not who is playing. A heuristic sparring partner in self-play (see
+//! `Board::heur_mask`) is shaped into training only through the positions and
+//! outcomes it produces — never through an input flag, which the net could not
+//! see at deployment and would only let it compartmentalise an anti-heuristic
+//! policy it can't use in the field.
 
 use crate::Board;
 

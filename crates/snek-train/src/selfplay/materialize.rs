@@ -41,6 +41,11 @@ pub(super) fn game_sample_count(g: &GameJson, n: usize) -> usize {
     let mut count = 0;
     for f in g.frames.iter().take(steps) {
         for s in 0..n {
+            // Heuristic sparring seats are never trained on (we learn to beat
+            // them, not imitate them), so they contribute no samples.
+            if (g.heur_mask >> s) & 1 == 1 {
+                continue;
+            }
             if f.snakes.get(s).is_some_and(|x| x.alive) {
                 count += 1;
             }
@@ -104,6 +109,13 @@ pub(super) fn materialize_game(
     for f in g.frames.iter().take(steps) {
         let bd = board_from_frame(f);
         for s in 0..n {
+            // Never emit a training sample for a heuristic sparring seat (learn
+            // to beat it, not imitate it). The opponent's influence reaches the
+            // net purely through the board positions and game outcome it caused,
+            // never through an opponent-type input.
+            if (g.heur_mask >> s) & 1 == 1 {
+                continue;
+            }
             let Some(sn) = f.snakes.get(s) else { continue };
             if !sn.alive {
                 continue;
