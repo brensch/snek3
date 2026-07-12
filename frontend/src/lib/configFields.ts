@@ -32,4 +32,7 @@ export const configFields: Array<{ key: keyof RunConfig; label: string; hint?: s
   { key: "league_entrant_gens", label: "League entrant", hint: "every N gens · 0 off" },
   { key: "eval_sims", label: "League sims", hint: "per move, CPU" },
   { key: "league_games", label: "League games", hint: "concurrent arena games" },
+  { key: "heuristic_opponent_prob", label: "Voronoi prob", hint: "frac of self-play games seating a sparring partner" },
+  { key: "heuristic_opponent_seats", label: "Voronoi seats", hint: "sparring partners per game" },
+  { key: "heuristic_opponent_sims", label: "Voronoi sims", hint: "sparring MCTS strength · 0 = 1-ply greedy" },
 ];

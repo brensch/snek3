@@ -41,6 +41,12 @@ export type RunConfig = {
   league_entrant_gens: number;
   eval_sims: number;
   league_games: number;
+  // Voronoi sparring partners in self-play (opponent diversity).
+  heuristic_opponent_prob: number;
+  heuristic_opponent_seats: number;
+  heuristic_opponent_kind: string;
+  // MCTS sims the sparring partner plays at (0 = 1-ply greedy).
+  heuristic_opponent_sims: number;
 };
 
 // The JSON shape returned by GET /api/state. `phase` is the Phase enum value
