@@ -109,10 +109,23 @@ pub struct RunConfig {
     pub heuristic_opponent_seats: usize,
     /// Which built-in heuristic the sparring partners play: "voronoi" (the
     /// strong space-control agent) or "floodfill". Ignored when the probability
-    /// is 0. The same policy drives both the actual opponent moves and the net
-    /// search's in-tree model of them, so search and reality stay consistent.
+    /// is 0.
     #[serde(default = "default_heuristic_opponent_kind")]
     pub heuristic_opponent_kind: String,
+    /// MCTS simulations the sparring partner runs for the move it actually
+    /// plays (and which the net's search forces at its root). Voronoi sims are
+    /// cheap CPU flood-fills (~100k/s/core) and run while the GPU is busy on the
+    /// net's forwards, so a budget comparable to the net's own `sims` is nearly
+    /// free — turning the opponent from a 1-ply pushover into a real challenge.
+    /// 0 falls back to the 1-ply greedy (the cheapest possible). Deeper tree
+    /// nodes always use the 1-ply greedy regardless (a per-node MCTS is
+    /// infeasible); only the played/root move gets the full budget.
+    #[serde(default = "default_heuristic_opponent_sims")]
+    pub heuristic_opponent_sims: usize,
+}
+
+fn default_heuristic_opponent_sims() -> usize {
+    800
 }
 
 fn default_heuristic_opponent_seats() -> usize {
@@ -228,6 +241,7 @@ impl Default for RunConfig {
             heuristic_opponent_prob: 0.0,
             heuristic_opponent_seats: default_heuristic_opponent_seats(),
             heuristic_opponent_kind: default_heuristic_opponent_kind(),
+            heuristic_opponent_sims: default_heuristic_opponent_sims(),
         }
     }
 }

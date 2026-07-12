@@ -91,6 +91,12 @@ pub(crate) struct Tree {
     /// `None` when no seat is heuristic; the same policy is played for real in
     /// the game, so the search models the exact opponent it faces.
     heur_kind: Option<snek_heuristic::Baseline>,
+    /// The heuristic seat's *strong* (full-MCTS) move on the root board,
+    /// precomputed per turn and forced at the root so the net's search anticipates
+    /// the exact move it will actually face. `None` per seat = fall back to the
+    /// cheap 1-ply greedy (also used at every non-root node, where a full search
+    /// is infeasible).
+    heur_root: [Option<Move>; MAX_SNAKES],
     rng: Xoshiro256PlusPlus,
     pending: Option<usize>,
     path: Vec<Edge>,
@@ -125,6 +131,7 @@ impl Tree {
             noise_frac,
             noise_alpha,
             heur_kind,
+            heur_root: [None; MAX_SNAKES],
             rng: Xoshiro256PlusPlus::seed_from_u64(noise_seed),
             pending: None,
             path: Vec::with_capacity(64),
@@ -137,6 +144,14 @@ impl Tree {
         self.len = 1;
         self.pending = None;
         self.path.clear();
+        self.heur_root = [None; MAX_SNAKES];
+    }
+
+    /// Set the heuristic seats' precomputed strong (full-MCTS) moves for this
+    /// turn's root board. Call after [`reset`](Self::reset), before searching.
+    /// Seats left `None` (and every non-root node) use the cheap 1-ply greedy.
+    pub(crate) fn set_heur_root(&mut self, moves: [Option<Move>; MAX_SNAKES]) {
+        self.heur_root = moves;
     }
 
     /// The board of the leaf awaiting a network evaluation, if any. The play loop
@@ -294,7 +309,14 @@ impl Tree {
             // candidate definitions never have to agree.
             if board.is_heuristic_seat(i) && board.snakes[i].alive() {
                 if let Some(kind) = self.heur_kind {
-                    let mv = snek_heuristic::greedy_move(kind, &board, i, self.draw);
+                    // Root: the precomputed strong (full-MCTS) move it will
+                    // actually play, so the net's root policy is a best response
+                    // to the real opponent. Deeper nodes: the cheap 1-ply greedy
+                    // (a per-node search is infeasible).
+                    let mv = match (id == 0).then(|| self.heur_root[i]).flatten() {
+                        Some(mv) => mv,
+                        None => snek_heuristic::greedy_move(kind, &board, i, self.draw),
+                    };
                     let node = &mut self.nodes[id];
                     node.ncand[i] = 1;
                     node.cand[i] = [mv.index() as u8; MAXC];

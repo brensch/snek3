@@ -237,6 +237,30 @@ pub fn candidates(board: &Board, i: usize) -> Vec<Move> {
     v
 }
 
+/// One move for snake `me` from a real MCTS search of `sims` simulations — the
+/// same decoupled-UCT engine the arena/serving baseline uses, so it is a
+/// genuinely strong space-control opponent, not the 1-ply [`greedy_move`].
+///
+/// Deterministic (the sim budget is the only stopping condition — no wall clock),
+/// which keeps self-play reproducible. `sims == 0` falls back to [`greedy_move`].
+/// Costs ~`sims / 100k` seconds of one CPU core; run it while the GPU is busy on
+/// the net's forwards and a budget comparable to the net's own sim count is
+/// nearly free.
+pub fn strong_move(kind: Baseline, board: &Board, me: usize, sims: usize, draw_value: f32) -> Move {
+    if sims == 0 {
+        return greedy_move(kind, board, me, draw_value);
+    }
+    let cfg = HeuristicConfig {
+        max_sims: sims,
+        draw_value,
+        ..HeuristicConfig::default()
+    };
+    // A far deadline so the sim count is the sole limit (deterministic play).
+    let deadline = Instant::now() + std::time::Duration::from_secs(3600);
+    let dec = baseline_move_until(kind, &cfg, board, me, deadline);
+    Move::from_index(dec.move_index)
+}
+
 /// One move for snake `me` by a cheap, deterministic 1-ply greedy over the
 /// heuristic's leaf evaluation: for each of `me`'s safe candidates, step the
 /// board once (me takes the candidate; every other snake takes its own first

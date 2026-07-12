@@ -16,7 +16,8 @@ use crate::sample::{frame_from_board, FrameJson, GameJson};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
-use snek_core::{encode_into, obs_side, standard_start, Board, Move, NUM_CHANNELS};
+use rayon::prelude::*;
+use snek_core::{encode_into, obs_side, standard_start, Board, Move, MAX_SNAKES, NUM_CHANNELS};
 use snek_tch::cudagraph::GraphedForward;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -73,6 +74,7 @@ pub(super) fn play_chunk(
     // per-board via `heur_mask`, so every tree carries it; a pure net-vs-net
     // board simply never triggers a forced move.
     let heur_kind = cfg.heuristic_opponent();
+    let heur_sims = cfg.heuristic_opponent_sims;
 
     let mut trees: Vec<Tree> = (0..games)
         .map(|_| {
@@ -123,6 +125,41 @@ pub(super) fn play_chunk(
     {
         for g in 0..games {
             trees[g].reset(&bslice[g]);
+        }
+
+        // Precompute each heuristic seat's *strong* (full-MCTS) move for this
+        // turn, in parallel across games (read-only on the boards; the CPU is
+        // idle before the GPU search below). Forced at each tree's root so the
+        // net's search is a best response to the exact move it will face, and
+        // replayed verbatim in the play phase. Empty when no seat is heuristic.
+        let heur_moves: Vec<[Option<Move>; MAX_SNAKES]> = match heur_kind {
+            Some(kind) => {
+                let boards: &[Board] = bslice;
+                (0..games)
+                    .into_par_iter()
+                    .map(|g| {
+                        let mut mv = [None; MAX_SNAKES];
+                        for s in 0..n {
+                            if boards[g].is_heuristic_seat(s) && boards[g].snakes[s].alive() {
+                                mv[s] = Some(snek_heuristic::strong_move(
+                                    kind,
+                                    &boards[g],
+                                    s,
+                                    heur_sims,
+                                    cfg.draw_value,
+                                ));
+                            }
+                        }
+                        mv
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        for (g, tree) in trees.iter_mut().enumerate() {
+            if let Some(&m) = heur_moves.get(g) {
+                tree.set_heur_root(m);
+            }
         }
 
         for _ in 0..sims {
@@ -185,12 +222,11 @@ pub(super) fn play_chunk(
             // visit policy — sampled (temperature 1) for the opening turns,
             // strict argmax after.
             for s in 0..n {
-                // A heuristic sparring seat plays its own policy — the exact same
-                // greedy the tree modelled at the root — so the game reality
-                // matches the search's opponent model. Its recorded play-policy
-                // is one-hot (never trained on anyway; excluded at materialise).
-                if let Some(kind) = heur_kind.filter(|_| bslice[g].is_heuristic_seat(s)) {
-                    let mv = snek_heuristic::greedy_move(kind, &bslice[g], s, cfg.draw_value);
+                // A heuristic sparring seat plays the exact strong move the tree
+                // forced at its root, so game reality matches the search's model.
+                // Its recorded play-policy is one-hot (never trained on anyway;
+                // excluded at materialise).
+                if let Some(mv) = heur_moves.get(g).and_then(|m| m[s]) {
                     play_pols[s] = [0.0; 4];
                     play_pols[s][mv.index()] = 1.0;
                     actions[s] = mv;
