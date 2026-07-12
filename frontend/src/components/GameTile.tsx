@@ -40,6 +40,12 @@ export function GameTile({
   if (len === 0) return null;
   const idx = Math.min(phase, len - 1);
   const frame = frames[idx];
+
+  // Which seats a built-in heuristic (voronoi) plays this game, from the
+  // per-game bitmask. Empty for ordinary net-vs-net self-play and league games.
+  const isHeuristic = (i: number): boolean => ((game.heurMask >> i) & 1) === 1;
+  const heuristicSeats = frame.snakes.map((_, i) => isHeuristic(i));
+  const voronoiSeats = heuristicSeats.flatMap((h, i) => (h ? [i] : []));
   const seek = (i: number) => {
     setPlaying(false);
     setPhase(Math.max(0, Math.min(len - 1, i)));
@@ -68,10 +74,11 @@ export function GameTile({
         length: s.body.length,
         body: s.body.map(pt),
         chosen_move: MOVES[s.chosenMove] ?? s.chosenMove,
+        heuristic: isHeuristic(i) ? "voronoi" : false,
         search_policy: Object.fromEntries(MOVES.map((m, j) => [m, Number((s.policy[j] ?? 0).toFixed(4))])),
         value: Number(s.value.toFixed(4)),
       })),
-      game: { winner: game.winner, num_turns: game.numTurns },
+      game: { winner: game.winner, num_turns: game.numTurns, heur_mask: game.heurMask },
     };
     try {
       await navigator.clipboard.writeText(JSON.stringify(doc, null, 2));
@@ -99,11 +106,32 @@ export function GameTile({
           highlight={hovered}
           onHoverSnake={setHovered}
           colors={colors}
+          heuristic={heuristicSeats}
         />
         {hovered != null && frame.snakes[hovered] && (
           <PolicyPopover snake={frame.snakes[hovered]} index={hovered} color={colors?.[hovered]} />
         )}
       </div>
+
+      {voronoiSeats.length > 0 && (
+        <div className="mt-1 flex items-center gap-1.5 text-[10px] text-ink-3">
+          <span className="inline-block h-2 w-2 rounded-full border border-dashed border-white/80" />
+          <span>
+            voronoi (heuristic):{" "}
+            {voronoiSeats.map((i, k) => (
+              <span key={i}>
+                {k > 0 && ", "}
+                <span
+                  className="font-medium"
+                  style={{ color: colors?.[i] ?? snakeColor(i) }}
+                >
+                  snake {i}
+                </span>
+              </span>
+            ))}
+          </span>
+        </div>
+      )}
 
       <div className="mt-1.5 flex min-w-0 items-center gap-1 text-[10px] text-ink-3">
         <button onClick={() => setPlaying((p) => !p)} className="w-4 shrink-0 text-ink-2">
@@ -151,7 +179,14 @@ export function GameTile({
             onMouseLeave={() => setHovered(null)}
             className={`${statCols} rounded px-0.5 text-[10px] ${hovered === i ? "bg-inset" : ""} ${s.alive ? "" : "opacity-40"}`}
           >
-            <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: colors?.[i] ?? snakeColor(i) }} />
+            <span
+              className="h-2 w-2 shrink-0 rounded-full"
+              style={{
+                background: colors?.[i] ?? snakeColor(i),
+                boxShadow: isHeuristic(i) ? "0 0 0 1.5px #fff" : undefined,
+              }}
+              title={isHeuristic(i) ? "voronoi (heuristic sparring partner)" : undefined}
+            />
             <ValueBar v={s.value} showValue={hovered === i} />
             <span className="text-right font-mono tabular-nums text-ink-3" title={`length ${s.body.length}`}>
               {s.body.length}

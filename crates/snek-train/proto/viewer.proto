@@ -131,6 +131,11 @@ message Game {
   repeated Frame frames = 1;
   int32 winner = 2;   // winning snake index, -1 for a draw
   uint32 num_turns = 3;
+  // Bitmask of seats controlled by a built-in heuristic sparring partner this
+  // game (bit i set => snake index i is the heuristic, not the learning net).
+  // 0 for ordinary net-vs-net self-play. Lets the replay viewer mark which
+  // snake is voronoi.
+  uint32 heur_mask = 4;
 }
 
 message GameFile {

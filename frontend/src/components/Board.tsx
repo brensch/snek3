@@ -18,6 +18,10 @@ type Props = {
   onHoverSnake?: (index: number | null) => void;
   /** Per-seat color override (league: stable player colors); defaults to seat order. */
   colors?: string[];
+  /** Per-seat flag: seat `i` is a built-in heuristic sparring partner (voronoi),
+   * not the learning net. Marked with a dashed ring around the head so it can be
+   * tracked on the board. Length aligns with `snakes`; omitted/false = net seat. */
+  heuristic?: boolean[];
 };
 
 // Battlesnake coords put (0,0) bottom-left with y increasing upward, so we flip
@@ -33,6 +37,7 @@ export function Board({
   highlight = null,
   onHoverSnake,
   colors,
+  heuristic,
 }: Props) {
   if (!width || !height) return null;
   const W = width * cell;
@@ -103,6 +108,20 @@ export function Board({
               stroke={emphasized ? "#fff" : "#141413"}
               strokeWidth={emphasized ? 2.5 : 1.5}
             />
+            {heuristic?.[i] && (
+              <circle
+                cx={cx(head.x)}
+                cy={cy(head.y)}
+                r={cell * 0.46}
+                fill="none"
+                stroke="#fff"
+                strokeWidth={1.5}
+                strokeDasharray="3 2.5"
+                opacity={0.9}
+              >
+                <title>voronoi (heuristic sparring partner)</title>
+              </circle>
+            )}
           </g>
         );
       })}
