@@ -139,6 +139,13 @@ pub struct Board {
     pub min_food: i32,
     /// Percent chance per turn to spawn one extra food once at/above min (15).
     pub food_spawn_chance: i32,
+    /// Bitmask over seat indices: bit `i` set means seat `i` is controlled by a
+    /// built-in heuristic (a self-play sparring partner), not the learning net.
+    /// Rides along through `clone_from` so tree-node boards and re-encoded
+    /// frames stay consistent. 0 for ordinary net-vs-net play and all serving.
+    /// Read by the encoder (the `opp_heuristic` plane) and the search (to force
+    /// the heuristic seat's move instead of PUCT-selecting it).
+    pub heur_mask: u8,
 }
 
 impl Board {
@@ -153,7 +160,14 @@ impl Board {
             hazard_damage: 14,
             min_food: 1,
             food_spawn_chance: 15,
+            heur_mask: 0,
         }
+    }
+
+    /// True if seat `i` is controlled by a built-in heuristic this game.
+    #[inline]
+    pub fn is_heuristic_seat(&self, i: usize) -> bool {
+        (self.heur_mask >> i) & 1 == 1
     }
 
     /// Construct a snake from an ordered list of body points (head first) and

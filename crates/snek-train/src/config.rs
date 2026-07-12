@@ -93,6 +93,34 @@ pub struct RunConfig {
     /// re-added without corrupting history.
     #[serde(default)]
     pub league_api_players: Vec<String>,
+    /// Probability that a self-play game seats one or more built-in heuristic
+    /// opponents ("sparring partners") instead of being pure net-vs-net. Pure
+    /// self-play only ever trains the net against its own style, so a strategy
+    /// it never plays (e.g. voronoi space-control) is a permanent blind spot;
+    /// seating the heuristic forces the net to generate winning lines against
+    /// it. 0 disables (pure self-play — the default and all pre-existing runs).
+    #[serde(default)]
+    pub heuristic_opponent_prob: f64,
+    /// When a game is chosen to include heuristic opponents, how many of its
+    /// seats they take (clamped to leave at least one net seat). The rest stay
+    /// net-controlled, so the net still generates net-vs-net data within the
+    /// same game and never over-specialises into an anti-heuristic one-trick.
+    #[serde(default = "default_heuristic_opponent_seats")]
+    pub heuristic_opponent_seats: usize,
+    /// Which built-in heuristic the sparring partners play: "voronoi" (the
+    /// strong space-control agent) or "floodfill". Ignored when the probability
+    /// is 0. The same policy drives both the actual opponent moves and the net
+    /// search's in-tree model of them, so search and reality stay consistent.
+    #[serde(default = "default_heuristic_opponent_kind")]
+    pub heuristic_opponent_kind: String,
+}
+
+fn default_heuristic_opponent_seats() -> usize {
+    1
+}
+
+fn default_heuristic_opponent_kind() -> String {
+    "voronoi".to_string()
 }
 
 fn default_sample_turns() -> usize {
@@ -141,6 +169,16 @@ fn default_lr_half_life_samples() -> f64 {
 const GPU_PIPELINE_BUFFERS: usize = 2;
 
 impl RunConfig {
+    /// The heuristic sparring partner to seat in self-play, or `None` when the
+    /// feature is off (`heuristic_opponent_prob == 0`) or the kind string is
+    /// unrecognised. Parsed once per generation, not per game.
+    pub fn heuristic_opponent(&self) -> Option<snek_heuristic::Baseline> {
+        if self.heuristic_opponent_prob <= 0.0 {
+            return None;
+        }
+        snek_heuristic::Baseline::parse(&self.heuristic_opponent_kind)
+    }
+
     /// Total number of games played concurrently in one self-play generation.
     /// Derived from the GPU batch size rather than configured directly: it is just
     /// enough games to keep the GPU saturated via double buffering.
@@ -187,6 +225,9 @@ impl Default for RunConfig {
             burst_games: default_burst_games(),
             burst_sims: 0,
             league_api_players: Vec::new(),
+            heuristic_opponent_prob: 0.0,
+            heuristic_opponent_seats: default_heuristic_opponent_seats(),
+            heuristic_opponent_kind: default_heuristic_opponent_kind(),
         }
     }
 }

@@ -69,6 +69,10 @@ pub(super) fn play_chunk(
     let mut rng =
         Xoshiro256PlusPlus::seed_from_u64(seed ^ 0x9E37_79B9u64.wrapping_mul(chunk as u64 + 1));
     let cap = sims + 4;
+    // The sparring policy for this run (None when the feature is off). Gating is
+    // per-board via `heur_mask`, so every tree carries it; a pure net-vs-net
+    // board simply never triggers a forced move.
+    let heur_kind = cfg.heuristic_opponent();
 
     let mut trees: Vec<Tree> = (0..games)
         .map(|_| {
@@ -82,6 +86,7 @@ pub(super) fn play_chunk(
                 cfg.dirichlet_frac,
                 cfg.dirichlet_alpha,
                 rng.gen(),
+                heur_kind,
             )
         })
         .collect();
@@ -180,6 +185,17 @@ pub(super) fn play_chunk(
             // visit policy — sampled (temperature 1) for the opening turns,
             // strict argmax after.
             for s in 0..n {
+                // A heuristic sparring seat plays its own policy — the exact same
+                // greedy the tree modelled at the root — so the game reality
+                // matches the search's opponent model. Its recorded play-policy
+                // is one-hot (never trained on anyway; excluded at materialise).
+                if let Some(kind) = heur_kind.filter(|_| bslice[g].is_heuristic_seat(s)) {
+                    let mv = snek_heuristic::greedy_move(kind, &bslice[g], s, cfg.draw_value);
+                    play_pols[s] = [0.0; 4];
+                    play_pols[s][mv.index()] = 1.0;
+                    actions[s] = mv;
+                    continue;
+                }
                 let play =
                     mask_obvious_immediate_deaths(&bslice[g], s, &root_pol[s * 4..s * 4 + 4]);
                 play_pols[s].copy_from_slice(&play);
@@ -229,6 +245,7 @@ pub(super) fn play_chunk(
                     .inflight_turn_sum
                     .fetch_sub(tslice[g] as u64, Ordering::Relaxed);
                 bslice[g] = standard_start(board, board, n, &mut rng);
+                bslice[g].heur_mask = super::assign_heur_seats(cfg, &mut rng);
                 tslice[g] = 0;
                 continue;
             }
@@ -252,6 +269,7 @@ pub(super) fn play_chunk(
                 frames,
                 winner: winner.map(|x| x as i32),
                 num_turns,
+                heur_mask: bslice[g].heur_mask,
             };
             let added = game_sample_count(&game, n);
             shared.recorded.lock().unwrap().push(game);
@@ -277,6 +295,7 @@ pub(super) fn play_chunk(
                 .fetch_sub(tslice[g] as u64, Ordering::Relaxed);
 
             bslice[g] = standard_start(board, board, n, &mut rng);
+            bslice[g].heur_mask = super::assign_heur_seats(cfg, &mut rng);
             tslice[g] = 0;
         }
     }

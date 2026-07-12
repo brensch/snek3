@@ -34,6 +34,13 @@ pub struct GameJson {
     pub winner: Option<i32>,
     #[serde(default)]
     pub num_turns: u32,
+    /// Heuristic-seat bitmask for this game (see `Board::heur_mask`). Drives two
+    /// things at materialisation: those seats are re-encoded with the
+    /// `opp_heuristic` plane set for the net seats facing them, and the heuristic
+    /// seats themselves are **excluded** from training (we learn to beat the
+    /// sparring partner, never to imitate it). 0 for ordinary net-vs-net games.
+    #[serde(default)]
+    pub heur_mask: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
