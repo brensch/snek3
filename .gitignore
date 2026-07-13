@@ -45,3 +45,4 @@ local-vs-lan-game*.json
 local-vs-lan-viewer.log
 local-vs-lan-viewer.pid
 game-seed*.json
+/data/
