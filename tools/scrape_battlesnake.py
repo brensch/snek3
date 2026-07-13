@@ -13,14 +13,14 @@ Pipeline:
 Idempotent: a manifest of seen IDs means re-runs only fetch new games. Run it
 on a loop (default) to keep catching fresh games before they expire.
 
-Storage schema (per game, zstd-compressed JSON):
-  {id,width,height,ruleset,source,turns,
-   snakes:[{id,name,author}],                       # roster, index-aligned
-   frames:[{food:[[x,y]..], snakes:[{body:[[x,y]..],health,alive}..]}..]}
-Everything a trainer needs to re-encode boards, infer each move (head delta
-between frames), and derive outcomes (final alive mask). Cosmetic fields
-(color/head/tail/latency/…) are dropped; bodies overlap heavily frame-to-frame
-so zstd shrinks them hard.
+Output: each game is stored as the trainer's own **GameFile JSON** (zstd),
+directly materialisable into training samples with no adapter — obs re-encoded
+from the bodies, policy = HARD one-hot on the expert's inferred move (head delta;
+AlphaGo's supervised scheme, no label smoothing — data diversity is the
+regulariser), value derived by the trainer from `winner` (last snake alive).
+Deployed long-term on the always-on box (192.168.1.8) via nohup + an @reboot
+cron; compresses through the python `zstandard` module or the `zstd` CLI,
+whichever is present.
 """
 import argparse
 import json
@@ -31,7 +31,23 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-import zstandard as zstd
+# zstd compression, pluggable: prefer the python module, fall back to the `zstd`
+# CLI (so it runs on hosts without the wheel, e.g. Python 3.14 + no pip).
+try:
+    import zstandard as _zstd
+
+    _CCTX = _zstd.ZstdCompressor(level=19)
+
+    def zcompress(b: bytes) -> bytes:
+        return _CCTX.compress(b)
+
+except ImportError:
+    import subprocess
+
+    def zcompress(b: bytes) -> bytes:
+        return subprocess.run(
+            ["zstd", "-19", "-q", "-c"], input=b, stdout=subprocess.PIPE, check=True
+        ).stdout
 
 PLAY = "https://play.battlesnake.com"
 ENGINE = "https://engine.battlesnake.com"
@@ -117,37 +133,84 @@ def sensible(meta, frames, min_turns, min_survivors_at):
     return alive >= 2
 
 
-def strip(meta, frames):
-    """Compact, training-ready form: roster + per-turn food and snake bodies."""
+# Move index <-> head delta, matching snek-core Move (Up=0:+y Down=1:-y Left=2:-x Right=3:+x).
+_DELTA_TO_MOVE = {(0, 1): 0, (0, -1): 1, (-1, 0): 2, (1, 0): 3}
+_UNIFORM = [0.25, 0.25, 0.25, 0.25]
+
+
+def _infer_move(head, nxt):
+    """Move index from head position `head` at turn T to `nxt` at T+1, or None
+    if it isn't a single orthogonal step (data anomaly / off-board fatal move)."""
+    return _DELTA_TO_MOVE.get((nxt[0] - head[0], nxt[1] - head[1]))
+
+
+def to_gamefile(meta, frames):
+    """Convert an engine game to the trainer's own GameFile JSON — directly
+    materialisable into training samples, no adapter needed.
+
+    Policy targets are HARD one-hot on the expert's actual move (AlphaGo's
+    supervised scheme — the diversity of hundreds of snakes across thousands of
+    games is the regulariser, not label smoothing). The value target is derived
+    by the trainer from `winner` (last snake alive) via its usual terminal_value.
+    Dead seats and the terminal frame are skipped at materialise time, so their
+    (unknowable) moves don't matter; genuinely un-inferrable live moves get a
+    uniform target (max-entropy, harmless).
+    """
     g = meta["Game"]
-    roster = [
-        {"id": s.get("ID"), "name": s.get("Name"), "author": s.get("Author")}
-        for s in frames[0].get("Snakes", [])
+    w, h = g.get("Width"), g.get("Height")
+    bodies = [
+        [[[p["X"], p["Y"]] for p in s.get("Body", [])] for s in f.get("Snakes", [])]
+        for f in frames
     ]
     out_frames = []
-    for f in frames:
+    for i, f in enumerate(frames):
+        snakes = []
+        for si, s in enumerate(f.get("Snakes", [])):
+            alive = s.get("Death") is None
+            body = bodies[i][si]
+            mv, pol = 0, _UNIFORM
+            # infer this seat's move from where its head is next turn
+            if alive and i + 1 < len(frames) and body:
+                nxt = bodies[i + 1][si]
+                inferred = _infer_move(body[0], nxt[0]) if nxt else None
+                if inferred is not None:
+                    mv = inferred
+                    pol = [1.0 if k == inferred else 0.0 for k in range(4)]
+            snakes.append(
+                {
+                    "alive": alive,
+                    "body": body,
+                    "health": s.get("Health", 0),
+                    "chosen_move": mv,
+                    "policy": pol,
+                    "play_policy": pol,
+                    "value": 0.0,
+                }
+            )
         out_frames.append(
             {
+                "turn": f.get("Turn", i),
+                "width": w,
+                "height": h,
                 "food": [[p["X"], p["Y"]] for p in f.get("Food", [])],
-                "snakes": [
-                    {
-                        "body": [[p["X"], p["Y"]] for p in s.get("Body", [])],
-                        "health": s.get("Health", 0),
-                        "alive": s.get("Death") is None,
-                    }
-                    for s in f.get("Snakes", [])
-                ],
+                "hazards": [[p["X"], p["Y"]] for p in f.get("Hazards", [])],
+                "snakes": snakes,
             }
         )
-    return {
-        "id": g.get("ID"),
-        "width": g.get("Width"),
-        "height": g.get("Height"),
-        "ruleset": g.get("Ruleset", {}).get("name"),
-        "source": g.get("Source"),
-        "turns": len(frames),
-        "snakes": roster,
+    # winner = the single snake still alive in the terminal frame (else a draw)
+    last_alive = [si for si, s in enumerate(frames[-1].get("Snakes", [])) if s.get("Death") is None]
+    winner = last_alive[0] if len(last_alive) == 1 else None
+    game = {
         "frames": out_frames,
+        "winner": winner,
+        "num_turns": len(frames),
+        "heur_mask": 0,
+    }
+    # Wrap in the GameFile envelope the trainer's viewer/ingest already parse.
+    return {
+        "gen": 0,
+        "config": {"source": "battlesnake_ladder", "game_id": g.get("ID")},
+        "games": [game],
     }
 
 
@@ -166,7 +229,6 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     manifest = out / "seen.txt"
     seen = set(manifest.read_text().split()) if manifest.exists() else set()
-    cctx = zstd.ZstdCompressor(level=19)
 
     while True:
         snakes = leaderboard_snakes(args.board, args.top_snakes or None)
@@ -196,8 +258,8 @@ def main():
                 dropped += 1
                 seen.add(gid)
                 continue
-            blob = json.dumps(strip(meta, frames), separators=(",", ":")).encode()
-            (out / f"{gid}.json.zst").write_bytes(cctx.compress(blob))
+            blob = json.dumps(to_gamefile(meta, frames), separators=(",", ":")).encode()
+            (out / f"{gid}.json.zst").write_bytes(zcompress(blob))
             seen.add(gid)
             kept += 1
             if kept % 25 == 0:
