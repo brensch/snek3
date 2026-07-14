@@ -109,24 +109,32 @@ pub fn eval_le_vs_baseline(
     while done.iter().any(|&d| !d) {
         let live: Vec<usize> = (0..games).filter(|&g| !done[g]).collect();
         let live_boards: Vec<Board> = live.iter().map(|&g| boards[g].clone()).collect();
-        let forest = EqForest::build(&live_boards, depth, cfg.draw_value);
+        let build_depth = if cfg.le_top_k > 0 { 1 } else { depth };
+        let mut forest = EqForest::build(&live_boards, build_depth, cfg.draw_value);
+        let tau_pg = vec![[serve_tau; MAX_SNAKES]; live_boards.len()];
 
-        let num_eval = forest.eval_boards().len();
-        let rows = num_eval * n;
-        let vals = if rows > 0 {
-            // cuDNN benchmark is off in LE mode (variable shapes), so no padding.
+        // Encode a slice of eval leaves at serve-τ and run the value forward.
+        let enc_fwd = |eb: &[Board]| -> Vec<f32> {
+            let rows = eb.len() * n;
+            if rows == 0 {
+                return Vec::new();
+            }
             let mut obs = vec![0.0f32; rows * l15];
-            let eb = forest.eval_boards();
             obs.par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
                 for s in 0..n {
                     encode_into_temp(&eb[e], s, serve_tau, &mut chunk[s * l15..(s + 1) * l15]);
                 }
             });
             forward_values(net, device, &obs, rows, side as i64)
-        } else {
-            Vec::new()
         };
-        let tau_pg = vec![[serve_tau; MAX_SNAKES]; live_boards.len()];
+
+        let mut vals = enc_fwd(forest.eval_boards());
+        // Selective deepening: same search as self-play so the eval reflects it.
+        if cfg.le_top_k > 0 {
+            let start = forest.deepen_topk(&vals, &tau_pg, iters, cfg.le_top_k, cfg.draw_value);
+            let vals2 = enc_fwd(&forest.eval_boards()[start..]);
+            vals.extend(vals2);
+        }
         let roots = forest.backup(&vals, &tau_pg, iters);
 
         // Each game's move vector is independent, and the baseline's per-seat

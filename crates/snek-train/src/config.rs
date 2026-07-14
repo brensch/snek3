@@ -96,6 +96,11 @@ pub struct RunConfig {
     /// friendly); depth-2 is stronger but ~O(cands^n) more leaves.
     #[serde(default = "default_le_depth")]
     pub le_depth: u32,
+    /// Selective deepening: expand the top-K joint successors (by equilibrium
+    /// reach probability) one extra ply and re-solve. 0 = fixed depth-1 (no
+    /// deepening). See docs/le-selective-depth.md.
+    #[serde(default)]
+    pub le_top_k: usize,
     /// Stochastic-fictitious-play iterations per equilibrium solve.
     #[serde(default = "default_le_iters")]
     pub le_iters: usize,
@@ -306,6 +311,7 @@ impl Default for RunConfig {
             heuristic_opponent_sims: default_heuristic_opponent_sims(),
             le_mode: false,
             le_depth: default_le_depth(),
+            le_top_k: 0,
             le_iters: default_le_iters(),
             tau_min: default_tau_min(),
             tau_max: default_tau_max(),

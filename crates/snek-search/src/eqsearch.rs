@@ -73,6 +73,69 @@ fn alive_mask(board: &Board) -> u32 {
     m
 }
 
+/// Per-seat value of an eval leaf: the net value where alive, the zero-sum loser
+/// value where already dead (kept consistent with terminal payoffs).
+fn eval_leaf_value(alive: u32, eval_id: usize, values: &[f32], n: usize) -> [f32; MAX_SNAKES] {
+    let dead = crate::search::loser_value(n);
+    let mut v = [0.0f32; MAX_SNAKES];
+    for (i, vi) in v.iter_mut().enumerate().take(n) {
+        *vi = if alive & (1 << i) != 0 {
+            values[eval_id * n + i]
+        } else {
+            dead
+        };
+    }
+    v
+}
+
+/// Recursively compute a node's per-seat equilibrium value (post-order, memoized).
+/// Recursion — not the old id-order loop — because selective deepening adds a
+/// node's children *after* it, so ids are no longer children-before-parent.
+/// Trees are depth ≤ 2 so the recursion is shallow.
+#[allow(clippy::too_many_arguments)]
+fn node_value(
+    tree: &Tree,
+    id: usize,
+    eval_alive: &[u32],
+    values: &[f32],
+    n: usize,
+    tau: &[f32],
+    iters: usize,
+    memo: &mut [Option<[f32; MAX_SNAKES]>],
+) -> [f32; MAX_SNAKES] {
+    if let Some(v) = memo[id] {
+        return v;
+    }
+    let v = match &tree.nodes[id].kind {
+        NodeKind::Terminal => tree.nodes[id].value,
+        NodeKind::Eval { eval_id } => eval_leaf_value(eval_alive[*eval_id], *eval_id, values, n),
+        NodeKind::Internal { cands, children } => {
+            let cand_lens: Vec<usize> = cands.iter().map(|c| c.len()).collect();
+            let payoffs: Vec<[f32; MAX_SNAKES]> = children
+                .iter()
+                .map(|&c| node_value(tree, c, eval_alive, values, n, tau, iters, memo))
+                .collect();
+            le::solve(&cand_lens, &payoffs, tau, iters).values
+        }
+    };
+    memo[id] = Some(v);
+    v
+}
+
+/// Column strides for decoding a row-major joint index (agent 0 most significant).
+fn joint_strides(cand_lens: &[usize]) -> Vec<usize> {
+    let n = cand_lens.len();
+    let mut stride = vec![1usize; n];
+    for i in (0..n).rev() {
+        stride[i] = if i + 1 < n {
+            stride[i + 1] * cand_lens[i + 1]
+        } else {
+            1
+        };
+    }
+    stride
+}
+
 fn expand_node(
     board: Board,
     depth: u32,
@@ -238,57 +301,184 @@ impl EqForest {
             .enumerate()
             .map(|(g, tree)| {
                 let tau = &tau_per_game[g][..n];
-                // Post-order value fill; ids already ordered children-before-parent.
-                let mut node_val = vec![[0.0f32; MAX_SNAKES]; tree.nodes.len()];
-                let mut root_policy = [[0.0f32; 4]; MAX_SNAKES];
-
-                for id in 0..tree.nodes.len() {
-                    match &tree.nodes[id].kind {
-                        NodeKind::Terminal => {
-                            node_val[id] = tree.nodes[id].value;
-                        }
-                        NodeKind::Eval { eval_id } => {
-                            let alive = self.eval_alive[*eval_id];
-                            // A seat already dead at this leaf has lost — score it
-                            // with the same zero-sum loser value as a terminal, so
-                            // the value scale is consistent and un-saturated.
-                            let dead = crate::search::loser_value(n);
-                            let mut v = [0.0f32; MAX_SNAKES];
-                            for i in 0..n {
-                                v[i] = if alive & (1 << i) != 0 {
-                                    values[eval_id * n + i]
-                                } else {
-                                    dead
-                                };
+                let mut memo = vec![None; tree.nodes.len()];
+                match &tree.nodes[tree.root].kind {
+                    NodeKind::Internal { cands, children } => {
+                        let cand_lens: Vec<usize> = cands.iter().map(|c| c.len()).collect();
+                        let payoffs: Vec<[f32; MAX_SNAKES]> = children
+                            .iter()
+                            .map(|&c| {
+                                node_value(
+                                    tree,
+                                    c,
+                                    &self.eval_alive,
+                                    values,
+                                    n,
+                                    tau,
+                                    iters,
+                                    &mut memo,
+                                )
+                            })
+                            .collect();
+                        let sol = le::solve(&cand_lens, &payoffs, tau, iters);
+                        let mut root_policy = [[0.0f32; 4]; MAX_SNAKES];
+                        for i in 0..n {
+                            for (ai, &mv) in cands[i].iter().enumerate() {
+                                root_policy[i][mv.index()] += sol.policies[i][ai];
                             }
-                            node_val[id] = v;
                         }
-                        NodeKind::Internal { cands, children } => {
-                            let cand_lens: Vec<usize> = cands.iter().map(|c| c.len()).collect();
-                            // Payoff matrix: each joint action's child value vector.
-                            let payoffs: Vec<[f32; MAX_SNAKES]> =
-                                children.iter().map(|&c| node_val[c]).collect();
-                            let sol = le::solve(&cand_lens, &payoffs, tau, iters);
-                            node_val[id] = sol.values;
-                            if id == tree.root {
-                                // Map each seat's equilibrium mix over its
-                                // candidates back onto the 4 move slots.
-                                for i in 0..n {
-                                    for (ai, &mv) in cands[i].iter().enumerate() {
-                                        root_policy[i][mv.index()] += sol.policies[i][ai];
-                                    }
-                                }
-                            }
+                        RootEq {
+                            policy: root_policy,
+                            value: sol.values,
                         }
                     }
-                }
-
-                RootEq {
-                    policy: root_policy,
-                    value: node_val[tree.root],
+                    // A root that is already terminal (or, defensively, an
+                    // un-expanded leaf) has no equilibrium to solve.
+                    NodeKind::Terminal => RootEq {
+                        policy: [[0.0f32; 4]; MAX_SNAKES],
+                        value: tree.nodes[tree.root].value,
+                    },
+                    NodeKind::Eval { eval_id } => RootEq {
+                        policy: [[0.0f32; 4]; MAX_SNAKES],
+                        value: eval_leaf_value(self.eval_alive[*eval_id], *eval_id, values, n),
+                    },
                 }
             })
             .collect()
+    }
+
+    /// Selective deepening (progressive depth-2). Given depth-1 leaf `values`,
+    /// solve each root's LE, and expand ONE more ply only the `top_k` joint
+    /// successors with the highest equilibrium reach probability. Returns the
+    /// index into `eval_boards()` at which the new depth-2 leaves begin — the
+    /// caller value-nets `eval_boards()[start..]`, appends those to `values`, and
+    /// calls [`backup`] again with the combined slice. `top_k == 0` is a no-op
+    /// (stays fixed depth-1). See docs/le-selective-depth.md.
+    pub fn deepen_topk(
+        &mut self,
+        values: &[f32],
+        tau_per_game: &[[f32; MAX_SNAKES]],
+        iters: usize,
+        top_k: usize,
+        draw_value: f32,
+    ) -> usize {
+        let start = self.eval_boards.len();
+        if top_k == 0 {
+            return start;
+        }
+        let n = self.n;
+        // Phase A (parallel per tree): solve the root LE, pick the top_k
+        // deepenable joint successors by reach probability, expand each one ply
+        // into tree-local buffers. New Eval nodes hold a LOCAL eval id, fixed up
+        // to a global id in phase B.
+        let EqForest {
+            trees,
+            eval_boards,
+            eval_alive,
+            eval_game,
+            n: _,
+        } = self;
+        let ealive: &[u32] = eval_alive;
+        let eboards: &[Board] = eval_boards;
+        let per_tree: Vec<(Vec<Board>, Vec<u32>, Vec<usize>)> = trees
+            .par_iter_mut()
+            .enumerate()
+            .map(|(g, tree)| {
+                let tau = &tau_per_game[g][..n];
+                let mut local_boards: Vec<Board> = Vec::new();
+                let mut local_alive: Vec<u32> = Vec::new();
+                let mut new_eval_nodes: Vec<usize> = Vec::new();
+                let (cands, children) = match &tree.nodes[tree.root].kind {
+                    NodeKind::Internal { cands, children } => (cands.clone(), children.clone()),
+                    _ => return (local_boards, local_alive, new_eval_nodes),
+                };
+                let cand_lens: Vec<usize> = cands.iter().map(|c| c.len()).collect();
+                let mut memo = vec![None; tree.nodes.len()];
+                let payoffs: Vec<[f32; MAX_SNAKES]> = children
+                    .iter()
+                    .map(|&c| node_value(tree, c, ealive, values, n, tau, iters, &mut memo))
+                    .collect();
+                let sol = le::solve(&cand_lens, &payoffs, tau, iters);
+                let stride = joint_strides(&cand_lens);
+                // Reach probability of each joint successor, keeping only the
+                // deepenable (Eval, i.e. non-terminal) ones.
+                let mut reach: Vec<(f32, usize)> = children
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &c)| matches!(tree.nodes[c].kind, NodeKind::Eval { .. }))
+                    .map(|(j, _)| {
+                        let mut p = 1.0f32;
+                        for i in 0..n {
+                            let ai = (j / stride[i]) % cand_lens[i];
+                            p *= sol.policies[i][ai];
+                        }
+                        (p, j)
+                    })
+                    .collect();
+                reach.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                reach.truncate(top_k);
+                for (_, j) in reach {
+                    let child_id = children[j];
+                    let eid = match tree.nodes[child_id].kind {
+                        NodeKind::Eval { eval_id } => eval_id,
+                        _ => continue,
+                    };
+                    let board = eboards[eid].clone();
+                    let sc: Vec<Vec<Move>> = (0..n).map(|i| le_candidates(&board, i)).collect();
+                    let stotal: usize = sc.iter().map(|c| c.len()).product();
+                    let sstride = joint_strides(&sc.iter().map(|c| c.len()).collect::<Vec<_>>());
+                    let mut sub_children = Vec::with_capacity(stotal);
+                    let mut mv = vec![DUMMY_MOVE; n];
+                    for sj in 0..stotal {
+                        for i in 0..n {
+                            let ai = (sj / sstride[i]) % sc[i].len();
+                            mv[i] = sc[i][ai];
+                        }
+                        let mut c = board.clone();
+                        c.step(&mv);
+                        let cid = tree.nodes.len();
+                        if c.is_terminal() {
+                            tree.nodes.push(Node {
+                                kind: NodeKind::Terminal,
+                                value: terminal_values_with_draw(&c, draw_value),
+                            });
+                        } else {
+                            let local_eid = local_boards.len();
+                            local_alive.push(alive_mask(&c));
+                            local_boards.push(c);
+                            tree.nodes.push(Node {
+                                kind: NodeKind::Eval { eval_id: local_eid },
+                                value: [0.0; MAX_SNAKES],
+                            });
+                            new_eval_nodes.push(cid);
+                        }
+                        sub_children.push(cid);
+                    }
+                    tree.nodes[child_id].kind = NodeKind::Internal {
+                        cands: sc,
+                        children: sub_children,
+                    };
+                }
+                (local_boards, local_alive, new_eval_nodes)
+            })
+            .collect();
+        // Phase B (sequential): splice tree-local eval buffers into the global
+        // list, rewriting each new Eval node's local id to its global id.
+        let mut offset = eval_boards.len();
+        for (g, (lb, la, node_ids)) in per_tree.into_iter().enumerate() {
+            for nid in node_ids {
+                if let NodeKind::Eval { eval_id } = &mut trees[g].nodes[nid].kind {
+                    *eval_id += offset;
+                }
+            }
+            for _ in 0..lb.len() {
+                eval_game.push(g as u32);
+            }
+            offset += lb.len();
+            eval_boards.extend(lb);
+            eval_alive.extend(la);
+        }
+        start
     }
 }
 
@@ -302,6 +492,84 @@ mod tests {
     fn fresh(n: usize) -> Board {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(7);
         standard_start(11, 11, n, &mut rng)
+    }
+
+    #[test]
+    fn selective_depth2_expands_and_backs_up() {
+        let boards = vec![fresh(4)];
+        let mut forest = EqForest::build(&boards, 1, -0.25);
+        let n = forest.n_snakes();
+        let m1 = forest.eval_boards().len();
+        assert!(m1 > 0);
+        let vals1 = vec![0.0f32; m1 * n];
+        let tau = vec![[6.0f32; MAX_SNAKES]; forest.len()];
+        // Deepen the top-3 joint successors one more ply.
+        let start = forest.deepen_topk(&vals1, &tau, 60, 3, -0.25);
+        assert_eq!(start, m1, "new leaves begin right after the depth-1 leaves");
+        let m2 = forest.eval_boards().len();
+        assert!(m2 > m1, "selective deepening added depth-2 leaves");
+        let mut allvals = vals1.clone();
+        allvals.extend(vec![0.0f32; (m2 - m1) * n]);
+        let out = forest.backup(&allvals, &tau, 60);
+        assert_eq!(out.len(), 1);
+        for seat in 0..n {
+            let sum: f32 = out[0].policy[seat].iter().sum();
+            assert!((sum - 1.0).abs() < 1e-3, "seat {seat} policy still normalized");
+        }
+    }
+
+    #[test]
+    fn top_k_zero_matches_plain_depth1() {
+        let boards = vec![fresh(4)];
+        let mut forest = EqForest::build(&boards, 1, -0.25);
+        let n = forest.n_snakes();
+        let m1 = forest.eval_boards().len();
+        let vals = vec![0.1f32; m1 * n];
+        let tau = vec![[5.0f32; MAX_SNAKES]; forest.len()];
+        let base = forest.backup(&vals, &tau, 80);
+        let start = forest.deepen_topk(&vals, &tau, 80, 0, -0.25);
+        assert_eq!(start, m1);
+        assert_eq!(forest.eval_boards().len(), m1, "top_k=0 adds no leaves");
+        let after = forest.backup(&vals, &tau, 80);
+        for seat in 0..n {
+            for m in 0..4 {
+                assert!(
+                    (base[0].policy[seat][m] - after[0].policy[seat][m]).abs() < 1e-4,
+                    "top_k=0 is a no-op"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deepening_shifts_policy_when_depth2_disagrees() {
+        // Depth-1 sees flat leaves (uniform-ish policy). Then we deepen and feed
+        // the depth-2 leaves a strong per-seat signal; the re-solve must move the
+        // policy away from the flat depth-1 answer — i.e. depth-2 info propagates.
+        let boards = vec![fresh(4)];
+        let mut forest = EqForest::build(&boards, 1, -0.25);
+        let n = forest.n_snakes();
+        let m1 = forest.eval_boards().len();
+        let vals1 = vec![0.0f32; m1 * n];
+        let tau = vec![[8.0f32; MAX_SNAKES]; forest.len()];
+        let flat = forest.backup(&vals1, &tau, 120);
+        // Rebuild fresh for the deepened path (backup above didn't mutate).
+        let start = forest.deepen_topk(&vals1, &tau, 120, 6, -0.25);
+        let m2 = forest.eval_boards().len();
+        assert!(m2 > m1);
+        let mut allvals = vals1.clone();
+        // Depth-2 leaves: seat 0 great (+1), everyone else bad (-1).
+        for _ in m1..m2 {
+            allvals.push(1.0);
+            for _ in 1..n {
+                allvals.push(-1.0);
+            }
+        }
+        let deep = forest.backup(&allvals, &tau, 120);
+        let moved: f32 = (0..4)
+            .map(|m| (deep[0].policy[0][m] - flat[0].policy[0][m]).abs())
+            .sum();
+        assert!(moved > 1e-3, "depth-2 values changed seat 0's policy ({moved})");
     }
 
     #[test]

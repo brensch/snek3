@@ -160,12 +160,17 @@ pub fn generate_le(
     let mut nturns: u64 = 0;
     while samples_total < target && !stop.load(Ordering::Relaxed) {
         let tb = Instant::now();
-        let forest = EqForest::build(&state.boards, depth, cfg.draw_value);
+        // Selective deepening builds depth-1 then expands the top-k successors;
+        // fixed mode builds straight to `depth`.
+        let build_depth = if cfg.le_top_k > 0 { 1 } else { depth };
+        let mut forest = EqForest::build(&state.boards, build_depth, cfg.draw_value);
         t_build += tb.elapsed().as_micros();
+        let tau_pg: Vec<[f32; MAX_SNAKES]> =
+            state.temp.iter().map(|&t| [t; MAX_SNAKES]).collect();
         let num_eval = forest.eval_boards().len();
         let rows = num_eval * n;
 
-        let vals = if rows > 0 {
+        let mut vals = if rows > 0 {
             let te = Instant::now();
             // cuDNN benchmark is forced OFF in LE mode (variable batch shape every
             // turn — see trainer setup), so we feed the exact row count with no
@@ -209,9 +214,37 @@ pub fn generate_le(
             Vec::new()
         };
 
+        // Selective deepening (docs/le-selective-depth.md): expand the top-k
+        // joint successors one more ply and value-net the new leaves, then
+        // re-solve. Two batched forwards total; skipped when le_top_k == 0.
+        if cfg.le_top_k > 0 {
+            let start = forest.deepen_topk(&vals, &tau_pg, iters, cfg.le_top_k, cfg.draw_value);
+            let m2 = forest.eval_boards().len();
+            let rows2 = (m2 - start) * n;
+            if rows2 > 0 {
+                let mut obs2 = vec![0.0f32; rows2 * l15];
+                let eb2 = &forest.eval_boards()[start..];
+                let eg2 = &forest.eval_game()[start..];
+                let temp = &state.temp;
+                obs2.par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
+                    let tau = temp[eg2[e] as usize];
+                    for s in 0..n {
+                        encode_into_temp(&eb2[e], s, tau, &mut chunk[s * l15..(s + 1) * l15]);
+                    }
+                });
+                let t0 = Instant::now();
+                let v2 = forward_values(gpu_net, device, &obs2, rows2, h as i64, w as i64);
+                let dt = t0.elapsed().as_micros();
+                t_fwd += dt;
+                counters.gpu_forward_us.fetch_add(dt as u64, Ordering::Relaxed);
+                counters.gpu_requests.fetch_add(1, Ordering::Relaxed);
+                counters.gpu_rows.fetch_add(rows2 as u64, Ordering::Relaxed);
+                counters.inferences.fetch_add(rows2 as u64, Ordering::Relaxed);
+                vals.extend(v2);
+            }
+        }
+
         let tk = Instant::now();
-        let tau_pg: Vec<[f32; MAX_SNAKES]> =
-            state.temp.iter().map(|&t| [t; MAX_SNAKES]).collect();
         let roots = forest.backup(&vals, &tau_pg, iters);
         t_backup += tk.elapsed().as_micros();
         nturns += 1;
