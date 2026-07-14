@@ -9,3 +9,7 @@ authors.workspace = true
 snek-core.workspace = true
 arrayvec.workspace = true
 rayon.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+rand_xoshiro.workspace = true

@@ -84,6 +84,19 @@ export function RunView() {
     };
   }, [metrics, gens]);
 
+  // Held-out strength: the LE net plays its own equilibrium search against
+  // built-in baselines it never trains on, every few generations. This is the
+  // Elo replacement in LE mode (the checkpoint league is disabled), so it gets
+  // headline billing. Sparse (eval gens only), so filter to the rows that ran.
+  const strength = useMemo(() => {
+    const rows = metrics.filter((m) => m.hasLeEval);
+    return {
+      gens: rows.map((m) => m.generation),
+      ff: rows.map((m) => m.leFfWinrate * 100),
+      vor: rows.map((m) => m.leVorWinrate * 100),
+    };
+  }, [metrics]);
+
   return (
     <div className="min-h-screen">
       <TopBar
@@ -122,6 +135,25 @@ export function RunView() {
           <EloPanel league={league} />
           <LiveThroughput stats={live.stats} history={live.history} />
         </div>
+
+        {strength.gens.length > 0 && (
+          <section>
+            <h2 className="card-title mb-1.5">Held-out strength (sole-survival %)</h2>
+            <div className="grid gap-2.5 sm:grid-cols-2">
+              <LineChart
+                title="Win rate vs baselines"
+                height={140}
+                domain={[0, 100]}
+                format={(v) => `${v.toFixed(0)}%`}
+                series={[
+                  { name: "vs floodfill", color: series.green, values: strength.ff },
+                  { name: "vs voronoi", color: series.magenta, values: strength.vor },
+                ]}
+                xValues={strength.gens}
+              />
+            </div>
+          </section>
+        )}
 
         {metrics.length > 0 && (
           <>

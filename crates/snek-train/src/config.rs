@@ -31,7 +31,6 @@ pub struct RunConfig {
     pub dirichlet_frac: f32,
     #[serde(default = "default_dirichlet_alpha")]
     pub dirichlet_alpha: f32,
-    pub max_turns: usize,
     pub draw_value: f32,
     pub skip_short_draw_turns: usize,
     pub trunk_channels: i64,
@@ -85,6 +84,45 @@ pub struct RunConfig {
     /// statistically interchangeable with the CPU league's.
     #[serde(default)]
     pub burst_sims: usize,
+
+    // ---- Logit-Equilibrium ("correct game mode") self-play ----
+    /// Use the Albatross-faithful fixed-depth Logit-Equilibrium search for
+    /// self-play instead of decoupled-PUCT MCTS. Produces mixed-strategy
+    /// policies + per-player equilibrium values for the simultaneous-move game.
+    #[serde(default)]
+    pub le_mode: bool,
+    /// Plies of the fixed-depth joint-move equilibrium tree. Depth-1 is a 1-ply
+    /// equilibrium best-response over the net's leaf values (cheap, 4-player
+    /// friendly); depth-2 is stronger but ~O(cands^n) more leaves.
+    #[serde(default = "default_le_depth")]
+    pub le_depth: u32,
+    /// Stochastic-fictitious-play iterations per equilibrium solve.
+    #[serde(default = "default_le_iters")]
+    pub le_iters: usize,
+    /// Per-episode inverse-temperature (rationality) range the proxy is
+    /// conditioned on: high = rational/Nash-like, low = near-uniform. A τ is
+    /// sampled uniformly from [tau_min, tau_max] each game.
+    #[serde(default = "default_tau_min")]
+    pub tau_min: f32,
+    #[serde(default = "default_tau_max")]
+    pub tau_max: f32,
+    /// Uniform-over-legal exploration mixed into the played (not target) policy
+    /// before sampling the self-play move.
+    #[serde(default = "default_le_exploration")]
+    pub le_exploration: f32,
+    /// Rational responder inverse-temperature for the exploit path (Stage B).
+    #[serde(default = "default_response_tau")]
+    pub response_tau: f32,
+    /// Generations of proxy-only self-play before the response/exploit path
+    /// begins (Stage B).
+    #[serde(default = "default_response_after")]
+    pub response_after: usize,
+    /// Blend of game outcome into the LE value target: 0 = pure equilibrium
+    /// bootstrap (validated Albatross, at depth 2), 1 = pure game outcome. A
+    /// blend grounds the depth-1 bootstrap against its cold-start (early leaf
+    /// values are near-random, so a purely self-referential target is weak).
+    #[serde(default = "default_le_outcome_weight")]
+    pub le_outcome_weight: f32,
     /// External API players holding permanent league seats, as "name=url"
     /// entries. The url is the base of a Battlesnake-protocol HTTP server
     /// (the arena POSTs {url}/move). The name is the player's stable league
@@ -126,6 +164,31 @@ pub struct RunConfig {
 
 fn default_heuristic_opponent_sims() -> usize {
     800
+}
+
+fn default_le_depth() -> u32 {
+    1
+}
+fn default_le_iters() -> usize {
+    120
+}
+fn default_tau_min() -> f32 {
+    0.5
+}
+fn default_tau_max() -> f32 {
+    10.0
+}
+fn default_le_exploration() -> f32 {
+    0.15
+}
+fn default_response_tau() -> f32 {
+    12.0
+}
+fn default_response_after() -> usize {
+    30
+}
+fn default_le_outcome_weight() -> f32 {
+    0.5
 }
 
 fn default_heuristic_opponent_seats() -> usize {
@@ -212,7 +275,6 @@ impl Default for RunConfig {
             sample_turns: default_sample_turns(),
             dirichlet_frac: default_dirichlet_frac(),
             dirichlet_alpha: default_dirichlet_alpha(),
-            max_turns: 0, // 0 = uncapped (games run to a natural terminal)
             draw_value: -0.25,
             skip_short_draw_turns: 0,
             trunk_channels: 96,
@@ -242,6 +304,15 @@ impl Default for RunConfig {
             heuristic_opponent_seats: default_heuristic_opponent_seats(),
             heuristic_opponent_kind: default_heuristic_opponent_kind(),
             heuristic_opponent_sims: default_heuristic_opponent_sims(),
+            le_mode: false,
+            le_depth: default_le_depth(),
+            le_iters: default_le_iters(),
+            tau_min: default_tau_min(),
+            tau_max: default_tau_max(),
+            le_exploration: default_le_exploration(),
+            response_tau: default_response_tau(),
+            response_after: default_response_after(),
+            le_outcome_weight: default_le_outcome_weight(),
         }
     }
 }

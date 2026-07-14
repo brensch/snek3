@@ -2,12 +2,14 @@ mod api;
 mod bench;
 mod config;
 mod eval;
+mod le_eval;
 mod metrics;
 mod proto;
 mod replay;
 mod sample;
 mod selfplay;
 mod session;
+mod sl_pretrain;
 mod state;
 mod train;
 mod trainer;
@@ -56,6 +58,45 @@ struct Args {
     /// between them (exercises the trainer's freeze/thaw path).
     #[arg(long, default_value_t = 1)]
     burst_repeat: usize,
+    /// Supervised-pretrain a FRESH net on a directory of GameFile `.json.zst`
+    /// archives (e.g. scraped ladder games), report what it learned + its play
+    /// strength vs the baselines, then exit. No self-play, no server.
+    #[arg(long)]
+    sl_pretrain: Option<PathBuf>,
+    /// Where the pretrained net is written (best-validation checkpoint).
+    #[arg(long, default_value = "checkpoints/sl_pretrain.safetensors")]
+    sl_out: PathBuf,
+    /// Max training epochs (early stopping usually ends it sooner).
+    #[arg(long, default_value_t = 40)]
+    sl_epochs: usize,
+    /// Fraction of games held out for validation / early stopping.
+    #[arg(long, default_value_t = 0.1)]
+    sl_val_frac: f64,
+    /// Play-strength games per baseline after training.
+    #[arg(long, default_value_t = 24)]
+    sl_eval_games: usize,
+    /// Per-move time budget (ms) in the play-strength eval.
+    #[arg(long, default_value_t = 40)]
+    sl_eval_ms: u64,
+    /// Play-strength eval only: measure this saved net vs the baselines and exit
+    /// (no training). Uses `--sl-eval-games` / `--sl-eval-ms`.
+    #[arg(long)]
+    sl_eval_only: Option<PathBuf>,
+    /// Full-strength round-robin among net checkpoints (comma-separated gens,
+    /// e.g. "600,1200,1800,2300"): seat them head-to-head and report each gen's
+    /// win rate + avg rank, testing for a skill trend the low-sim league hides.
+    /// Uses `--run-id` (default snek3-21) for the checkpoint dir, then exits.
+    #[arg(long)]
+    rr: Option<String>,
+    /// Games in the round-robin.
+    #[arg(long, default_value_t = 160)]
+    rr_games: usize,
+    /// Sims/move in the round-robin (full strength; league uses 64).
+    #[arg(long, default_value_t = 800)]
+    rr_sims: usize,
+    /// Concurrent games in the round-robin (keeps the GPU busy).
+    #[arg(long, default_value_t = 24)]
+    rr_conc: usize,
 }
 
 #[tokio::main]
@@ -70,6 +111,31 @@ async fn main() -> anyhow::Result<()> {
     let metrics = Metrics::new();
     if let Some(run_id) = args.burst.as_deref() {
         return standalone_burst(&args, run_id, metrics);
+    }
+    if let Some(net) = args.sl_eval_only.clone() {
+        return sl_pretrain::eval_only(&net, args.sl_eval_games, args.sl_eval_ms);
+    }
+    if let Some(spec) = args.rr.clone() {
+        let gens: Vec<u32> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        let run_id = args.run_id.clone().unwrap_or_else(|| "snek3-21".to_string());
+        anyhow::ensure!(tch::Cuda::is_available(), "rr needs CUDA");
+        let device = tch::Device::Cuda(0);
+        let cfg = RunConfig::default();
+        let ckpt_dir = args.runs_dir.join(&run_id).join("checkpoints");
+        let _ = args.rr_conc;
+        return eval::burst::run_round_robin(
+            &ckpt_dir, device, &metrics, &cfg, &gens, args.rr_games, args.rr_sims,
+        );
+    }
+    if let Some(dir) = args.sl_pretrain.clone() {
+        return sl_pretrain::run(&sl_pretrain::SlArgs {
+            dir,
+            out: args.sl_out.clone(),
+            epochs: args.sl_epochs,
+            val_frac: args.sl_val_frac,
+            eval_games: args.sl_eval_games,
+            eval_ms: args.sl_eval_ms,
+        });
     }
     let trainer = TrainerHandle::new(args.runs_dir, metrics.clone(), RunConfig::default());
     tokio::spawn(metrics.run_samplers());

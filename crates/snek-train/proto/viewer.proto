@@ -48,6 +48,10 @@ message MetricRow {
   double gpu_busy_pct = 16;
   double avg_game_turn = 17;    // mean game turn across all buffered samples
   double lr = 18;               // learning rate trained at (0 for old runs)
+  // LE held-out strength eval (the Elo replacement), only on eval gens.
+  double le_ff_winrate = 19;    // sole-survival rate vs floodfill baseline
+  double le_vor_winrate = 20;   // sole-survival rate vs voronoi baseline
+  bool has_le_eval = 21;        // true only on generations that ran the LE eval
 }
 
 // A generation that has recorded self-play sample games on disk.

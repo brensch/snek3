@@ -185,6 +185,8 @@ struct MetricJson {
     gpu_busy_pct: Option<f64>,
     avg_game_turn: Option<f64>,
     lr: Option<f64>,
+    le_ff_winrate: Option<f64>,
+    le_vor_winrate: Option<f64>,
 }
 
 fn metrics(root: &Path) -> Vec<proto::MetricRow> {
@@ -219,6 +221,11 @@ fn metrics(root: &Path) -> Vec<proto::MetricRow> {
                 gpu_busy_pct: row.gpu_busy_pct.unwrap_or(0.0),
                 avg_game_turn: row.avg_game_turn.unwrap_or(0.0),
                 lr: row.lr.unwrap_or(0.0),
+                // Both baselines are written together on eval gens; presence of
+                // the floodfill rate marks the row as an eval gen.
+                le_ff_winrate: row.le_ff_winrate.unwrap_or(0.0),
+                le_vor_winrate: row.le_vor_winrate.unwrap_or(0.0),
+                has_le_eval: row.le_ff_winrate.is_some(),
             })
         })
         .collect()

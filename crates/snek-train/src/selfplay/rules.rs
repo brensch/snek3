@@ -41,17 +41,29 @@ pub(crate) fn candidates(board: &Board, i: usize) -> ([u8; MAXC], usize) {
     (out, k)
 }
 
+/// Zero-sum per-seat loss for a finished game: the sole survivor gets +1 and the
+/// other `n-1` seats share the loss at `-1/(n-1)`, so the game sums to 0. This is
+/// deliberately NOT a flat -1: in a 4-player free-for-all a +1/-1 outcome is 3:1
+/// loss-dominated (mean -0.5), which drags the tanh value head onto the -1 rail
+/// where its gradient vanishes and the value signal dies. Zero-mean keeps it
+/// centred and using its full range so LE-search leaves actually differ.
+#[inline]
+pub(crate) fn loser_value(n: usize) -> f32 {
+    -1.0 / (n.max(2) - 1) as f32
+}
+
 #[inline]
 pub(crate) fn terminal_values(board: &Board, draw: f32) -> [f32; MAX_SNAKES] {
     let mut v = [0.0f32; MAX_SNAKES];
+    let n = board.snakes.len();
     match board.winner() {
         Some(w) => {
-            for (i, x) in v.iter_mut().enumerate().take(board.snakes.len()) {
-                *x = if i == w { 1.0 } else { -1.0 };
+            for (i, x) in v.iter_mut().enumerate().take(n) {
+                *x = if i == w { 1.0 } else { loser_value(n) };
             }
         }
         None => {
-            for x in v.iter_mut().take(board.snakes.len()) {
+            for x in v.iter_mut().take(n) {
                 *x = draw;
             }
         }
@@ -144,14 +156,14 @@ pub(crate) fn mask_obvious_immediate_deaths(
 pub(crate) fn terminal_value(
     winner: Option<usize>,
     snake: usize,
-    alive_final: bool,
+    n: usize,
     draw_value: f32,
 ) -> f32 {
     match winner {
         Some(w) if w == snake => 1.0,
-        Some(_) => -1.0,
-        None if alive_final => draw_value,
-        None => -1.0,
+        Some(_) => loser_value(n),
+        // No winner = every seat died together (a true draw): neutral for all.
+        None => draw_value,
     }
 }
 

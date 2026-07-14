@@ -46,3 +46,7 @@ local-vs-lan-viewer.log
 local-vs-lan-viewer.pid
 game-seed*.json
 /data/
+
+# LE overhaul dev tooling runtime logs (keep scripts + experiments.log)
+scratchpad-le/*.log
+.worktrees/

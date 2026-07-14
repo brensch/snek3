@@ -24,7 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Safety cap on frames buffered per recorded game, bounding memory if a game
-/// runs pathologically long (e.g. `max_turns == 0` with near-perfect play).
+/// runs pathologically long under near-perfect play. This is an OOM guard on
+/// recording, not a game-length cap (games otherwise run to a natural terminal).
 const MAX_REC_FRAMES: usize = 4096;
 
 /// Handles every worker shares: the GPU (behind its inference-queue mutex), the
@@ -259,11 +260,9 @@ pub(super) fn play_chunk(
                 .inflight_turn_sum
                 .fetch_add(1, Ordering::Relaxed);
 
-            // A game ends on a terminal board, at the turn cap, or if it somehow
-            // hits the frame safety cap (bounds memory for pathological configs
-            // like `max_turns == 0`).
-            let overrun = (cfg.max_turns > 0 && tslice[g] >= cfg.max_turns)
-                || rslice[g].len() >= MAX_REC_FRAMES;
+            // A game ends on a terminal board, or if it somehow hits the frame
+            // safety cap (an OOM bound on recording, not a game-length cap).
+            let overrun = rslice[g].len() >= MAX_REC_FRAMES;
             if !bslice[g].is_terminal() && !overrun {
                 continue;
             }
@@ -289,7 +288,7 @@ pub(super) fn play_chunk(
             // Append the terminal frame (zero policy, terminal values for display)
             // and move the whole game into the finished buffer.
             let term_vals: Vec<f32> = (0..n)
-                .map(|s| terminal_value(winner, s, bslice[g].snakes[s].alive(), cfg.draw_value))
+                .map(|s| terminal_value(winner, s, n, cfg.draw_value))
                 .collect();
             let mut frames = std::mem::take(&mut rslice[g]);
             frames.push(frame_from_board(
@@ -306,6 +305,7 @@ pub(super) fn play_chunk(
                 winner: winner.map(|x| x as i32),
                 num_turns,
                 heur_mask: bslice[g].heur_mask,
+                temp: 0.0,
             };
             let added = game_sample_count(&game, n);
             shared.recorded.lock().unwrap().push(game);

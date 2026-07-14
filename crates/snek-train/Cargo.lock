@@ -1744,6 +1744,7 @@ dependencies = [
  "serde_json",
  "snek-core",
  "snek-heuristic",
+ "snek-search",
  "snek-server",
  "snek-tch",
  "tch",

@@ -63,6 +63,61 @@ pub fn obs_len(board: &Board) -> usize {
     NUM_CHANNELS * obs_h(board) * obs_w(board)
 }
 
+// ---- Logit-Equilibrium temperature (τ) conditioning ----
+//
+// The LE net is conditioned on a per-episode inverse-temperature τ by appending
+// one extra constant input plane holding `τ / TEMP_SCALE`. It is a full input
+// plane (not a scalar concatenated at the pooled value head) *on purpose*: the
+// equilibrium **policy** target depends on τ, so τ must reach the trunk and both
+// heads — a scalar tapped only into the value MLP would leave the policy blind to
+// τ. `TEMP_SCALE` keeps the plane value O(0.005..0.12) for τ ∈ [0.5, 12].
+
+/// Divisor that maps τ to its input-plane value (matches the validated Albatross
+/// net: `temperature_scale = 100`).
+pub const TEMP_SCALE: f32 = 100.0;
+
+/// Channels of the τ-conditioned observation (board channels + 1 τ plane).
+pub const NUM_CHANNELS_TEMP: usize = NUM_CHANNELS + 1;
+
+/// Size in floats of one τ-conditioned observation.
+#[inline]
+pub fn obs_len_temp(board: &Board) -> usize {
+    NUM_CHANNELS_TEMP * obs_h(board) * obs_w(board)
+}
+
+/// Encode the board from seat `me`'s perspective and append the τ plane, into
+/// `out` (must be `obs_len_temp(board)` long, fully overwritten).
+pub fn encode_into_temp(board: &Board, me: usize, tau: f32, out: &mut [f32]) {
+    let hw = obs_h(board) * obs_w(board);
+    encode_into(board, me, &mut out[..NUM_CHANNELS * hw]);
+    let plane = tau / TEMP_SCALE;
+    for x in out[NUM_CHANNELS * hw..NUM_CHANNELS_TEMP * hw].iter_mut() {
+        *x = plane;
+    }
+}
+
+/// Build a τ-conditioned batch from a batch of plain board observations: given
+/// `obs14` = `rows` rows of `NUM_CHANNELS*hw` and a per-row `temp`, return `rows`
+/// rows of `NUM_CHANNELS_TEMP*hw` with the τ plane appended to each. Used at
+/// training time so the (already D4-augmented) board obs get τ concatenated
+/// without re-encoding — and so D4 augmentation never touches the τ plane.
+pub fn append_temp_planes(obs14: &[f32], temp: &[f32], hw: usize) -> Vec<f32> {
+    let rows = temp.len();
+    let in_row = NUM_CHANNELS * hw;
+    let out_row = NUM_CHANNELS_TEMP * hw;
+    debug_assert_eq!(obs14.len(), rows * in_row);
+    let mut out = vec![0.0f32; rows * out_row];
+    for r in 0..rows {
+        out[r * out_row..r * out_row + in_row]
+            .copy_from_slice(&obs14[r * in_row..(r + 1) * in_row]);
+        let plane = temp[r] / TEMP_SCALE;
+        for x in out[r * out_row + in_row..(r + 1) * out_row].iter_mut() {
+            *x = plane;
+        }
+    }
+    out
+}
+
 /// Encode the board from snake `me`'s perspective into `out` (absolute coords).
 /// `out` must be `obs_len(board)` long and is fully overwritten.
 pub fn encode_into(board: &Board, me: usize, out: &mut [f32]) {
@@ -156,6 +211,44 @@ pub fn encode_into(board: &Board, me: usize, out: &mut [f32]) {
 mod tests {
     use super::*;
     use crate::{Board, Point};
+
+    #[test]
+    fn temp_plane_appends_and_preserves_board() {
+        let mut b = Board::new(11, 11);
+        b.add_snake(&[Point::new(0, 0), Point::new(0, 1)]);
+        b.add_snake(&[Point::new(10, 10), Point::new(10, 9)]);
+        let hw = obs_h(&b) * obs_w(&b);
+        let mut o14 = vec![0.0f32; obs_len(&b)];
+        encode_into(&b, 0, &mut o14);
+        let mut o15 = vec![0.0f32; obs_len_temp(&b)];
+        encode_into_temp(&b, 0, 8.0, &mut o15);
+        // Board channels are byte-identical to the plain encoding.
+        assert_eq!(&o15[..NUM_CHANNELS * hw], &o14[..]);
+        // The extra plane is a constant τ/TEMP_SCALE.
+        let plane = &o15[NUM_CHANNELS * hw..NUM_CHANNELS_TEMP * hw];
+        assert_eq!(plane.len(), hw);
+        assert!(plane.iter().all(|&v| (v - 8.0 / TEMP_SCALE).abs() < 1e-6));
+    }
+
+    #[test]
+    fn append_temp_planes_matches_encode_into_temp() {
+        let mut b = Board::new(11, 11);
+        b.add_snake(&[Point::new(3, 3), Point::new(3, 2)]);
+        b.add_snake(&[Point::new(7, 7), Point::new(7, 6)]);
+        let hw = obs_h(&b) * obs_w(&b);
+        let (l14, l15) = (obs_len(&b), obs_len_temp(&b));
+        let mut o14 = vec![0.0f32; 2 * l14];
+        encode_into(&b, 0, &mut o14[..l14]);
+        encode_into(&b, 1, &mut o14[l14..]);
+        let batch = append_temp_planes(&o14, &[2.0, 9.0], hw);
+        assert_eq!(batch.len(), 2 * l15);
+        let mut exp0 = vec![0.0f32; l15];
+        encode_into_temp(&b, 0, 2.0, &mut exp0);
+        let mut exp1 = vec![0.0f32; l15];
+        encode_into_temp(&b, 1, 9.0, &mut exp1);
+        assert_eq!(&batch[..l15], &exp0[..]);
+        assert_eq!(&batch[l15..], &exp1[..]);
+    }
 
     #[test]
     fn absolute_coords_and_per_opponent_scalars() {

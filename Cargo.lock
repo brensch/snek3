@@ -564,6 +564,8 @@ name = "snek-search"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "rand",
+ "rand_xoshiro",
  "rayon",
  "snek-core",
 ]

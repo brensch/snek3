@@ -18,10 +18,13 @@
 //! where it stopped.
 
 mod gpu;
-mod materialize;
+pub mod le_selfplay;
+pub(crate) mod materialize;
 pub(crate) mod rules;
 pub(crate) mod tree;
 mod worker;
+
+pub use le_selfplay::generate_le;
 
 use crate::config::RunConfig;
 use crate::metrics::Metrics;
@@ -57,6 +60,10 @@ pub struct SelfPlayState {
     /// Full frame history of each in-flight game, from its turn 0. The single
     /// source of truth for both training samples and browsable replays.
     pub rec: Vec<Vec<FrameJson>>,
+    /// Per-game episode inverse-temperature τ (parallel to `boards`), for the
+    /// Logit-Equilibrium mode — assigned at game start, constant for the game's
+    /// life. Empty/unused in the AZ path.
+    pub temp: Vec<f32>,
     /// Every game that has finished in the current (not-yet-committed)
     /// generation. A random subset is written for the dashboard; all of them are
     /// materialised into this generation's training samples when the sample
@@ -291,6 +298,7 @@ pub fn generate(
         pol: Vec::new(),
         z: Vec::new(),
         turn: Vec::new(),
+        temp: Vec::new(),
         obs_shape: [c, h, w],
         turns: call_turns.load(Ordering::Relaxed) as usize,
         games: call_games.load(Ordering::Relaxed) as usize,

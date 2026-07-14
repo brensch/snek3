@@ -18,7 +18,6 @@ export type RunConfig = {
   // AlphaZero root-prior Dirichlet exploration inside the self-play search.
   dirichlet_frac: number;
   dirichlet_alpha: number;
-  max_turns: number;
   draw_value: number;
   skip_short_draw_turns: number;
   trunk_channels: number;

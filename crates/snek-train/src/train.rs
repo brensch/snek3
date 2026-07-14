@@ -72,7 +72,7 @@ pub fn build_optimizer(vs: &nn::VarStore, cfg: &RunConfig) -> anyhow::Result<nn:
     Ok(nn::AdamW::default().wd(cfg.weight_decay).build(vs, LR_BASE)?)
 }
 
-fn train_one(
+pub(crate) fn train_one(
     net: &snek_tch::AZNet,
     device: Device,
     opt: &mut nn::Optimizer,
@@ -81,9 +81,20 @@ fn train_one(
 ) -> anyhow::Result<TrainMetrics> {
     let b = batch.len();
     let [c, h, w] = batch.obs_shape;
-    let obs = Tensor::from_slice(&batch.obs)
-        .reshape([b as i64, c as i64, h as i64, w as i64])
-        .to_device(device);
+    // Logit-Equilibrium batches carry a per-sample τ: append it as an extra
+    // input plane (τ/TEMP_SCALE) so the net conditions on it. Done here, after
+    // the buffer's D4 augmentation, so symmetry never touches the τ plane. The
+    // AZ path (`temp` empty) forwards the plain 14-ch obs unchanged.
+    let obs = if batch.temp.is_empty() {
+        Tensor::from_slice(&batch.obs)
+            .reshape([b as i64, c as i64, h as i64, w as i64])
+            .to_device(device)
+    } else {
+        let obs15 = snek_core::append_temp_planes(&batch.obs, &batch.temp, h * w);
+        Tensor::from_slice(&obs15)
+            .reshape([b as i64, snek_core::NUM_CHANNELS_TEMP as i64, h as i64, w as i64])
+            .to_device(device)
+    };
     let target_pol = Tensor::from_slice(&batch.pol)
         .reshape([b as i64, 4])
         .to_device(device);

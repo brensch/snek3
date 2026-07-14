@@ -282,6 +282,8 @@ pub fn run_burst(
         recorded: AtomicUsize::new(0),
         finished: Mutex::new(Vec::new()),
         planned: Mutex::new(HashMap::new()),
+        steps: AtomicU64::new(0),
+        completed_turns: AtomicU64::new(0),
         target: target_games,
         counters: &counters,
         stop,
@@ -309,6 +311,7 @@ pub fn run_burst(
                     match_ctx,
                     cfg,
                     sims,
+                    LEAGUE_MAX_TURNS,
                     device,
                     shared,
                     seed ^ (w as u64) << 48,
@@ -390,6 +393,208 @@ struct FinishedGame {
     frames: Option<Vec<FrameJson>>,
 }
 
+/// Full-strength, GPU-batched round-robin among exactly `num_snakes`
+/// checkpoints, driven by the *same* lockstep batched engine (`worker_loop`)
+/// the training-cycle burst uses — every game seats all the given gens (with
+/// rotation), so it's a controlled head-to-head, not the Elo league's
+/// matchmaking. Prints each gen's win% + average rank + pairwise
+/// later-vs-earlier record. Independent of the league rating system.
+pub fn run_round_robin(
+    checkpoint_dir: &Path,
+    device: Device,
+    metrics: &Metrics,
+    cfg: &RunConfig,
+    gens: &[u32],
+    target_games: usize,
+    sims: usize,
+) -> anyhow::Result<()> {
+    let n = cfg.num_snakes;
+    anyhow::ensure!(
+        gens.len() == n,
+        "round-robin needs exactly num_snakes ({n}) gens, got {}",
+        gens.len()
+    );
+    let stations: Vec<u32> = gens.to_vec();
+    let mut nets: Vec<LoadedNet> = Vec::with_capacity(stations.len());
+    for &gen in &stations {
+        let path = checkpoint_dir.join(format!("net_{gen:04}.safetensors"));
+        anyhow::ensure!(path.exists(), "missing checkpoint {}", path.display());
+        let mut vs = nn::VarStore::new(device);
+        let net = snek_tch::AZNet::new(
+            &vs.root(),
+            NUM_CHANNELS as i64,
+            cfg.trunk_channels,
+            cfg.trunk_blocks,
+        );
+        vs.load(&path)?;
+        vs.freeze();
+        nets.push(LoadedNet { vs, net });
+    }
+    let slots_total = cfg.gpu_batch_games.max(2);
+    let counters = metrics.counters();
+    counters.arena_target.store(target_games as u32, Ordering::Relaxed);
+    counters.arena_done.store(0, Ordering::Relaxed);
+    let stop = AtomicBool::new(false);
+    let heuristics: Vec<(u32, snek_heuristic::Baseline)> = Vec::new();
+    let ratings: HashMap<u32, f64> = HashMap::new();
+    let career: HashMap<u32, u32> = HashMap::new();
+    let shared = WorkerShared {
+        gpu_lock: Mutex::new(()),
+        completed: AtomicUsize::new(0),
+        recorded: AtomicUsize::new(0),
+        finished: Mutex::new(Vec::new()),
+        planned: Mutex::new(HashMap::new()),
+        steps: AtomicU64::new(0),
+        completed_turns: AtomicU64::new(0),
+        target: target_games,
+        counters: &counters,
+        stop: &stop,
+    };
+    let mc = MatchCtx {
+        stations: &stations,
+        heuristics: &heuristics,
+        ratings: &ratings,
+        career: &career,
+        num_snakes: n,
+    };
+    let mut slots: Vec<Option<CarriedGame>> = (0..slots_total).map(|_| None).collect();
+    let workers = std::env::var("SNEK_BURST_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&w| w >= 1)
+        .unwrap_or(2)
+        .min(slots_total);
+    let chunk = slots_total.div_ceil(workers);
+    let seed = 0xD00D_5EED_1234_9ABCu64;
+    println!(
+        "round-robin (GPU-batched): gens {:?} · target {} games · {} sims/move (league uses 64) · {} slots × {} workers",
+        gens, target_games, sims, slots_total, workers
+    );
+    let started = Instant::now();
+    let progress_done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        // Live progress: games done, rate, and ETA every 5s (worker_loop only
+        // reports at the very end, so this is our only in-flight visibility).
+        {
+            let counters = &counters;
+            let progress_done = &progress_done;
+            let shared_ref = &shared;
+            scope.spawn(move || {
+                let (mut last, mut last_steps, mut lastt) = (0u32, 0u64, Instant::now());
+                let (mut last_reqs, mut last_fus) = (0u64, 0u64);
+                while !progress_done.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let d = counters.arena_done.load(Ordering::Relaxed);
+                    let steps = shared_ref.steps.load(Ordering::Relaxed);
+                    let done_turns = shared_ref.completed_turns.load(Ordering::Relaxed);
+                    let avg_turn = steps.saturating_sub(done_turns) as f64 / slots_total.max(1) as f64;
+                    let dt = lastt.elapsed().as_secs_f64().max(1e-9);
+                    lastt = Instant::now();
+                    let per_game_tps =
+                        (steps.saturating_sub(last_steps)) as f64 / dt / slots_total.max(1) as f64;
+                    // Forward-level benchmark: is a forward a big 512-row batch
+                    // (intrinsic) or tiny (poor batching)? and how long does one
+                    // take (graph fast-path ~tens of µs vs eager ~tens of ms)?
+                    let reqs = counters.gpu_requests.load(Ordering::Relaxed);
+                    let rows = counters.gpu_rows.load(Ordering::Relaxed);
+                    let fus = counters.gpu_forward_us.load(Ordering::Relaxed);
+                    let dreq = reqs.saturating_sub(last_reqs).max(1);
+                    let rows_per_fwd = rows.wrapping_sub(0) as f64 / reqs.max(1) as f64;
+                    let us_per_fwd = (fus.saturating_sub(last_fus)) as f64 / dreq as f64;
+                    let dsteps = steps.saturating_sub(last_steps);
+                    let lockstep_turns = dsteps as f64 / slots_total.max(1) as f64;
+                    let fwd_per_turn = dreq as f64 / lockstep_turns.max(1e-9);
+                    eprintln!(
+                        "  {d}/{target_games} done · avg turn {avg_turn:.0} · {per_game_tps:.2} t/s/game · {:.0}s | BENCH: {rows_per_fwd:.0} rows/fwd · {us_per_fwd:.0}us/fwd · {fwd_per_turn:.0} fwd/lockstep-turn",
+                        started.elapsed().as_secs_f64()
+                    );
+                    (last, last_steps, last_reqs, last_fus) = (d, steps, reqs, fus);
+                }
+            });
+        }
+        let mut handles = Vec::new();
+        for (w, slot_chunk) in slots.chunks_mut(chunk).enumerate() {
+            let shared = &shared;
+            let mc = &mc;
+            let nets = &nets;
+            handles.push(scope.spawn(move || {
+                worker_loop(
+                    slot_chunk,
+                    nets,
+                    mc,
+                    cfg,
+                    sims,
+                    0, // unlimited: run each game to a natural single-survivor terminal
+                    device,
+                    shared,
+                    seed ^ ((w as u64) << 48),
+                )
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        progress_done.store(true, Ordering::Relaxed);
+    });
+    // ---- Tally: per-gen win%/avg-rank + pairwise later-vs-earlier ----
+    let finished = shared.finished.into_inner().unwrap();
+    let idx_of: HashMap<u32, usize> = gens.iter().enumerate().map(|(i, &g)| (g, i)).collect();
+    let (mut games, mut wins, mut rank_sum) = (vec![0u64; n], vec![0u64; n], vec![0u64; n]);
+    let mut beats = vec![vec![0u64; n]; n];
+    for f in &finished {
+        let mut rank_of = vec![0u32; n];
+        for p in &f.placements {
+            if let Some(&i) = idx_of.get(&p.gen) {
+                rank_of[i] = p.rank;
+                games[i] += 1;
+                rank_sum[i] += p.rank as u64;
+                if p.rank == 1 {
+                    wins[i] += 1;
+                }
+            }
+        }
+        for i in 0..n {
+            for j in 0..n {
+                if i != j && rank_of[i] > 0 && rank_of[i] < rank_of[j] {
+                    beats[i][j] += 1;
+                }
+            }
+        }
+    }
+    println!(
+        "\ncompleted {} games in {:.0}s:\n  {:>6}   win%   avg_rank",
+        finished.len(),
+        started.elapsed().as_secs_f64(),
+        "gen"
+    );
+    for (i, &g) in gens.iter().enumerate() {
+        let gp = games[i].max(1) as f64;
+        println!(
+            "  {:>6}  {:>5.1}   {:.3}",
+            g,
+            100.0 * wins[i] as f64 / gp,
+            rank_sum[i] as f64 / gp
+        );
+    }
+    println!("\n  later-vs-earlier (later gen outranks earlier, % of decisive games):");
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (later, earlier) = (beats[j][i], beats[i][j]);
+            let dec = later + earlier;
+            let pct = if dec > 0 {
+                format!("{:.1}%", 100.0 * later as f64 / dec as f64)
+            } else {
+                "n/a".to_string()
+            };
+            println!(
+                "    gen {:>5} vs gen {:>5}: {:>6}  ({} decisive)",
+                gens[j], gens[i], pct, dec
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Everything the workers share during one burst.
 struct WorkerShared<'a> {
     gpu_lock: Mutex<()>,
@@ -404,6 +609,11 @@ struct WorkerShared<'a> {
     target: usize,
     counters: &'a Counters,
     stop: &'a AtomicBool,
+    /// Total board-steps across all live slots (for a live turn-rate readout).
+    steps: AtomicU64,
+    /// Turns belonging to already-finished games, so in-flight average turn =
+    /// (steps - completed_turns) / live_slots.
+    completed_turns: AtomicU64,
 }
 
 /// Immutable matchmaking inputs, snapshotted at burst start.
@@ -457,6 +667,7 @@ fn worker_loop(
     mc: &MatchCtx<'_>,
     cfg: &RunConfig,
     sims: usize,
+    max_turns: u32,
     device: Device,
     shared: &WorkerShared<'_>,
     seed: u64,
@@ -739,6 +950,7 @@ fn worker_loop(
             }
             slot.game.board.step_and_spawn(&actions, &mut rng);
             slot.game.turn += 1;
+            shared.steps.fetch_add(1, Ordering::Relaxed);
             for seat in 0..n {
                 if !slot.game.board.snakes[seat].alive() && slot.game.death_turn[seat].is_none() {
                     slot.game.death_turn[seat] = Some(slot.game.turn);
@@ -761,7 +973,7 @@ fn worker_loop(
                 .collect();
             alive_players.sort_unstable();
             alive_players.dedup();
-            if alive_players.len() > 1 && slot.game.turn < LEAGUE_MAX_TURNS {
+            if alive_players.len() > 1 && (max_turns == 0 || slot.game.turn < max_turns) {
                 continue;
             }
 
@@ -791,6 +1003,9 @@ fn worker_loop(
             };
             let order = shared.completed.fetch_add(1, Ordering::Relaxed);
             shared.counters.arena_done.fetch_add(1, Ordering::Relaxed);
+            shared
+                .completed_turns
+                .fetch_add(slot.game.turn as u64, Ordering::Relaxed);
             shared.finished.lock().unwrap().push(FinishedGame {
                 finished_order: order,
                 players: slot.game.players.clone(),

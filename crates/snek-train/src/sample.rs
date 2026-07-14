@@ -41,6 +41,11 @@ pub struct GameJson {
     /// sparring partner, never to imitate it). 0 for ordinary net-vs-net games.
     #[serde(default)]
     pub heur_mask: u8,
+    /// Per-episode inverse-temperature τ for Logit-Equilibrium self-play. The
+    /// game's LE policy/value targets (stored in each `SnakeJson`) were computed
+    /// at this τ, and it conditions the net at materialisation. 0 for AZ games.
+    #[serde(default)]
+    pub temp: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -205,12 +205,24 @@ impl TrainerHandle {
             .store(matches!(device, Device::Cuda(_)), Ordering::Relaxed);
         tracing::info!(?device, "trainer selected device");
         let mut vs = nn::VarStore::new(device);
-        let net = snek_tch::AZNet::new(
-            &vs.root(),
-            snek_core::NUM_CHANNELS as i64,
-            cfg.trunk_channels,
-            cfg.trunk_blocks,
-        );
+        // cuDNN benchmark autotunes per input shape — a big win for the AZ
+        // worker's fixed batch shapes, but CATASTROPHIC for LE self-play: its
+        // batch (live-game leaves × seats) changes every single turn, so
+        // benchmark re-ran a ~1.7s algorithm search on virtually every forward
+        // (~1746ms/turn measured). Forcing it off in LE mode drops the forward to
+        // ~112ms/turn (15× faster gens). Non-LE runs keep it on (main.rs default).
+        if cfg.le_mode {
+            tch::Cuda::cudnn_set_benchmark(false);
+            self.log("LE mode: cuDNN benchmark OFF (variable per-turn batch shape)");
+        }
+        // Logit-Equilibrium mode conditions on τ via one extra input plane
+        // (NUM_CHANNELS_TEMP = 15); the AZ path stays at NUM_CHANNELS (14).
+        let in_ch = if cfg.le_mode {
+            snek_core::NUM_CHANNELS_TEMP
+        } else {
+            snek_core::NUM_CHANNELS
+        } as i64;
+        let net = snek_tch::AZNet::new(&vs.root(), in_ch, cfg.trunk_channels, cfg.trunk_blocks);
         if !fresh && paths.net.exists() {
             vs.load(&paths.net)?;
         } else {
@@ -252,7 +264,18 @@ impl TrainerHandle {
         // Bradley–Terry Elo ratings in runs/<id>/eval/. Stops when we stop. The
         // returned context is shared with the GPU burst arena below so burst
         // games land in the same records.
-        let league = crate::eval::start_league(paths.clone(), self.clone(), self.stop.clone());
+        // The AZ checkpoint-vs-checkpoint league/burst serve 14-ch nets through the
+        // MCTS server, so they are disabled in LE mode (15-ch nets + LE search);
+        // LE gets its own held-out equilibrium eval (see instrumentation).
+        let league = if cfg.le_mode {
+            None
+        } else {
+            Some(crate::eval::start_league(
+                paths.clone(),
+                self.clone(),
+                self.stop.clone(),
+            ))
+        };
         // The GPU burst arena's carried state: in-flight cross-generation
         // games persist across bursts (and generations), so each burst
         // resumes a saturated buffer instead of cold-starting.
@@ -270,14 +293,13 @@ impl TrainerHandle {
             let gen_start = Instant::now();
             let inf_before = counters.inferences.load(Ordering::Relaxed);
             let fwd_us_before = counters.gpu_forward_us.load(Ordering::Relaxed);
-            let outcome = generate(
-                &SelfPlayNet { net: &net, device },
-                &cfg,
-                state.seed + state.generation as u64,
-                &self.metrics,
-                &self.stop,
-                &mut sp,
-            )?;
+            let sp_net = SelfPlayNet { net: &net, device };
+            let seed = state.seed + state.generation as u64;
+            let outcome = if cfg.le_mode {
+                crate::selfplay::generate_le(&sp_net, &cfg, seed, &self.metrics, &self.stop, &mut sp)?
+            } else {
+                generate(&sp_net, &cfg, seed, &self.metrics, &self.stop, &mut sp)?
+            };
             // A pause interrupts the generation: snapshot the whole session (in-
             // flight games + this generation's accumulated finished games) and bail
             // out without training. Resume reloads it and continues the *same*
@@ -353,6 +375,71 @@ impl TrainerHandle {
             if let Err(err) = publish_serving(&paths.net, run_id, state.generation, &cfg) {
                 self.log(format!("serving publish failed: {err:#}"));
             }
+            // Held-out LE strength eval (the AZ league is disabled in LE mode):
+            // the net plays its equilibrium search at serve-τ against heuristics
+            // it never trains against. This is the "is it working" signal — run
+            // it before the metrics row so the win rates persist in the same
+            // record and chart on the dashboard (not just an ephemeral log line).
+            let (le_ff_winrate, le_vor_winrate) = if cfg.le_mode
+                && cfg.league_entrant_gens > 0
+                && (state.generation as usize).is_multiple_of(cfg.league_entrant_gens)
+                && !self.stop.load(Ordering::Relaxed)
+            {
+                self.metrics.set_phase(crate::proto::Phase::Arena);
+                let games = cfg.league_games.max(8);
+                let stau = cfg.response_tau;
+                // Drive the dashboard's ARENA progress meter: two opponents,
+                // `games` each, accumulating into arena_done across both calls.
+                let counters = self.metrics.counters();
+                counters
+                    .arena_target
+                    .store((2 * games) as u32, Ordering::Relaxed);
+                counters.arena_done.store(0, Ordering::Relaxed);
+                let ff = snek_heuristic::Baseline::parse("floodfill").unwrap();
+                let vor = snek_heuristic::Baseline::parse("voronoi").unwrap();
+                // Record a handful of games per opponent so the actual play is
+                // auditable in the frontend (the win rate alone can lie).
+                let rec_n = 4usize;
+                let gen_id = state.generation;
+                let (vff, rec_ff) = crate::le_eval::eval_le_vs_baseline(
+                    &net, device, &cfg, ff, 0, games, stau, state.seed ^ 0xE3E3,
+                    Some(&counters.arena_done), gen_id, crate::eval::HEURISTIC_GEN, rec_n,
+                );
+                let (vvor, rec_vor) = crate::le_eval::eval_le_vs_baseline(
+                    &net, device, &cfg, vor, cfg.eval_sims.max(8), games, stau,
+                    state.seed ^ 0xE7E7, Some(&counters.arena_done), gen_id,
+                    crate::eval::VORONOI_GEN, rec_n,
+                );
+                // Clear the meter so it doesn't linger into the next gen.
+                counters.arena_target.store(0, Ordering::Relaxed);
+                counters.arena_done.store(0, Ordering::Relaxed);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                if let Err(e) =
+                    crate::le_eval::write_eval_games(&paths.root, 0, now_ms, &rec_ff)
+                {
+                    self.log(format!("LE eval: failed to record floodfill games: {e}"));
+                }
+                if let Err(e) = crate::le_eval::write_eval_games(
+                    &paths.root,
+                    cfg.eval_sims.max(8) as u32,
+                    now_ms,
+                    &rec_vor,
+                ) {
+                    self.log(format!("LE eval: failed to record voronoi games: {e}"));
+                }
+                self.log(format!(
+                    "LE eval gen {gen}: vs floodfill {ff:.0}% · vs voronoi {vor:.0}% (serve τ={stau:.1}, {games} games/opp)",
+                    gen = state.generation,
+                    ff = vff * 100.0,
+                    vor = vvor * 100.0,
+                ));
+                (Some(vff), Some(vvor))
+            } else {
+                (None, None)
+            };
             append_metric(
                 &paths.metrics,
                 &GenRecord {
@@ -378,6 +465,8 @@ impl TrainerHandle {
                     gpu_busy_pct: (100.0 * safe_div(gpu_forward_seconds, play_seconds))
                         .clamp(0.0, 100.0),
                     avg_game_turn,
+                    le_ff_winrate,
+                    le_vor_winrate,
                 },
             )?;
             self.log(format!(
@@ -396,7 +485,8 @@ impl TrainerHandle {
             // new league entrant every `league_entrant_gens` — spend one cycle
             // rating it (and back-filling the pool) at self-play throughput
             // before the next generation starts.
-            if cfg.burst_games > 0
+            if !cfg.le_mode
+                && cfg.burst_games > 0
                 && cfg.league_entrant_gens > 0
                 && (state.generation as usize).is_multiple_of(cfg.league_entrant_gens)
                 && !self.stop.load(Ordering::Relaxed)
@@ -408,7 +498,7 @@ impl TrainerHandle {
                 // entrant gets a fresh buffer.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::eval::burst::run_burst(
-                        &league,
+                        league.as_ref().expect("league present when not le_mode"),
                         &cfg,
                         device,
                         &self.metrics,
@@ -437,6 +527,7 @@ impl TrainerHandle {
                     )),
                 }
             }
+
             state.generation += 1;
             save_trainer_state(&paths.trainer_state, &state)?;
         }
@@ -485,6 +576,14 @@ struct GenRecord {
     turns_per_sec: f64,
     gpu_busy_pct: f64,
     avg_game_turn: f64,
+    /// Held-out LE strength (win rate 0..1) vs heuristics the net never trains
+    /// against — the "is it actually getting stronger" signal. Only present on
+    /// eval gens (every `league_entrant_gens`); omitted otherwise so the
+    /// dashboard plots a point per measurement instead of a flat zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    le_ff_winrate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    le_vor_winrate: Option<f64>,
 }
 
 /// Copy the current net to `checkpoints/serving.safetensors` (+ provenance

@@ -11,6 +11,10 @@ pub struct Samples {
     /// Absolute game turn per sample (parallel to `z`). Defaulted for old shards.
     #[serde(default)]
     pub turn: Vec<u32>,
+    /// Per-sample inverse-temperature τ (parallel to `z`), for the
+    /// Logit-Equilibrium mode's τ-conditioned net. Empty in the AZ path.
+    #[serde(default)]
+    pub temp: Vec<f32>,
     pub obs_shape: [usize; 3],
     pub turns: usize,
     pub games: usize,
@@ -61,12 +65,16 @@ impl ReplayBuffer {
         let mut obs = Vec::with_capacity(batch * obs_len);
         let mut pol = Vec::with_capacity(batch * 4);
         let mut z = Vec::with_capacity(batch);
+        let mut temp = Vec::with_capacity(batch);
         for _ in 0..batch {
             let idx = self.draw_index(recency, rng);
             let (s, local) = self.locate(idx)?;
             obs.extend_from_slice(&s.obs[local * obs_len..(local + 1) * obs_len]);
             pol.extend_from_slice(&s.pol[local * 4..(local + 1) * 4]);
             z.push(s.z[local]);
+            if !s.temp.is_empty() {
+                temp.push(s.temp[local]);
+            }
         }
         apply_random_d4(&mut obs, &mut pol, batch, first.obs_shape, rng);
         Some(Samples {
@@ -74,6 +82,7 @@ impl ReplayBuffer {
             pol,
             z,
             turn: Vec::new(),
+            temp,
             obs_shape: first.obs_shape,
             turns: 0,
             games: 0,
@@ -282,6 +291,7 @@ mod tests {
             pol: vec![0.25; n * 4],
             z: vec![0.5; n],
             turn: (turn0..turn0 + n as u32).collect(),
+            temp: Vec::new(),
             obs_shape: [1, 2, 2],
             turns: n,
             games: 1,

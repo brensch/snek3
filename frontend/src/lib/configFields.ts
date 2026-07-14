@@ -14,7 +14,6 @@ export const configFields: Array<{ key: keyof RunConfig; label: string; hint?: s
   { key: "dirichlet_frac", label: "Root noise", hint: "frac at search root" },
   { key: "dirichlet_alpha", label: "Root α" },
   { key: "draw_value", label: "Draw value" },
-  { key: "max_turns", label: "Max turns" },
   { key: "skip_short_draw_turns", label: "Skip draws" },
   { key: "trunk_channels", label: "Channels" },
   { key: "trunk_blocks", label: "Blocks" },
