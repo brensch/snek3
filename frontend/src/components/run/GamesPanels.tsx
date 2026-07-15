@@ -1,12 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import type { LiveEval, LiveEvalGame } from "../../api/eval";
 import { getEvalGameFile, getGameFile } from "../../api/proto";
 import type { GameFile, GameGen, LeagueMatch, MatchPlacement, MetricRow } from "../../gen/viewer_pb";
 import { playerColor, snakeColor } from "../../lib/palette";
 import { playerName, playerNameLong } from "../../lib/players";
-import { Board } from "../Board";
-import type { Coord } from "../Board";
 import { GameTile } from "../GameTile";
 
 type Props = {
@@ -14,7 +11,6 @@ type Props = {
   matches: LeagueMatch[];
   gameGens: GameGen[];
   metrics: MetricRow[];
-  liveMatch: LiveEval | null;
   /** Which game collection this instance shows (each has its own tab). */
   mode: "selfplay" | "arena";
 };
@@ -29,10 +25,10 @@ const PAGE_SIZES = [12, 24, 48, 96];
 
 // Watch actual play — the qualitative gut check the charts can't give. Two
 // tabs, each a GamesPanels instance: "self-play" (the games training learns
-// from) and "arena" (live + recorded held-out/league games). One control row
-// scopes the tab; the Size slider doubles as the arena history's zoom (small
-// enough and it becomes a pure results table).
-export function GamesPanels({ runId, matches, gameGens, metrics, liveMatch, mode }: Props) {
+// from) and "arena" (recorded held-out/league games). One control row scopes
+// the tab; the Size slider doubles as the arena history's zoom (small enough
+// and it becomes a pure results table).
+export function GamesPanels({ runId, matches, gameGens, metrics, mode }: Props) {
   const [fps, setFps] = useState(12);
   const [cell, setCell] = useState(14);
   const [followLatest, setFollowLatest] = useState(true);
@@ -74,19 +70,15 @@ export function GamesPanels({ runId, matches, gameGens, metrics, liveMatch, mode
           cell={cell}
         />
       ) : (
-        // Stretch (no items-start) so the two panel cards share the row's height.
-        <div className="grid gap-2.5 lg:grid-cols-2">
-          <LivePanel live={liveMatch} cell={cell} />
-          <LeaguePanel
-            runId={runId}
-            matches={matches}
-            title={isLE ? "Held-out games" : "League game history"}
-            followLatest={followLatest}
-            setFollow={setFollowLatest}
-            intervalMs={intervalMs}
-            cell={cell}
-          />
-        </div>
+        <LeaguePanel
+          runId={runId}
+          matches={matches}
+          title={isLE ? "Held-out games" : "League game history"}
+          followLatest={followLatest}
+          setFollow={setFollowLatest}
+          intervalMs={intervalMs}
+          cell={cell}
+        />
       )}
     </section>
   );
@@ -129,75 +121,6 @@ function RankingLine({ placements }: { placements: MatchPlacement[] }) {
         </span>
       ))}
     </span>
-  );
-}
-
-// The league games being played right now (streamed over SSE): one small
-// board per game slot, each with its own players. Seat s is played by player
-// s % N, so chip and snake colors match — and a player keeps its color
-// everywhere in the dashboard (hashed from its name).
-function LivePanel({ live, cell }: { live: LiveEval | null; cell: number }) {
-  const games = live?.active ? live.games : [];
-  return (
-    <PanelShell
-      accent={games.length > 0}
-      liveDot={games.length > 0}
-      title={games.length > 0 ? `Live league games (${games.length})` : "Live league games"}
-    >
-      {games.length === 0 ? (
-        <div className="text-xs text-ink-3">
-          {live?.active ? "starting games…" : "League paused — games run while the trainer is active."}
-        </div>
-      ) : (
-        <div className="grid gap-2.5" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${cell * 12}px, 1fr))` }}>
-          {games.map((g) => (
-            <LiveGameCard key={g.seq} game={g} cell={cell} />
-          ))}
-        </div>
-      )}
-    </PanelShell>
-  );
-}
-
-function LiveGameCard({ game, cell }: { game: LiveEvalGame; cell: number }) {
-  const pt = ([x, y]: [number, number]): Coord => ({ x, y });
-  const f = game.frame;
-  const colors =
-    f && game.players.length > 0
-      ? f.snakes.map((_, seat) => genColor(game.players[seat % game.players.length].gen))
-      : undefined;
-  return (
-    <div className="card overflow-hidden p-2">
-      <div className="mb-1.5 grid grid-cols-2 gap-1">
-        {game.players.map((p, i) => (
-          <span key={i} className="flex items-baseline gap-1 rounded bg-inset px-1.5 py-0.5 text-[10px]">
-            <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full" style={{ background: genColor(p.gen) }} />
-            <span className="truncate font-mono font-semibold text-ink">{p.name || playerName(p.gen)}</span>
-            <span className="ml-auto font-mono tabular-nums text-ink-2">
-              {p.elo >= 0 ? "+" : ""}
-              {p.elo.toFixed(0)}
-            </span>
-          </span>
-        ))}
-      </div>
-      {f ? (
-        <Board
-          width={f.width}
-          height={f.height}
-          snakes={f.snakes.map((s) => ({ body: s.body.map(pt), alive: s.alive }))}
-          food={f.food.map(pt)}
-          hazards={f.hazards.map(pt)}
-          cell={cell}
-          colors={colors}
-        />
-      ) : (
-        <div className="flex h-16 items-center justify-center text-[10px] text-ink-3">starting…</div>
-      )}
-      <div className="mt-1 flex items-center justify-between font-mono text-[10px] tabular-nums text-ink-3">
-        <span>#{String(game.seq)} · turn {game.turn}</span>
-        <span>{f ? `${f.snakes.filter((s) => s.alive).length} alive` : ""}</span>
-      </div>
-    </div>
   );
 }
 

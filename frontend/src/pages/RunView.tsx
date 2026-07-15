@@ -10,7 +10,6 @@ import { LogsPanel } from "../components/run/LogsPanel";
 import { StrengthHero } from "../components/run/StrengthHero";
 import { TopBar } from "../components/run/TopBar";
 import { Phase } from "../gen/snek_pb";
-import { useEvalLive } from "../hooks/useEvalLive";
 import { useLiveStats } from "../hooks/useLiveStats";
 import { useLogs } from "../hooks/useLogs";
 import { useRunDetail } from "../hooks/useRunDetail";
@@ -36,7 +35,6 @@ export function RunView() {
   const summary = detail?.summary ?? null;
   const isLive = summary?.live ?? false;
   const live = useLiveStats(isLive);
-  const liveMatch = useEvalLive(isLive);
   const logs = useLogs();
 
   const [params, setParams] = useSearchParams();
@@ -241,7 +239,6 @@ export function RunView() {
             matches={detail?.matches ?? []}
             gameGens={detail?.gameGens ?? []}
             metrics={metrics}
-            liveMatch={liveMatch}
             mode={tab === "self-play" ? "selfplay" : "arena"}
           />
         )}
