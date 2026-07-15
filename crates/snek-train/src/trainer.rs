@@ -305,7 +305,6 @@ impl TrainerHandle {
             let counters = self.metrics.counters();
             let gen_start = Instant::now();
             let inf_before = counters.inferences.load(Ordering::Relaxed);
-            let fwd_us_before = counters.gpu_forward_us.load(Ordering::Relaxed);
             let sp_net = SelfPlayNet { net: &net, device };
             let seed = state.seed + state.generation as u64;
             let outcome = if cfg.le_mode {
@@ -331,11 +330,6 @@ impl TrainerHandle {
             let gen_turns = samples.turns as u32;
             let gen_samples = samples.len() as u32;
             let gen_inferences = counters.inferences.load(Ordering::Relaxed) - inf_before;
-            let gpu_forward_seconds = counters
-                .gpu_forward_us
-                .load(Ordering::Relaxed)
-                .saturating_sub(fwd_us_before) as f64
-                / 1_000_000.0;
 
             if !display_games.is_empty() {
                 if let Err(err) = crate::sample::write_generation(
@@ -475,8 +469,14 @@ impl TrainerHandle {
                     inferences_per_sec: safe_div(gen_inferences as f64, play_seconds),
                     games_per_sec: safe_div(gen_completed_games as f64, play_seconds),
                     turns_per_sec: safe_div(gen_turns as f64, play_seconds),
-                    gpu_busy_pct: (100.0 * safe_div(gpu_forward_seconds, play_seconds))
-                        .clamp(0.0, 100.0),
+                    // True device utilization: mean of the NVML samples taken
+                    // since the last gen record (the metrics sampler feeds
+                    // gpu_util_sum/n every 250ms).
+                    gpu_busy_pct: {
+                        let sum = counters.gpu_util_sum.swap(0, Ordering::Relaxed);
+                        let nsm = counters.gpu_util_n.swap(0, Ordering::Relaxed);
+                        safe_div(sum as f64, nsm as f64)
+                    },
                     avg_game_turn,
                     le_ff_winrate,
                     le_vor_winrate,

@@ -36,6 +36,11 @@ pub struct Counters {
     pub gpu_forward_us: AtomicU64,
     pub gpu_requests: AtomicU64,
     pub gpu_rows: AtomicU64,
+    /// True device utilization sampled from NVML every stats tick (the same
+    /// source nvidia-smi / task manager read). `sum`/`n` let the trainer take
+    /// a per-generation average; both are swapped to zero at each gen record.
+    pub gpu_util_sum: AtomicU64,
+    pub gpu_util_n: AtomicU64,
     /// GPU burst arena progress (games finished / targeted); zero outside a
     /// burst.
     pub arena_done: AtomicU32,
@@ -117,9 +122,26 @@ impl Metrics {
         let mut gpu_busy_ema = 0.0;
         let mut avg_turn_ema = 0.0;
         let mut initialized = false;
+        // Device utilization straight from NVML — the same counter nvidia-smi
+        // and task manager show. The trainer requires CUDA, so NVML is a hard
+        // requirement too. The versioned lib name matters: WSL (and most
+        // distros without the dev package) ship only libnvidia-ml.so.1, and
+        // the default loader tries the unversioned name.
+        let nvml = nvml_wrapper::Nvml::builder()
+            .lib_path(std::ffi::OsStr::new("libnvidia-ml.so.1"))
+            .init()
+            .expect("NVML (libnvidia-ml.so.1) unavailable — required for the GPU utilization stat");
         let mut stats_tick = tokio::time::interval(Duration::from_millis(250));
         loop {
             stats_tick.tick().await;
+            let gpu_util_sample = nvml
+                .device_by_index(0)
+                .ok()
+                .and_then(|d| d.utilization_rates().ok())
+                .map(|u| u.gpu as f64)
+                .unwrap_or(0.0);
+            self.counters.gpu_util_sum.fetch_add(gpu_util_sample as u64, Ordering::Relaxed);
+            self.counters.gpu_util_n.fetch_add(1, Ordering::Relaxed);
             let now = Instant::now();
             let dt = now.duration_since(last_at).as_secs_f64().max(1e-9);
             let inf = self.counters.inferences.load(Ordering::Relaxed);
@@ -131,7 +153,7 @@ impl Metrics {
             let raw_inf_rate = (inf - last_inf) as f64 / dt;
             let raw_games_rate = (games - last_games) as f64 / dt;
             let fwd_delta_us = fwd_us.saturating_sub(last_fwd_us);
-            let raw_gpu_busy = (100.0 * fwd_delta_us as f64 / (dt * 1_000_000.0)).clamp(0.0, 100.0);
+            let raw_gpu_busy = gpu_util_sample;
             // Mean length of games completing this window; only updated when
             // games actually finished, so it holds steady through training.
             let games_delta = games.saturating_sub(last_games);
