@@ -125,10 +125,6 @@ pub struct RunConfig {
     pub tau_min: f32,
     #[serde(default = "default_tau_max")]
     pub tau_max: f32,
-    /// Uniform-over-legal exploration mixed into the played (not target) policy
-    /// before sampling the self-play move.
-    #[serde(default = "default_le_exploration")]
-    pub le_exploration: f32,
     /// Rational responder inverse-temperature for the exploit path (Stage B).
     #[serde(default = "default_response_tau")]
     pub response_tau: f32,
@@ -196,9 +192,6 @@ fn default_tau_min() -> f32 {
 }
 fn default_tau_max() -> f32 {
     10.0
-}
-fn default_le_exploration() -> f32 {
-    0.15
 }
 fn default_response_tau() -> f32 {
     12.0
@@ -332,7 +325,6 @@ impl Default for RunConfig {
             scenarios: Vec::new(),
             tau_min: default_tau_min(),
             tau_max: default_tau_max(),
-            le_exploration: default_le_exploration(),
             response_tau: default_response_tau(),
             response_after: default_response_after(),
             le_outcome_weight: default_le_outcome_weight(),

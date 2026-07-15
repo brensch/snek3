@@ -556,7 +556,6 @@ mod tests {
         c.sample_games = 1;
         c.tau_min = 0.5;
         c.tau_max = 10.0;
-        c.le_exploration = 0.15;
         c.le_outcome_weight = 0.5;
         c
     }
