@@ -11,12 +11,20 @@ use tch::{nn, Device, Kind, Tensor};
 
 fn main() {
     let dev = Device::Cuda(0);
-    // cuDNN benchmark/TF32 like the training stack (allow_tf32 is on there).
-    tch::Cuda::cudnn_set_benchmark(true);
+    // cuDNN benchmark toggle: SNEK_CUDNN_BENCH=0 to disable (mimics LE's
+    // variable-per-turn batch shape where benchmark is forced off).
+    let bench = std::env::var("SNEK_CUDNN_BENCH").as_deref() != Ok("0");
+    tch::Cuda::cudnn_set_benchmark(bench);
+    // Input channels: 14 = AZ net, 15 = LE (τ-conditioned) net.
+    let in_ch: i64 = std::env::var("SNEK_BENCH_INCH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(14);
     let vs = nn::VarStore::new(dev);
-    let net = AZNet::new(&vs.root(), 14, 96, 8);
+    let net = AZNet::new(&vs.root(), in_ch, 96, 8);
+    eprintln!("# in_ch={in_ch} cudnn_benchmark={bench}");
 
-    let (c, h, w) = (14i64, 11i64, 11i64);
+    let (c, h, w) = (in_ch, 11i64, 11i64);
     let batches: Vec<i64> = std::env::args()
         .nth(1)
         .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())

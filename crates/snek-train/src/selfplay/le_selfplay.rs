@@ -73,6 +73,64 @@ fn forward_values(net: &snek_tch::AZNet, device: Device, obs: &[f32], rows: usiz
     out
 }
 
+/// Chunked value-head forward — the throughput path.
+///
+/// A single big per-turn forward runs on the SLOW tail of this GPU's throughput
+/// curve: the small net saturates at ~512 rows, and larger batches are ~25%
+/// slower per-row (measured; see docs/le-throughput.md). This forwards the
+/// pre-encoded `obs` (rows × C×H×W) as fixed `chunk_rows`-row slices that the GPU
+/// executes back-to-back — one H2D up front, the slice forwards enqueued
+/// **without any per-chunk sync** (results stay resident), then ONE D2H at the
+/// end. So the GPU pipelines the chunks with no host stalls. The input is padded
+/// to a whole number of chunks so every forward is the same shape (cuDNN
+/// benchmark stays valid). Returns `values[row]`.
+fn forward_values_chunked(
+    net: &snek_tch::AZNet,
+    device: Device,
+    obs: &[f32],
+    rows: usize,
+    side: i64,
+    chunk_rows: usize,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; rows];
+    if rows == 0 {
+        return out;
+    }
+    let c = NUM_CHANNELS_TEMP as i64;
+    let chunk_rows = chunk_rows.max(1);
+    no_grad(|| {
+        // One H2D of the whole batch, padded up to a whole number of chunks so
+        // every slice forward is the identical [chunk_rows, C, H, W] shape.
+        let gpu = Tensor::from_slice(obs)
+            .reshape([rows as i64, c, side, side])
+            .to_device(device);
+        let nchunks = rows.div_ceil(chunk_rows);
+        let padded = nchunks * chunk_rows;
+        let gpu = if padded > rows {
+            let pad = Tensor::zeros(
+                [(padded - rows) as i64, c, side, side],
+                (tch::Kind::Float, device),
+            );
+            Tensor::cat(&[gpu, pad], 0)
+        } else {
+            gpu
+        };
+        // Enqueue every slice forward WITHOUT syncing; value tensors stay on GPU.
+        let mut vparts = Vec::with_capacity(nchunks);
+        for ci in 0..nchunks {
+            let slice = gpu.narrow(0, (ci * chunk_rows) as i64, chunk_rows as i64);
+            let (_logits, value) = net.forward(&slice);
+            vparts.push(value);
+        }
+        // One cat + one D2H (the first sync point) for the real rows.
+        Tensor::cat(&vparts, 0)
+            .narrow(0, 0, rows as i64)
+            .to_device(Device::Cpu)
+            .copy_data(&mut out, rows);
+    });
+    out
+}
+
 pub fn generate_le(
     net: &SelfPlayNet<'_>,
     cfg: &RunConfig,
@@ -91,6 +149,13 @@ pub fn generate_le(
     let count = cfg.concurrent_games();
     let depth = cfg.le_depth.max(1);
     let iters = cfg.le_iters.max(1);
+    let side = h as i64;
+    // Chunked forward: target ROWS per chunk -> boards per chunk (board = n rows).
+    let chunk_boards = if cfg.le_fwd_chunk > 0 {
+        (cfg.le_fwd_chunk / n).max(1)
+    } else {
+        0
+    };
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed ^ 0x1E4A_B5A7_0C0D_1234u64);
     let gpu_net = unsafe { &*(net.net as *const snek_tch::AZNet) };
     let device = net.device;
@@ -170,78 +235,53 @@ pub fn generate_le(
         let num_eval = forest.eval_boards().len();
         let rows = num_eval * n;
 
-        let mut vals = if rows > 0 {
-            let te = Instant::now();
-            // cuDNN benchmark is forced OFF in LE mode (variable batch shape every
-            // turn — see trainer setup), so we feed the exact row count with no
-            // padding. Padding to fixed buckets was measured slower here: it
-            // nearly doubles the rows and cuDNN's per-bucket autotune didn't pay
-            // it back. The real win was killing benchmark re-tuning, not fixing
-            // the shape.
-            // Variable batch shape every turn (live-game leaves × seats). cuDNN
-            // benchmark is forced OFF for LE (trainer setup) so this novel shape
-            // is not re-autotuned; feeding the exact rows with no padding is
-            // fastest. (Measured: fixed-shape padding was 3.3× slower — the
-            // padding compute dominates any workspace-realloc saving, because
-            // LE's natural batch is ~11× smaller than its max, unlike AZ whose
-            // natural batch already IS the fixed size.)
-            let mut obs = vec![0.0f32; rows * l15];
-            let eval_boards = forest.eval_boards();
-            let eval_game = forest.eval_game();
-            let temp = &state.temp;
+        let _ = rows;
+        // Leaf-value forward, shared by both phases. When le_fwd_chunk>0 this is
+        // the chunked+pipelined path (fixed-shape sub-batches at the GPU sweet
+        // spot — benchmark stays on); otherwise one variable-shape forward. τ is
+        // snapshotted so the closure owns it (no borrow of the mutated `state`).
+        let temp_snapshot = state.temp.clone();
+        let fwd = |eb: &[snek_core::Board], eg: &[u32]| -> Vec<f32> {
+            let r = eb.len() * n;
+            if r == 0 {
+                return Vec::new();
+            }
+            // Encode every leaf (parallel), then forward: chunked slices when
+            // le_fwd_chunk>0, else one variable-shape forward.
+            let mut obs = vec![0.0f32; r * l15];
             obs.par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
-                let tau = temp[eval_game[e] as usize];
+                let tau = temp_snapshot[eg[e] as usize];
                 for s in 0..n {
-                    encode_into_temp(&eval_boards[e], s, tau, &mut chunk[s * l15..(s + 1) * l15]);
+                    encode_into_temp(&eb[e], s, tau, &mut chunk[s * l15..(s + 1) * l15]);
                 }
             });
-            t_encode += te.elapsed().as_micros();
-            // Count the LE leaf-value forward the same way the AZ worker counts
-            // its search forwards, so inferences/sec and gpu-forward% report on
-            // the LE path too (otherwise the dashboard reads a flat zero).
-            let t0 = Instant::now();
-            let v = forward_values(gpu_net, device, &obs, rows, h as i64, w as i64);
-            let dt = t0.elapsed().as_micros();
-            t_fwd += dt;
-            counters
-                .gpu_forward_us
-                .fetch_add(dt as u64, Ordering::Relaxed);
+            let v = if chunk_boards > 0 {
+                forward_values_chunked(gpu_net, device, &obs, r, side, chunk_boards * n)
+            } else {
+                forward_values(gpu_net, device, &obs, r, side, side)
+            };
             counters.gpu_requests.fetch_add(1, Ordering::Relaxed);
-            counters.gpu_rows.fetch_add(rows as u64, Ordering::Relaxed);
-            counters.inferences.fetch_add(rows as u64, Ordering::Relaxed);
+            counters.gpu_rows.fetch_add(r as u64, Ordering::Relaxed);
+            counters.inferences.fetch_add(r as u64, Ordering::Relaxed);
             v
-        } else {
-            Vec::new()
         };
+        let tfwd = Instant::now();
+        let mut vals = fwd(forest.eval_boards(), forest.eval_game());
+        let dt = tfwd.elapsed().as_micros();
+        t_fwd += dt;
+        counters.gpu_forward_us.fetch_add(dt as u64, Ordering::Relaxed);
 
         // Selective deepening (docs/le-selective-depth.md): expand the top-k
         // joint successors one more ply and value-net the new leaves, then
         // re-solve. Two batched forwards total; skipped when le_top_k == 0.
         if cfg.le_top_k > 0 {
             let start = forest.deepen_topk(&vals, &tau_pg, iters, cfg.le_top_k, cfg.draw_value);
-            let m2 = forest.eval_boards().len();
-            let rows2 = (m2 - start) * n;
-            if rows2 > 0 {
-                let mut obs2 = vec![0.0f32; rows2 * l15];
-                let eb2 = &forest.eval_boards()[start..];
-                let eg2 = &forest.eval_game()[start..];
-                let temp = &state.temp;
-                obs2.par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
-                    let tau = temp[eg2[e] as usize];
-                    for s in 0..n {
-                        encode_into_temp(&eb2[e], s, tau, &mut chunk[s * l15..(s + 1) * l15]);
-                    }
-                });
-                let t0 = Instant::now();
-                let v2 = forward_values(gpu_net, device, &obs2, rows2, h as i64, w as i64);
-                let dt = t0.elapsed().as_micros();
-                t_fwd += dt;
-                counters.gpu_forward_us.fetch_add(dt as u64, Ordering::Relaxed);
-                counters.gpu_requests.fetch_add(1, Ordering::Relaxed);
-                counters.gpu_rows.fetch_add(rows2 as u64, Ordering::Relaxed);
-                counters.inferences.fetch_add(rows2 as u64, Ordering::Relaxed);
-                vals.extend(v2);
-            }
+            let tfwd2 = Instant::now();
+            let vals2 = fwd(&forest.eval_boards()[start..], &forest.eval_game()[start..]);
+            let dt = tfwd2.elapsed().as_micros();
+            t_fwd += dt;
+            counters.gpu_forward_us.fetch_add(dt as u64, Ordering::Relaxed);
+            vals.extend(vals2);
         }
 
         let tk = Instant::now();

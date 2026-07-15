@@ -212,8 +212,21 @@ impl TrainerHandle {
         // (~1746ms/turn measured). Forcing it off in LE mode drops the forward to
         // ~112ms/turn (15× faster gens). Non-LE runs keep it on (main.rs default).
         if cfg.le_mode {
-            tch::Cuda::cudnn_set_benchmark(false);
-            self.log("LE mode: cuDNN benchmark OFF (variable per-turn batch shape)");
+            // Chunked forward (le_fwd_chunk>0) makes every forward the SAME
+            // fixed shape, so benchmark autotunes once and stays valid — turn it
+            // back ON. Otherwise the batch shape varies every turn, so keep it
+            // off (benchmark would re-run its ~1.7s algo search per forward).
+            let bench = cfg.le_fwd_chunk > 0;
+            tch::Cuda::cudnn_set_benchmark(bench);
+            self.log(format!(
+                "LE mode: cuDNN benchmark {} ({})",
+                if bench { "ON" } else { "OFF" },
+                if bench {
+                    "fixed chunked forward shape"
+                } else {
+                    "variable per-turn batch shape"
+                }
+            ));
         }
         // Logit-Equilibrium mode conditions on τ via one extra input plane
         // (NUM_CHANNELS_TEMP = 15); the AZ path stays at NUM_CHANNELS (14).

@@ -101,6 +101,12 @@ pub struct RunConfig {
     /// deepening). See docs/le-selective-depth.md.
     #[serde(default)]
     pub le_top_k: usize,
+    /// Leaf-eval forward chunk size in ROWS (board-seats). 0 = one big forward
+    /// (old behaviour). >0 splits each turn's value forward into fixed-size,
+    /// benchmark-friendly chunks near the GPU throughput sweet spot (~512),
+    /// pipelined so the GPU stays fed. See docs/le-throughput.md.
+    #[serde(default)]
+    pub le_fwd_chunk: usize,
     /// Stochastic-fictitious-play iterations per equilibrium solve.
     #[serde(default = "default_le_iters")]
     pub le_iters: usize,
@@ -312,6 +318,7 @@ impl Default for RunConfig {
             le_mode: false,
             le_depth: default_le_depth(),
             le_top_k: 0,
+            le_fwd_chunk: 0,
             le_iters: default_le_iters(),
             tau_min: default_tau_min(),
             tau_max: default_tau_max(),
