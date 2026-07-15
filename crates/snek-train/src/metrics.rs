@@ -140,7 +140,12 @@ impl Metrics {
             } else {
                 avg_turn_ema
             };
-            let alpha = 0.35;
+            // At depth-2 the inference counter advances in ~turn-sized lumps
+            // (~0.5s apart), so a fast EMA over 250ms ticks genuinely seesaws
+            // between "caught a lump" and "caught none" (30k↔60k on screen).
+            // τ ≈ ticks·Δt/α ≈ 3s smooths the display to the true average
+            // while still tracking phase changes within a few seconds.
+            let alpha = 0.08;
             if initialized {
                 inf_rate_ema = alpha * raw_inf_rate + (1.0 - alpha) * inf_rate_ema;
                 games_rate_ema = alpha * raw_games_rate + (1.0 - alpha) * games_rate_ema;

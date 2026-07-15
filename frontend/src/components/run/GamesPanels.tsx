@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import type { LiveEval, LiveEvalGame } from "../../api/eval";
 import { getEvalGameFile, getGameFile } from "../../api/proto";
 import type { GameFile, GameGen, LeagueMatch, MatchPlacement, MetricRow } from "../../gen/viewer_pb";
@@ -34,6 +35,9 @@ export function GamesPanels({ runId, matches, gameGens, metrics, liveMatch }: Pr
   const [cell, setCell] = useState(14);
   const [followLatest, setFollowLatest] = useState(true);
   const intervalMs = Math.round(1000 / fps);
+  // LE runs have no checkpoint league; the "league" files are the held-out
+  // baseline eval games, so name the panel for what it shows.
+  const isLE = metrics.some((m) => m.hasLeEval);
 
   return (
     <section>
@@ -64,6 +68,7 @@ export function GamesPanels({ runId, matches, gameGens, metrics, liveMatch }: Pr
         <LeaguePanel
           runId={runId}
           matches={matches}
+          title={isLE ? "Held-out games" : "League game history"}
           followLatest={followLatest}
           setFollow={setFollowLatest}
           intervalMs={intervalMs}
@@ -203,7 +208,7 @@ type ViewerProps = {
 // The recorded league history, newest first, paginated. Zoomed in it's a grid
 // of replay tiles (one per game, colored by player); zoomed out (Size slider
 // below the threshold) it's a pure results table over the same page.
-function LeaguePanel({ runId, matches, followLatest, setFollow, intervalMs, cell }: ViewerProps & { matches: LeagueMatch[] }) {
+function LeaguePanel({ runId, matches, title, followLatest, setFollow, intervalMs, cell }: ViewerProps & { matches: LeagueMatch[]; title: string }) {
   const items = useMemo(() => [...matches].reverse(), [matches]);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(PAGE_SIZES[0]);
@@ -224,9 +229,9 @@ function LeaguePanel({ runId, matches, followLatest, setFollow, intervalMs, cell
   };
 
   return (
-    <PanelShell title={`League game history (${matches.length})`}>
+    <PanelShell title={`${title} (${matches.length})`}>
       {items.length === 0 ? (
-        <div className="text-xs text-ink-3">No league games yet — they start once two players exist.</div>
+        <div className="text-xs text-ink-3">No recorded games yet.</div>
       ) : (
         <>
           <div className="mb-2 flex items-center gap-2 text-[11px] text-ink-3">
@@ -288,9 +293,10 @@ function LeaguePanel({ runId, matches, followLatest, setFollow, intervalMs, cell
   );
 }
 
-// One recorded league game: finishing order on top, the replay tile below
-// (snakes colored by player). Recordings are pruned to a recent window, so
-// old games fall back to the result line alone.
+// One recorded league/held-out game: finishing order on top, the replay tile
+// below (snakes colored by player). Games are stored forever; the ⛶ opens the
+// fullscreen permalink view. Old runs may still have pruned recordings, which
+// fall back to the result line alone.
 function LeagueGameTile({ runId, match, intervalMs, cell }: { runId: string; match: LeagueMatch; intervalMs: number; cell: number }) {
   const file = useGameFile(() => getEvalGameFile(runId, match.seq), [runId, match.seq]);
   const game = file?.games[0];
@@ -301,9 +307,18 @@ function LeagueGameTile({ runId, match, intervalMs, cell }: { runId: string; mat
   }, [match.placements]);
   return (
     <div>
-      <div className="mb-0.5 truncate text-[10px]" title={`game #${match.seq} · ${match.sims} sims/move`}>
-        <span className="mr-1 font-mono tabular-nums text-ink-3">#{String(match.seq)}</span>
-        <RankingLine placements={match.placements} />
+      <div className="mb-0.5 flex items-baseline gap-1 truncate text-[10px]" title={`game #${match.seq} · ${match.sims} sims/move`}>
+        <span className="font-mono tabular-nums text-ink-3">#{String(match.seq)}</span>
+        <span className="min-w-0 flex-1 truncate">
+          <RankingLine placements={match.placements} />
+        </span>
+        <Link
+          to={`/runs/${encodeURIComponent(runId)}/eval/${match.seq}`}
+          className="shrink-0 text-ink-3 hover:text-accent"
+          title="Open fullscreen (permalink)"
+        >
+          ⛶
+        </Link>
       </div>
       {game ? (
         <GameTile game={game} intervalMs={intervalMs} cell={cell} colors={colors} />
@@ -362,7 +377,19 @@ function SelfPlayPanel({
           ) : (
             <div className="grid gap-2.5" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${cell * 12}px, 1fr))` }}>
               {file.games.map((game, i) => (
-                <GameTile key={i} game={game} intervalMs={intervalMs} cell={cell} />
+                <div key={i}>
+                  <div className="mb-0.5 flex items-baseline justify-between text-[10px] text-ink-3">
+                    <span className="font-mono tabular-nums">game {i + 1}</span>
+                    <Link
+                      to={`/runs/${encodeURIComponent(runId)}/games/${gen}/${i}`}
+                      className="hover:text-accent"
+                      title="Open fullscreen (permalink)"
+                    >
+                      ⛶
+                    </Link>
+                  </div>
+                  <GameTile game={game} intervalMs={intervalMs} cell={cell} />
+                </div>
               ))}
             </div>
           )}

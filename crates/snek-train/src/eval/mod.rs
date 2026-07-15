@@ -40,8 +40,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Recorded game files kept on disk (newest first).
-const KEEP_GAME_FILES: usize = 200;
+/// Recorded game files kept on disk (newest first). `0` = keep every game
+/// forever (games are the audit trail behind the ratings/strength charts).
+const KEEP_GAME_FILES: usize = 0;
 
 /// League games end here if nobody has won yet; survivors tie at rank 1.
 const LEAGUE_MAX_TURNS: u32 = 500;
@@ -1065,6 +1066,9 @@ fn write_ratings(
 /// Keep only the newest `keep` recorded games on disk. The summary log and
 /// ratings are never pruned.
 fn prune_game_files(eval_dir: &Path, keep: usize) {
+    if keep == 0 {
+        return; // keep every game forever
+    }
     let Ok(rd) = std::fs::read_dir(eval_dir) else {
         return;
     };

@@ -89,6 +89,17 @@ pub fn eval_le_vs_baseline(
     let l15 = NUM_CHANNELS_TEMP * side * side;
     let depth = cfg.le_depth.max(1);
     let iters = cfg.le_iters.max(1);
+    // When le_fwd_chunk > 0 the trainer runs with cuDNN benchmark ON (autotuned
+    // once for the fixed chunk shape). The arena's per-turn batch is variable
+    // (live games × candidates shrink every turn — and depth-2 deepening adds a
+    // second, wildly varying batch), so an unchunked forward here re-triggers
+    // the ~1.7s autotune on nearly every turn: spiky GPU, ~30× slower evals.
+    // Route through the same fixed-shape chunked path self-play uses.
+    let chunk_rows = if cfg.le_fwd_chunk > 0 {
+        (cfg.le_fwd_chunk / n).max(1) * n
+    } else {
+        0
+    };
 
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     let mut boards: Vec<Board> = (0..games)
@@ -104,6 +115,9 @@ pub fn eval_le_vs_baseline(
     let mut rec_frames: Vec<Vec<FrameJson>> = vec![Vec::new(); record_games];
     let mut death_turn: Vec<[Option<u32>; MAX_SNAKES]> = vec![[None; MAX_SNAKES]; games];
 
+    // Pinned staging reused across turns (see le_selfplay::PinnedStage).
+    let mut stage = crate::selfplay::le_selfplay::PinnedStage::new(device);
+
     // No turn cap — every game runs until the net dies (early-stop below) or a
     // natural terminal. Health/growth/finite-board guarantee termination.
     while done.iter().any(|&d| !d) {
@@ -114,18 +128,34 @@ pub fn eval_le_vs_baseline(
         let tau_pg = vec![[serve_tau; MAX_SNAKES]; live_boards.len()];
 
         // Encode a slice of eval leaves at serve-τ and run the value forward.
-        let enc_fwd = |eb: &[Board]| -> Vec<f32> {
+        let stage = &mut stage;
+        let mut enc_fwd = |eb: &[Board]| -> Vec<f32> {
             let rows = eb.len() * n;
             if rows == 0 {
                 return Vec::new();
             }
-            let mut obs = vec![0.0f32; rows * l15];
-            obs.par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
-                for s in 0..n {
-                    encode_into_temp(&eb[e], s, serve_tau, &mut chunk[s * l15..(s + 1) * l15]);
-                }
-            });
-            forward_values(net, device, &obs, rows, side as i64)
+            if chunk_rows > 0 {
+                // Fixed-shape chunked path via the pinned stage (benchmark ON).
+                let padded = rows.div_ceil(chunk_rows) * chunk_rows;
+                let buf = stage.slice(padded * l15);
+                buf[rows * l15..].fill(0.0);
+                buf[..rows * l15].par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
+                    for s in 0..n {
+                        encode_into_temp(&eb[e], s, serve_tau, &mut chunk[s * l15..(s + 1) * l15]);
+                    }
+                });
+                crate::selfplay::le_selfplay::forward_values_staged(
+                    net, device, stage.tensor(), rows, padded, side as i64, chunk_rows,
+                )
+            } else {
+                let mut obs = vec![0.0f32; rows * l15];
+                obs.par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
+                    for s in 0..n {
+                        encode_into_temp(&eb[e], s, serve_tau, &mut chunk[s * l15..(s + 1) * l15]);
+                    }
+                });
+                forward_values(net, device, &obs, rows, side as i64)
+            }
         };
 
         let mut vals = enc_fwd(forest.eval_boards());
@@ -300,9 +330,10 @@ pub fn eval_le_vs_baseline(
 }
 
 /// Write recorded held-out games into `<root>/eval/` in the same format the
-/// league uses: one `game_SSSSSS.json` per game plus a `summary.jsonl` line, so
-/// the frontend's recorded-games panel lists and replays them unchanged. Old
-/// game files are pruned to a bounded window. `sims` is stored for display only.
+/// league uses: one zstd-compressed `game_SSSSSS.json.zst` per game plus a
+/// `summary.jsonl` line, so the frontend's recorded-games panel lists and
+/// replays them unchanged. Games are kept forever (no pruning) as the audit
+/// trail behind the strength chart. `sims` is stored for display only.
 pub fn write_eval_games(
     root: &Path,
     sims: u32,
@@ -337,7 +368,8 @@ pub fn write_eval_games(
         writeln!(summary, "{}", serde_json::to_string(&record)?)?;
         write_eval_game_file(&eval_dir, &record, &game.frames, game.winner)?;
     }
-    prune_eval_game_files(&eval_dir, 64);
+    // Eval games are kept forever (no prune) — they are the audit trail behind
+    // the held-out strength chart and are zstd-compressed on write.
     Ok(())
 }
 
@@ -370,32 +402,11 @@ fn write_eval_game_file(
             "num_turns": record.turns,
         }],
     });
-    let path = eval_dir.join(format!("game_{:06}.json", record.seq));
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(&file)?)?;
+    // zstd-compress like self-play sample games (games/gen_NNNN.json.zst): eval
+    // games are kept forever now, so compression bounds disk growth ~5-10×.
+    let path = eval_dir.join(format!("game_{:06}.json.zst", record.seq));
+    let tmp = path.with_extension("zst.tmp");
+    std::fs::write(&tmp, zstd::encode_all(&*serde_json::to_vec(&file)?, 3)?)?;
     std::fs::rename(tmp, path)?;
     Ok(())
-}
-
-/// Keep only the newest `keep` `game_*.json` files in the eval dir.
-fn prune_eval_game_files(eval_dir: &Path, keep: usize) {
-    let mut files: Vec<(u64, std::path::PathBuf)> = match std::fs::read_dir(eval_dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter_map(|p| {
-                let name = p.file_name()?.to_str()?.to_string();
-                let seq: u64 = name.strip_prefix("game_")?.strip_suffix(".json")?.parse().ok()?;
-                Some((seq, p))
-            })
-            .collect(),
-        Err(_) => return,
-    };
-    if files.len() <= keep {
-        return;
-    }
-    files.sort_by_key(|(seq, _)| *seq);
-    let remove = files.len() - keep;
-    for (_, path) in files.into_iter().take(remove) {
-        let _ = std::fs::remove_file(path);
-    }
 }

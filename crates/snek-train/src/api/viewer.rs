@@ -103,16 +103,29 @@ fn league(root: &Path) -> Vec<proto::LeagueRating> {
         .collect()
 }
 
-/// Load one league game's recording (eval/game_SSSSSS.json — one file per
-/// game, pruned to the newest window). Same schema and wire format as
-/// self-play sample games, so the frontend reuses one viewer.
+/// Load one league/held-out game's recording. New games are written
+/// zstd-compressed (`eval/game_SSSSSS.json.zst`) and kept forever; older ones
+/// may be plain `.json`, so try the compressed form first and fall back. Same
+/// schema and wire format as self-play sample games, so the frontend reuses one
+/// viewer.
 pub fn eval_game_file(root: &Path, seq: u64) -> Option<proto::GameFile> {
-    let path = root.join("eval").join(format!("game_{seq:06}.json"));
-    let text = std::fs::read_to_string(&path).ok()?;
-    match serde_json::from_str::<GameFileJson>(&text) {
+    let dir = root.join("eval");
+    let zst = dir.join(format!("game_{seq:06}.json.zst"));
+    let bytes = if zst.exists() {
+        match std::fs::read(&zst).and_then(|raw| zstd::decode_all(&*raw)) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!(path = ?zst, %err, "read eval game file failed");
+                return None;
+            }
+        }
+    } else {
+        std::fs::read(dir.join(format!("game_{seq:06}.json"))).ok()?
+    };
+    match serde_json::from_slice::<GameFileJson>(&bytes) {
         Ok(parsed) => Some(convert_game_file(parsed)),
         Err(err) => {
-            tracing::warn!(?path, %err, "parse eval game file failed");
+            tracing::warn!(seq, %err, "parse eval game file failed");
             None
         }
     }
@@ -174,6 +187,7 @@ struct MetricJson {
     win_rate: Option<f64>,
     completed_games: Option<u32>,
     target_entropy: Option<f64>,
+    net_entropy: Option<f64>,
     samples: Option<u32>,
     turns: Option<u32>,
     buffer: Option<u64>,
@@ -210,6 +224,7 @@ fn metrics(root: &Path) -> Vec<proto::MetricRow> {
                 has_win_rate: win_rate.is_some(),
                 completed_games: row.completed_games.unwrap_or(0),
                 target_entropy: row.target_entropy.unwrap_or(0.0),
+                net_entropy: row.net_entropy.unwrap_or(0.0),
                 samples: row.samples.unwrap_or(0),
                 turns: row.turns.unwrap_or(0),
                 buffer: row.buffer.unwrap_or(0),

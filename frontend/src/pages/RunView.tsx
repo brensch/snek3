@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { control } from "../api/client";
 import { ConfigPanel } from "../components/ConfigPanel";
 import { LineChart } from "../components/charts/LineChart";
@@ -7,6 +7,7 @@ import { EloPanel } from "../components/run/EloPanel";
 import { GamesPanels } from "../components/run/GamesPanels";
 import { LiveThroughput } from "../components/run/LiveThroughput";
 import { LogsPanel } from "../components/run/LogsPanel";
+import { StrengthHero } from "../components/run/StrengthHero";
 import { TopBar } from "../components/run/TopBar";
 import { Phase } from "../gen/snek_pb";
 import { useEvalLive } from "../hooks/useEvalLive";
@@ -17,15 +18,18 @@ import { series } from "../lib/palette";
 import { registerPlayerNames } from "../lib/players";
 import type { RunConfig } from "../types";
 
-// One run, laid out by what a monitor needs first:
-//   1. the top bar answers "is it alive?" (phase, generation, progress);
-//   2. the League Elo headline answers "is it getting better?", with a small
-//      realtime throughput card beside it;
-//   3. learning and throughput small-multiples diagnose why;
-//   4. the games panels at the bottom — live league game, recorded league
-//      games, self-play samples, all visible at once — are the qualitative
-//      gut check.
-// Config and logs are on-demand panels toggled from the top bar.
+// One run, two tiers:
+//   TIER 1 (always visible): the top bar answers "is it alive?" and the
+//   Strength hero answers "is it getting better?" — held-out win rate vs
+//   baselines in LE mode (the Elo replacement), League Elo for legacy AZ runs.
+//   A small realtime throughput card sits beside it.
+//   TIER 2 (tabs): Health (is learning sane), Throughput (is it fast), Games
+//   (watch actual play). The tab lives in the URL (?tab=) so reload/share
+//   keeps your place.
+// Config and logs stay as on-demand panels toggled from the top bar.
+const TABS = ["health", "throughput", "games"] as const;
+type Tab = (typeof TABS)[number];
+
 export function RunView() {
   const { runId = "" } = useParams();
   const { detail, error, loading } = useRunDetail(runId);
@@ -34,6 +38,18 @@ export function RunView() {
   const live = useLiveStats(isLive);
   const liveMatch = useEvalLive(isLive);
   const logs = useLogs();
+
+  const [params, setParams] = useSearchParams();
+  const tabParam = params.get("tab");
+  const tab: Tab = (TABS as readonly string[]).includes(tabParam ?? "") ? (tabParam as Tab) : "health";
+  const setTab = (t: Tab) =>
+    setParams(
+      (p) => {
+        p.set("tab", t);
+        return p;
+      },
+      { replace: true },
+    );
 
   // `running` comes from the authoritative flag, not the phase: a resume
   // spends tens of seconds restoring the replay buffer before the first
@@ -66,6 +82,7 @@ export function RunView() {
   // Make external players (API snakes) nameable anywhere an id appears.
   registerPlayerNames(league);
   const gens = metrics.map((m) => m.generation);
+  const isLE = useMemo(() => metrics.some((m) => m.hasLeEval), [metrics]);
 
   // Loss falls slowly and noisily, so "is it still trending down?" is hard to
   // read off the raw curve. The slope of a local least-squares fit answers it
@@ -83,19 +100,6 @@ export function RunView() {
       value: rollingSlope(metrics.map((m) => m.valueLoss), gens, half).slice(tail),
     };
   }, [metrics, gens]);
-
-  // Held-out strength: the LE net plays its own equilibrium search against
-  // built-in baselines it never trains on, every few generations. This is the
-  // Elo replacement in LE mode (the checkpoint league is disabled), so it gets
-  // headline billing. Sparse (eval gens only), so filter to the rows that ran.
-  const strength = useMemo(() => {
-    const rows = metrics.filter((m) => m.hasLeEval);
-    return {
-      gens: rows.map((m) => m.generation),
-      ff: rows.map((m) => m.leFfWinrate * 100),
-      vor: rows.map((m) => m.leVorWinrate * 100),
-    };
-  }, [metrics]);
 
   return (
     <div className="min-h-screen">
@@ -129,120 +133,117 @@ export function RunView() {
         )}
         {showLogs && <LogsPanel logs={logs} />}
 
-        {/* Headline row: League Elo (hero, curve, leaderboard) plus the small
-            realtime throughput card. */}
+        {/* TIER 1 — the hero: held-out strength (LE) or League Elo (AZ), with
+            the realtime throughput sidecard. */}
         <div className="grid gap-2.5 xl:grid-cols-[minmax(0,1fr)_13rem] xl:items-stretch">
-          <EloPanel league={league} />
+          {isLE ? <StrengthHero metrics={metrics} /> : <EloPanel league={league} />}
           <LiveThroughput stats={live.stats} history={live.history} />
         </div>
 
-        {strength.gens.length > 0 && (
-          <section>
-            <h2 className="card-title mb-1.5">Held-out strength (sole-survival %)</h2>
-            <div className="grid gap-2.5 sm:grid-cols-2">
-              <LineChart
-                title="Win rate vs baselines"
-                height={140}
-                domain={[0, 100]}
-                format={(v) => `${v.toFixed(0)}%`}
-                series={[
-                  { name: "vs floodfill", color: series.green, values: strength.ff },
-                  { name: "vs voronoi", color: series.magenta, values: strength.vor },
-                ]}
-                xValues={strength.gens}
-              />
-            </div>
+        {/* TIER 2 — tabs. */}
+        <div className="flex items-center gap-1 border-b border-white/10">
+          {TABS.map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`-mb-px border-b-2 px-3 py-1.5 text-sm capitalize transition-colors ${
+                tab === t
+                  ? "border-accent font-medium text-ink"
+                  : "border-transparent text-ink-3 hover:text-ink-2"
+              }`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+
+        {tab === "health" && metrics.length > 0 && (
+          <section className="grid gap-2.5 sm:grid-cols-2 2xl:grid-cols-4">
+            <LineChart
+              title="Entropy (collapse watch)"
+              height={112}
+              series={[
+                { name: "target", color: series.violet, values: metrics.map((m) => m.targetEntropy) },
+                { name: "net", color: series.blue, values: metrics.map((m) => m.netEntropy) },
+              ]}
+              xValues={gens}
+            />
+            <LineChart
+              title="Loss"
+              height={112}
+              series={[
+                { name: "policy", color: series.blue, values: metrics.map((m) => m.policyLoss) },
+                { name: "value", color: series.aqua, values: metrics.map((m) => m.valueLoss) },
+              ]}
+              xValues={gens}
+            />
+            <LineChart
+              title="Loss slope (Δ/gen)"
+              height={112}
+              series={[
+                { name: "policy", color: series.blue, values: lossSlopes.policy },
+                { name: "value", color: series.aqua, values: lossSlopes.value },
+              ]}
+              xValues={lossSlopes.gens}
+              centerZero
+              format={(v) => (v === 0 ? "0" : v.toExponential(1))}
+            />
+            <LineChart
+              title="Game length (turns)"
+              height={112}
+              series={[{ name: "avg turns", color: series.aqua, values: metrics.map((m) => m.avgGameTurn) }]}
+              xValues={gens}
+            />
           </section>
         )}
 
-        {metrics.length > 0 && (
-          <>
-            <section>
-              <h2 className="card-title mb-1.5">Learning</h2>
-              <div className="grid gap-2.5 sm:grid-cols-2 2xl:grid-cols-4">
-                <LineChart
-                  title="Loss"
-                  height={112}
-                  series={[
-                    { name: "policy", color: series.blue, values: metrics.map((m) => m.policyLoss) },
-                    { name: "value", color: series.aqua, values: metrics.map((m) => m.valueLoss) },
-                  ]}
-                  xValues={gens}
-                />
-                <LineChart
-                  title="Loss slope (Δ/gen)"
-                  height={112}
-                  series={[
-                    { name: "policy", color: series.blue, values: lossSlopes.policy },
-                    { name: "value", color: series.aqua, values: lossSlopes.value },
-                  ]}
-                  xValues={lossSlopes.gens}
-                  centerZero
-                  format={(v) => (v === 0 ? "0" : v.toExponential(1))}
-                />
-                <LineChart
-                  title="Target entropy"
-                  height={112}
-                  series={[{ name: "entropy", color: series.violet, values: metrics.map((m) => m.targetEntropy) }]}
-                  xValues={gens}
-                />
-                <LineChart
-                  title="Game length (turns)"
-                  height={112}
-                  series={[{ name: "avg turns", color: series.aqua, values: metrics.map((m) => m.avgGameTurn) }]}
-                  xValues={gens}
-                />
-              </div>
-            </section>
-
-            <section>
-              <h2 className="card-title mb-1.5">Throughput</h2>
-              <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-3 2xl:grid-cols-5">
-                <LineChart
-                  title="Inferences / s"
-                  height={72}
-                  series={[{ name: "inf/s", color: series.blue, values: metrics.map((m) => m.inferencesPerSec) }]}
-                  xValues={gens}
-                />
-                <LineChart
-                  title="Phase time (s)"
-                  height={72}
-                  series={[
-                    { name: "play", color: series.blue, values: metrics.map((m) => m.playSeconds) },
-                    { name: "train", color: series.aqua, values: metrics.map((m) => m.trainSeconds) },
-                  ]}
-                  xValues={gens}
-                />
-                <LineChart
-                  title="Games / gen"
-                  height={72}
-                  series={[{ name: "games", color: series.magenta, values: metrics.map((m) => m.completedGames) }]}
-                  xValues={gens}
-                />
-                <LineChart
-                  title="Samples / gen"
-                  height={72}
-                  series={[{ name: "samples", color: series.aqua, values: metrics.map((m) => m.samples) }]}
-                  xValues={gens}
-                />
-                <LineChart
-                  title="Replay buffer"
-                  height={72}
-                  series={[{ name: "buffer", color: series.violet, values: metrics.map((m) => Number(m.buffer)) }]}
-                  xValues={gens}
-                />
-              </div>
-            </section>
-          </>
+        {tab === "throughput" && metrics.length > 0 && (
+          <section className="grid grid-cols-2 gap-2.5 lg:grid-cols-3 2xl:grid-cols-5">
+            <LineChart
+              title="Inferences / s"
+              height={96}
+              series={[{ name: "inf/s", color: series.blue, values: metrics.map((m) => m.inferencesPerSec) }]}
+              xValues={gens}
+            />
+            <LineChart
+              title="Phase time (s)"
+              height={96}
+              series={[
+                { name: "play", color: series.blue, values: metrics.map((m) => m.playSeconds) },
+                { name: "train", color: series.aqua, values: metrics.map((m) => m.trainSeconds) },
+              ]}
+              xValues={gens}
+            />
+            <LineChart
+              title="Games / gen"
+              height={96}
+              series={[{ name: "games", color: series.magenta, values: metrics.map((m) => m.completedGames) }]}
+              xValues={gens}
+            />
+            <LineChart
+              title="Samples / gen"
+              height={96}
+              series={[{ name: "samples", color: series.aqua, values: metrics.map((m) => m.samples) }]}
+              xValues={gens}
+            />
+            <LineChart
+              title="Replay buffer"
+              height={96}
+              series={[{ name: "buffer", color: series.violet, values: metrics.map((m) => Number(m.buffer)) }]}
+              xValues={gens}
+            />
+          </section>
         )}
 
-        <GamesPanels
-          runId={runId}
-          matches={detail?.matches ?? []}
-          gameGens={detail?.gameGens ?? []}
-          metrics={metrics}
-          liveMatch={liveMatch}
-        />
+        {tab === "games" && (
+          <GamesPanels
+            runId={runId}
+            matches={detail?.matches ?? []}
+            gameGens={detail?.gameGens ?? []}
+            metrics={metrics}
+            liveMatch={liveMatch}
+          />
+        )}
       </main>
     </div>
   );

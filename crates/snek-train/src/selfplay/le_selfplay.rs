@@ -73,56 +73,80 @@ fn forward_values(net: &snek_tch::AZNet, device: Device, obs: &[f32], rows: usiz
     out
 }
 
-/// Chunked value-head forward — the throughput path.
-///
-/// A single big per-turn forward runs on the SLOW tail of this GPU's throughput
-/// curve: the small net saturates at ~512 rows, and larger batches are ~25%
-/// slower per-row (measured; see docs/le-throughput.md). This forwards the
-/// pre-encoded `obs` (rows × C×H×W) as fixed `chunk_rows`-row slices that the GPU
-/// executes back-to-back — one H2D up front, the slice forwards enqueued
-/// **without any per-chunk sync** (results stay resident), then ONE D2H at the
-/// end. So the GPU pipelines the chunks with no host stalls. The input is padded
-/// to a whole number of chunks so every forward is the same shape (cuDNN
-/// benchmark stays valid). Returns `values[row]`.
-fn forward_values_chunked(
+/// Persistent pinned-memory staging buffer for the chunked leaf forward.
+/// Encoding writes straight into page-locked host memory, so each turn skips
+/// BOTH the ~100s-of-MB `vec![0.0; ..]` alloc+zero (`encode_into` fully
+/// overwrites its slice anyway) AND the extra host-side copy
+/// `Tensor::from_slice` would do — and the single H2D then runs at pinned
+/// transfer speed (~2-3× pageable). Grown on demand, reused across turns.
+pub(crate) struct PinnedStage {
+    buf: Option<Tensor>,
+    cap: usize,
+    device: Device,
+}
+
+impl PinnedStage {
+    pub(crate) fn new(device: Device) -> Self {
+        Self { buf: None, cap: 0, device }
+    }
+
+    /// Mutable float view of the first `len` elements, (re)allocating pinned
+    /// storage if needed. Writing from a rayon loop is fine: plain f32 memory,
+    /// uniquely borrowed through `&mut self`, no autograd attached.
+    pub(crate) fn slice(&mut self, len: usize) -> &mut [f32] {
+        if self.cap < len {
+            // Grow in 1M-float (4MB) steps so a slowly rising leaf count
+            // doesn't re-pin every turn.
+            let cap = len.next_multiple_of(1 << 20);
+            let t = Tensor::empty([cap as i64], (tch::Kind::Float, Device::Cpu));
+            self.buf = Some(if matches!(self.device, Device::Cuda(_)) {
+                t.pin_memory(self.device)
+            } else {
+                t
+            });
+            self.cap = cap;
+        }
+        let t = self.buf.as_ref().expect("stage allocated above");
+        unsafe { std::slice::from_raw_parts_mut(t.data_ptr() as *mut f32, len) }
+    }
+
+    pub(crate) fn tensor(&self) -> &Tensor {
+        self.buf.as_ref().expect("slice() must be called before tensor()")
+    }
+}
+
+/// Chunked no-sync forward reading from a `PinnedStage` tensor. `padded` must
+/// be a whole number of `chunk_rows` (the caller zero-fills the tail rows), so
+/// every slice forward keeps the identical benchmark-friendly shape and the
+/// input needs no GPU-side padding cat.
+pub(crate) fn forward_values_staged(
     net: &snek_tch::AZNet,
     device: Device,
-    obs: &[f32],
+    stage: &Tensor,
     rows: usize,
+    padded: usize,
     side: i64,
     chunk_rows: usize,
 ) -> Vec<f32> {
+    let c = NUM_CHANNELS_TEMP as i64;
     let mut out = vec![0.0f32; rows];
     if rows == 0 {
         return out;
     }
-    let c = NUM_CHANNELS_TEMP as i64;
-    let chunk_rows = chunk_rows.max(1);
     no_grad(|| {
-        // One H2D of the whole batch, padded up to a whole number of chunks so
-        // every slice forward is the identical [chunk_rows, C, H, W] shape.
-        let gpu = Tensor::from_slice(obs)
-            .reshape([rows as i64, c, side, side])
+        // One pinned H2D of the padded batch, then every slice forward is
+        // enqueued with no host sync until the single D2H at the end.
+        let gpu = stage
+            .narrow(0, 0, padded as i64 * c * side * side)
+            .view([padded as i64, c, side, side])
             .to_device(device);
-        let nchunks = rows.div_ceil(chunk_rows);
-        let padded = nchunks * chunk_rows;
-        let gpu = if padded > rows {
-            let pad = Tensor::zeros(
-                [(padded - rows) as i64, c, side, side],
-                (tch::Kind::Float, device),
-            );
-            Tensor::cat(&[gpu, pad], 0)
-        } else {
-            gpu
-        };
-        // Enqueue every slice forward WITHOUT syncing; value tensors stay on GPU.
+        let nchunks = padded / chunk_rows;
         let mut vparts = Vec::with_capacity(nchunks);
         for ci in 0..nchunks {
             let slice = gpu.narrow(0, (ci * chunk_rows) as i64, chunk_rows as i64);
             let (_logits, value) = net.forward(&slice);
             vparts.push(value);
         }
-        // One cat + one D2H (the first sync point) for the real rows.
         Tensor::cat(&vparts, 0)
             .narrow(0, 0, rows as i64)
             .to_device(Device::Cpu)
@@ -220,6 +244,8 @@ pub fn generate_le(
     // Per-phase timers so we can see where the LE turn actually spends its wall
     // clock (build joint tree / encode leaves / GPU forward / SFP backup /
     // record+step). Logged once per gen; the whole point is to stop guessing.
+    // Pinned staging reused across every turn's forwards (chunked path only).
+    let mut stage = PinnedStage::new(device);
     let (mut t_build, mut t_encode, mut t_fwd, mut t_backup, mut t_step) =
         (0u128, 0u128, 0u128, 0u128, 0u128);
     let mut nturns: u64 = 0;
@@ -241,23 +267,36 @@ pub fn generate_le(
         // spot — benchmark stays on); otherwise one variable-shape forward. τ is
         // snapshotted so the closure owns it (no borrow of the mutated `state`).
         let temp_snapshot = state.temp.clone();
-        let fwd = |eb: &[snek_core::Board], eg: &[u32]| -> Vec<f32> {
+        let stage = &mut stage;
+        let mut fwd = |eb: &[snek_core::Board], eg: &[u32]| -> Vec<f32> {
             let r = eb.len() * n;
             if r == 0 {
                 return Vec::new();
             }
-            // Encode every leaf (parallel), then forward: chunked slices when
-            // le_fwd_chunk>0, else one variable-shape forward.
-            let mut obs = vec![0.0f32; r * l15];
-            obs.par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
-                let tau = temp_snapshot[eg[e] as usize];
-                for s in 0..n {
-                    encode_into_temp(&eb[e], s, tau, &mut chunk[s * l15..(s + 1) * l15]);
-                }
-            });
             let v = if chunk_boards > 0 {
-                forward_values_chunked(gpu_net, device, &obs, r, side, chunk_boards * n)
+                // Chunked path: encode straight into the persistent pinned
+                // stage (no per-turn alloc/zero, no from_slice copy), pad on
+                // the host to a whole number of fixed-shape chunks.
+                let chunk = chunk_boards * n;
+                let padded = r.div_ceil(chunk) * chunk;
+                let buf = stage.slice(padded * l15);
+                buf[r * l15..].fill(0.0); // pad rows only; encode overwrites the rest
+                buf[..r * l15].par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
+                    let tau = temp_snapshot[eg[e] as usize];
+                    for s in 0..n {
+                        encode_into_temp(&eb[e], s, tau, &mut chunk[s * l15..(s + 1) * l15]);
+                    }
+                });
+                forward_values_staged(gpu_net, device, stage.tensor(), r, padded, side, chunk)
             } else {
+                // Legacy path (le_fwd_chunk=0): one variable-shape forward.
+                let mut obs = vec![0.0f32; r * l15];
+                obs.par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
+                    let tau = temp_snapshot[eg[e] as usize];
+                    for s in 0..n {
+                        encode_into_temp(&eb[e], s, tau, &mut chunk[s * l15..(s + 1) * l15]);
+                    }
+                });
                 forward_values(gpu_net, device, &obs, r, side, side)
             };
             counters.gpu_requests.fetch_add(1, Ordering::Relaxed);
