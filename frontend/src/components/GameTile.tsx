@@ -113,8 +113,41 @@ export function GameTile({
         )}
       </div>
 
+      {/* The timeline gets a full line of its own, directly under the board it
+          scrubs — the whole tile width is grabbable (mobile-friendly). */}
+      <input
+        type="range"
+        min={0}
+        max={len - 1}
+        value={idx}
+        onChange={(e) => seek(Number(e.target.value))}
+        className="mt-1 h-6 w-full min-w-0 touch-manipulation accent-accent"
+        aria-label="turn"
+      />
+
+      {/* Transport row: play + steppers left, where-am-I centre, copy right.
+          All buttons are 28px tap targets with crisp SVG icons. */}
+      <div className="flex min-w-0 items-center gap-0.5 text-[10px] text-ink-3">
+        <IconButton onClick={() => setPlaying((p) => !p)} label={playing ? "pause" : "play"}>
+          {playing ? <PauseIcon /> : <PlayIcon />}
+        </IconButton>
+        <IconButton onClick={() => seek(idx - 1)} label="previous turn">
+          <ChevronIcon dir={-1} />
+        </IconButton>
+        <IconButton onClick={() => seek(idx + 1)} label="next turn">
+          <ChevronIcon dir={1} />
+        </IconButton>
+        <span className="min-w-0 flex-1 truncate text-center font-mono tabular-nums">
+          {frame.turn}
+          <span className="text-ink-3/60"> / {game.numTurns}</span>
+        </span>
+        <IconButton onClick={copyFrame} label="copy this turn as JSON" className={copied ? "text-good" : undefined}>
+          {copied ? <CheckIcon /> : <CopyIcon />}
+        </IconButton>
+      </div>
+
       {voronoiSeats.length > 0 && (
-        <div className="mt-1 flex items-center gap-1.5 text-[10px] text-ink-3">
+        <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-ink-3">
           <span className="inline-block h-2 w-2 rounded-full border border-dashed border-white/80" />
           <span>
             voronoi (heuristic):{" "}
@@ -132,34 +165,6 @@ export function GameTile({
           </span>
         </div>
       )}
-
-      <div className="mt-1.5 flex min-w-0 items-center gap-1 text-[10px] text-ink-3">
-        <button onClick={() => setPlaying((p) => !p)} className="w-4 shrink-0 text-ink-2">
-          {playing ? "❚❚" : "▶"}
-        </button>
-        <button
-          onClick={copyFrame}
-          title="Copy this turn as JSON"
-          className={`w-4 shrink-0 ${copied ? "text-good" : "text-ink-2"}`}
-        >
-          {copied ? "✓" : "⧉"}
-        </button>
-        <button onClick={() => seek(idx - 1)} className="w-3 shrink-0">
-          ‹
-        </button>
-        <input
-          type="range"
-          min={0}
-          max={len - 1}
-          value={idx}
-          onChange={(e) => seek(Number(e.target.value))}
-          className="h-1 w-0 min-w-0 flex-1 accent-accent"
-        />
-        <button onClick={() => seek(idx + 1)} className="w-3 shrink-0">
-          ›
-        </button>
-        <span className="w-6 shrink-0 text-right font-mono tabular-nums">{frame.turn}</span>
-      </div>
 
       <div className="mt-1 grid gap-0.5">
         <div className={`${statCols} px-0.5 text-[9px] uppercase text-ink-3/70`}>
@@ -198,6 +203,103 @@ export function GameTile({
         ))}
       </div>
     </div>
+  );
+}
+
+// 28px tap-target button wrapping a small SVG icon — the one style for every
+// transport control so the row reads as a unit.
+function IconButton({
+  onClick,
+  label,
+  className = "",
+  children,
+}: {
+  onClick: () => void;
+  label: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className={`flex h-7 w-7 shrink-0 touch-manipulation select-none items-center justify-center rounded text-ink-2 hover:bg-white/5 hover:text-ink active:bg-white/10 ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+const ICON = "h-3.5 w-3.5";
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className={ICON} fill="currentColor" aria-hidden>
+      <path d="M4.5 2.8a.7.7 0 0 1 1.06-.6l8 5.2a.7.7 0 0 1 0 1.2l-8 5.2a.7.7 0 0 1-1.06-.6V2.8z" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className={ICON} fill="currentColor" aria-hidden>
+      <rect x="3.5" y="2.5" width="3.2" height="11" rx="1" />
+      <rect x="9.3" y="2.5" width="3.2" height="11" rx="1" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ dir }: { dir: -1 | 1 }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={ICON}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={dir === 1 ? { transform: "scaleX(-1)" } : undefined}
+    >
+      <path d="M10 3.5 5.5 8l4.5 4.5" />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={ICON}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+      <path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={ICON}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="m3 8.5 3.2 3.2L13 4.5" />
+    </svg>
   );
 }
 

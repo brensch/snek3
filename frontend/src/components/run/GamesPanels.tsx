@@ -15,6 +15,8 @@ type Props = {
   gameGens: GameGen[];
   metrics: MetricRow[];
   liveMatch: LiveEval | null;
+  /** Which game collection this instance shows (each has its own tab). */
+  mode: "selfplay" | "arena";
 };
 
 /** A league player's stable color, hashed from its display name. */
@@ -25,12 +27,12 @@ const TABLE_CELL_THRESHOLD = 11;
 
 const PAGE_SIZES = [12, 24, 48, 96];
 
-// Watch actual play — the qualitative gut check the charts can't give. Three
-// panels side by side, all live at once: the in-flight league games, the
-// recorded league history, and self-play samples. One control row scopes all
-// three; the Size slider doubles as the league history's zoom (small enough
-// and it becomes a pure results table).
-export function GamesPanels({ runId, matches, gameGens, metrics, liveMatch }: Props) {
+// Watch actual play — the qualitative gut check the charts can't give. Two
+// tabs, each a GamesPanels instance: "self-play" (the games training learns
+// from) and "arena" (live + recorded held-out/league games). One control row
+// scopes the tab; the Size slider doubles as the arena history's zoom (small
+// enough and it becomes a pure results table).
+export function GamesPanels({ runId, matches, gameGens, metrics, liveMatch, mode }: Props) {
   const [fps, setFps] = useState(12);
   const [cell, setCell] = useState(14);
   const [followLatest, setFollowLatest] = useState(true);
@@ -42,12 +44,11 @@ export function GamesPanels({ runId, matches, gameGens, metrics, liveMatch }: Pr
   return (
     <section>
       <div className="mb-1.5 flex flex-wrap items-center gap-x-4 gap-y-1">
-        <h2 className="card-title">Games</h2>
         <label className="flex items-center gap-2 text-xs text-ink-3">
           Speed
           <input type="range" min={1} max={20} value={fps} onChange={(e) => setFps(Number(e.target.value))} className="accent-accent" />
         </label>
-        <label className="flex items-center gap-2 text-xs text-ink-3" title="Tile size; small enough turns the league history into a table">
+        <label className="flex items-center gap-2 text-xs text-ink-3" title="Tile size; small enough turns the arena history into a table">
           Size
           <input type="range" min={8} max={30} value={cell} onChange={(e) => setCell(Number(e.target.value))} className="accent-accent" />
         </label>
@@ -62,18 +63,7 @@ export function GamesPanels({ runId, matches, gameGens, metrics, liveMatch }: Pr
         </label>
       </div>
 
-      {/* Stretch (no items-start) so the three panel cards share the row's height. */}
-      <div className="grid gap-2.5 lg:grid-cols-3">
-        <LivePanel live={liveMatch} cell={cell} />
-        <LeaguePanel
-          runId={runId}
-          matches={matches}
-          title={isLE ? "Held-out games" : "League game history"}
-          followLatest={followLatest}
-          setFollow={setFollowLatest}
-          intervalMs={intervalMs}
-          cell={cell}
-        />
+      {mode === "selfplay" ? (
         <SelfPlayPanel
           runId={runId}
           gameGens={gameGens}
@@ -83,7 +73,21 @@ export function GamesPanels({ runId, matches, gameGens, metrics, liveMatch }: Pr
           intervalMs={intervalMs}
           cell={cell}
         />
-      </div>
+      ) : (
+        // Stretch (no items-start) so the two panel cards share the row's height.
+        <div className="grid gap-2.5 lg:grid-cols-2">
+          <LivePanel live={liveMatch} cell={cell} />
+          <LeaguePanel
+            runId={runId}
+            matches={matches}
+            title={isLE ? "Held-out games" : "League game history"}
+            followLatest={followLatest}
+            setFollow={setFollowLatest}
+            intervalMs={intervalMs}
+            cell={cell}
+          />
+        </div>
+      )}
     </section>
   );
 }

@@ -98,7 +98,10 @@ export function GameView({ kind }: { kind: "selfplay" | "eval" }) {
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/10 bg-surface/95 px-3 py-2 backdrop-blur sm:px-5">
-        <Link to={`/runs/${encodeURIComponent(runId)}?tab=games`} className="text-sm text-accent hover:underline">
+        <Link
+          to={`/runs/${encodeURIComponent(runId)}?tab=${kind === "selfplay" ? "self-play" : "arena"}`}
+          className="text-sm text-accent hover:underline"
+        >
           ‹ {runId}
         </Link>
         <span className="font-mono text-sm text-ink">{title}</span>

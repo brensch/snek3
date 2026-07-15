@@ -23,11 +23,11 @@ import type { RunConfig } from "../types";
 //   Strength hero answers "is it getting better?" — held-out win rate vs
 //   baselines in LE mode (the Elo replacement), League Elo for legacy AZ runs.
 //   A small realtime throughput card sits beside it.
-//   TIER 2 (tabs): Health (is learning sane), Throughput (is it fast), Games
-//   (watch actual play). The tab lives in the URL (?tab=) so reload/share
-//   keeps your place.
+//   TIER 2 (tabs): Health (is learning sane), Throughput (is it fast),
+//   Self-play (the games training learns from), Arena (held-out/league
+//   games). The tab lives in the URL (?tab=) so reload/share keeps your place.
 // Config and logs stay as on-demand panels toggled from the top bar.
-const TABS = ["health", "throughput", "games"] as const;
+const TABS = ["health", "throughput", "self-play", "arena"] as const;
 type Tab = (typeof TABS)[number];
 
 export function RunView() {
@@ -235,13 +235,14 @@ export function RunView() {
           </section>
         )}
 
-        {tab === "games" && (
+        {(tab === "self-play" || tab === "arena") && (
           <GamesPanels
             runId={runId}
             matches={detail?.matches ?? []}
             gameGens={detail?.gameGens ?? []}
             metrics={metrics}
             liveMatch={liveMatch}
+            mode={tab === "self-play" ? "selfplay" : "arena"}
           />
         )}
       </main>
