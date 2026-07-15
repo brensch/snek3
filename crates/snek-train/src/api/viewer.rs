@@ -285,6 +285,7 @@ fn convert_game_file(file: GameFileJson) -> proto::GameFile {
                 },
                 winner: g.winner.unwrap_or(-1),
                 heur_mask: g.heur_mask as u32,
+                scenario: g.scenario,
                 frames: g
                     .frames
                     .into_iter()

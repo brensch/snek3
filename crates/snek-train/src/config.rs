@@ -110,6 +110,14 @@ pub struct RunConfig {
     /// Stochastic-fictitious-play iterations per equilibrium solve.
     #[serde(default = "default_le_iters")]
     pub le_iters: usize,
+    /// Fraction of NEW self-play games seeded from a curriculum scenario
+    /// (snek_core::scenario) instead of the official start. 0 disables.
+    #[serde(default)]
+    pub scenario_prob: f32,
+    /// Which scenarios to draw from (uniformly). Empty = every registered
+    /// scenario. Unknown names are ignored with a log line.
+    #[serde(default)]
+    pub scenarios: Vec<String>,
     /// Per-episode inverse-temperature (rationality) range the proxy is
     /// conditioned on: high = rational/Nash-like, low = near-uniform. A τ is
     /// sampled uniformly from [tau_min, tau_max] each game.
@@ -320,6 +328,8 @@ impl Default for RunConfig {
             le_top_k: 0,
             le_fwd_chunk: 0,
             le_iters: default_le_iters(),
+            scenario_prob: 0.0,
+            scenarios: Vec::new(),
             tau_min: default_tau_min(),
             tau_max: default_tau_max(),
             le_exploration: default_le_exploration(),

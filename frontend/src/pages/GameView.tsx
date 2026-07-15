@@ -119,6 +119,14 @@ export function GameView({ kind }: { kind: "selfplay" | "eval" }) {
           ‹ {runId}
         </Link>
         <span className="font-mono text-sm text-ink">{title}</span>
+        {game?.scenario && (
+          <span
+            className="rounded bg-warn/15 px-1.5 py-0.5 font-mono text-xs text-warn"
+            title={`seeded from the "${game.scenario}" curriculum scenario`}
+          >
+            {game.scenario}
+          </span>
+        )}
         {evalMeta?.placements && (
           <span className="font-mono text-xs">
             {[...evalMeta.placements]

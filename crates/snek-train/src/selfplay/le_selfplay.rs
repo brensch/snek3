@@ -184,19 +184,57 @@ pub fn generate_le(
     let gpu_net = unsafe { &*(net.net as *const snek_tch::AZNet) };
     let device = net.device;
 
-    // ---- reconcile carried in-flight games (boards/turns/rec/temp quadruple) ----
+    // Curriculum seeders (snek_core::scenario): with prob `scenario_prob` a new
+    // game starts from a synthetic position demonstrating a situation standard
+    // starts under-visit. Seeded games play and train like any other — only the
+    // starting distribution changes. Resolved once per generation.
+    let seeders: Vec<&'static snek_core::scenario::Scenario> = if cfg.scenario_prob > 0.0 {
+        if cfg.scenarios.is_empty() {
+            snek_core::scenario::SCENARIOS.iter().collect()
+        } else {
+            cfg.scenarios
+                .iter()
+                .filter_map(|nm| {
+                    let s = snek_core::scenario::scenario(nm);
+                    if s.is_none() {
+                        tracing::warn!(name = %nm, "unknown scenario ignored");
+                    }
+                    s
+                })
+                .collect()
+        }
+    } else {
+        Vec::new()
+    };
+    // Returns the board plus the scenario name it was seeded from ("" for a
+    // standard start) so finished games carry an auditable badge.
+    let new_game = |rng: &mut Xoshiro256PlusPlus| -> (snek_core::Board, &'static str) {
+        let (mut b, scen) = if !seeders.is_empty() && rng.gen::<f32>() < cfg.scenario_prob {
+            let s = seeders[rng.gen_range(0..seeders.len())];
+            ((s.generate)(board, board, n, rng), s.name)
+        } else {
+            (standard_start(board, board, n, rng), "")
+        };
+        b.heur_mask = assign_heur_seats(cfg, rng);
+        (b, scen)
+    };
+
+    // ---- reconcile carried in-flight games (boards/turns/rec/temp/scen) ----
     if state.boards.len() != state.turns.len() || state.boards.len() != state.rec.len() {
         state.boards.clear();
         state.turns.clear();
         state.rec.clear();
         state.temp.clear();
+        state.scen.clear();
     }
-    // Realign τ to the board count (fresh run: empty; resume: reuse; new slots get τ).
+    // Realign τ + scenario tags to the board count (fresh run: empty; resume:
+    // reuse; new slots get fresh values / a standard-start tag).
     while state.temp.len() < state.boards.len() {
         let t = sample_tau(cfg, &mut rng);
         state.temp.push(t);
     }
     state.temp.truncate(state.boards.len());
+    state.scen.resize(state.boards.len(), String::new());
 
     let mut i = 0;
     while i < state.boards.len() {
@@ -209,6 +247,7 @@ pub fn generate_le(
             state.turns.swap_remove(i);
             state.rec.swap_remove(i);
             state.temp.swap_remove(i);
+            state.scen.swap_remove(i);
         }
     }
     while state.boards.len() > count {
@@ -217,15 +256,16 @@ pub fn generate_le(
         state.turns.swap_remove(v);
         state.rec.swap_remove(v);
         state.temp.swap_remove(v);
+        state.scen.swap_remove(v);
     }
     while state.boards.len() < count {
-        let mut b = standard_start(board, board, n, &mut rng);
-        b.heur_mask = assign_heur_seats(cfg, &mut rng);
+        let (b, scen) = new_game(&mut rng);
         state.boards.push(b);
         state.turns.push(0);
         state.rec.push(Vec::new());
         let t = sample_tau(cfg, &mut rng);
         state.temp.push(t);
+        state.scen.push(scen.to_string());
     }
 
     counters.inflight_games.store(count as u32, Ordering::Relaxed);
@@ -413,13 +453,14 @@ pub fn generate_le(
                 num_turns,
                 heur_mask: state.boards[g].heur_mask,
                 temp: state.temp[g],
+                scenario: std::mem::take(&mut state.scen[g]),
             };
             samples_total += game_sample_count(&game, n);
             state.finished.push(game);
 
-            let mut b = standard_start(board, board, n, &mut rng);
-            b.heur_mask = assign_heur_seats(cfg, &mut rng);
+            let (b, scen) = new_game(&mut rng);
             state.boards[g] = b;
+            state.scen[g] = scen.to_string();
             state.turns[g] = 0;
             state.temp[g] = sample_tau(cfg, &mut rng);
         }

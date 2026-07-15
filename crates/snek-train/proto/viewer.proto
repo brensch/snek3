@@ -141,6 +141,9 @@ message Game {
   // 0 for ordinary net-vs-net self-play. Lets the replay viewer mark which
   // snake is voronoi.
   uint32 heur_mask = 4;
+  // Curriculum scenario this game was seeded from (snek_core::scenario name),
+  // empty for a standard start. Lets the viewer badge seeded games.
+  string scenario = 5;
 }
 
 message GameFile {

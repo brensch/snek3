@@ -46,6 +46,11 @@ pub struct GameJson {
     /// at this τ, and it conditions the net at materialisation. 0 for AZ games.
     #[serde(default)]
     pub temp: f32,
+    /// Curriculum scenario this game was seeded from (snek_core::scenario name),
+    /// empty for a standard start. Display-only: lets the viewer badge seeded
+    /// games so the curriculum is auditable.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scenario: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

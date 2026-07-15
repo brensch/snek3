@@ -16,6 +16,7 @@
 pub mod baseline;
 pub mod body;
 pub mod encode;
+pub mod scenario;
 pub mod setup;
 
 #[cfg(feature = "json")]

@@ -64,6 +64,9 @@ pub struct SelfPlayState {
     /// Logit-Equilibrium mode — assigned at game start, constant for the game's
     /// life. Empty/unused in the AZ path.
     pub temp: Vec<f32>,
+    /// Curriculum scenario each in-flight game was seeded from (parallel to
+    /// `boards`; empty string = standard start). LE mode only.
+    pub scen: Vec<String>,
     /// Every game that has finished in the current (not-yet-committed)
     /// generation. A random subset is written for the dashboard; all of them are
     /// materialised into this generation's training samples when the sample

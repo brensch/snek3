@@ -306,6 +306,7 @@ pub(super) fn play_chunk(
                 num_turns,
                 heur_mask: bslice[g].heur_mask,
                 temp: 0.0,
+                scenario: String::new(),
             };
             let added = game_sample_count(&game, n);
             shared.recorded.lock().unwrap().push(game);

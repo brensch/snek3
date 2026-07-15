@@ -305,11 +305,19 @@ function SelfPlayPanel({
             <div className="grid gap-2.5" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${cell * 12}px, 1fr))` }}>
               {file.games.map((game, i) => (
                 <div key={i}>
-                  <div className="mb-0.5 flex items-baseline justify-between text-[10px] text-ink-3">
+                  <div className="mb-0.5 flex items-baseline gap-1.5 text-[10px] text-ink-3">
                     <span className="font-mono tabular-nums">game {i + 1}</span>
+                    {game.scenario && (
+                      <span
+                        className="rounded bg-warn/15 px-1 font-mono text-warn"
+                        title={`seeded from the "${game.scenario}" curriculum scenario`}
+                      >
+                        {game.scenario}
+                      </span>
+                    )}
                     <Link
                       to={`/runs/${encodeURIComponent(runId)}/games/${gen}/${i}`}
-                      className="hover:text-accent"
+                      className="ml-auto hover:text-accent"
                       title="Open fullscreen (permalink)"
                     >
                       ⛶

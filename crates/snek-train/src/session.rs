@@ -54,6 +54,10 @@ struct SessionSnap {
     /// Per-game episode τ (parallel to `boards`), Logit-Equilibrium mode only.
     #[serde(default)]
     temp: Vec<f32>,
+    /// Curriculum scenario per in-flight game (parallel to `boards`; empty =
+    /// standard start), Logit-Equilibrium mode only.
+    #[serde(default)]
+    scen: Vec<String>,
 }
 
 fn pts(ps: &[Point]) -> Vec<[i8; 2]> {
@@ -115,6 +119,7 @@ pub fn save(path: &Path, state: &SelfPlayState) -> anyhow::Result<()> {
         rec: state.rec.clone(),
         finished: state.finished.clone(),
         temp: state.temp.clone(),
+        scen: state.scen.clone(),
     };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -137,5 +142,6 @@ pub fn load(path: &Path) -> anyhow::Result<Option<SelfPlayState>> {
         rec: snap.rec,
         finished: snap.finished,
         temp: snap.temp,
+        scen: snap.scen,
     }))
 }
