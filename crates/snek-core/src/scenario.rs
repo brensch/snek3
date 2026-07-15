@@ -57,6 +57,13 @@ pub fn scenario(name: &str) -> Option<&'static Scenario> {
 /// thriving opponents who can also deny food). Standard starts almost never
 /// reach starvation (snakes die in combat first), so the value net never
 /// learns the hunger gradient.
+///
+/// Every victim is dealt a SOLVABLE puzzle: at least one food within
+/// `health - 1` free-space BFS steps of its head (placing one if needed).
+/// A doomed victim only teaches "hunger = death"; the blindness this scenario
+/// exists to fix needs the contrast case — hunger + reachable food + eating =
+/// survival. (BFS over the spawn board is conservative: tails vacate as play
+/// advances, so a statically reachable food stays reachable.)
 fn hunger(width: i8, height: i8, num_snakes: usize, mut rng: &mut dyn RngCore) -> Board {
     let mut b = random_midgame(
         width,
@@ -74,9 +81,69 @@ fn hunger(width: i8, height: i8, num_snakes: usize, mut rng: &mut dyn RngCore) -
     let victims = (&mut rng).gen_range(1..=2usize.min(n));
     let first = (&mut rng).gen_range(0..n);
     for k in 0..victims {
-        b.snakes[(first + k) % n].health = (&mut rng).gen_range(5..=30);
+        let v = (first + k) % n;
+        let health = (&mut rng).gen_range(5..=30i16);
+        b.snakes[v].health = health;
+        ensure_reachable_food(&mut b, v, (health - 1) as u32, &mut rng);
     }
     b
+}
+
+/// Guarantee snake `v` has at least one food within `budget` BFS steps through
+/// free cells; place one at a random reachable cell if not. The victim's head
+/// always has an escape square (engine invariant), so distance-1 cells exist.
+fn ensure_reachable_food(b: &mut Board, v: usize, budget: u32, rng: &mut &mut dyn RngCore) {
+    let dist = free_space_bfs(b, b.snakes[v].head());
+    let idx = |p: Point| (p.y as usize) * (b.width as usize) + p.x as usize;
+    if b.food.iter().any(|&f| dist[idx(f)].is_some_and(|d| d <= budget)) {
+        return;
+    }
+    // Prefer a genuinely urgent puzzle: food at 2..=budget steps when possible.
+    let mut cells: Vec<Point> = (0..b.width)
+        .flat_map(|x| (0..b.height).map(move |y| Point::new(x, y)))
+        .filter(|&p| !b.food.contains(&p))
+        .filter(|&p| dist[idx(p)].is_some_and(|d| (2..=budget).contains(&d)))
+        .collect();
+    if cells.is_empty() {
+        // Cramped board: fall back to anything reachable in budget (>= 1).
+        cells = (0..b.width)
+            .flat_map(|x| (0..b.height).map(move |y| Point::new(x, y)))
+            .filter(|&p| !b.food.contains(&p))
+            .filter(|&p| dist[idx(p)].is_some_and(|d| (1..=budget).contains(&d)))
+            .collect();
+    }
+    if !cells.is_empty() {
+        let p = cells[rng.gen_range(0..cells.len())];
+        b.food.push(p);
+    }
+}
+
+/// BFS distance from `start` through cells no snake occupies (bodies as of the
+/// spawn board; `start` itself is the only occupied cell allowed). `None` =
+/// unreachable.
+fn free_space_bfs(b: &Board, start: Point) -> Vec<Option<u32>> {
+    let (w, h) = (b.width as usize, b.height as usize);
+    let idx = |p: Point| (p.y as usize) * w + p.x as usize;
+    let mut occupied = vec![false; w * h];
+    for s in &b.snakes {
+        for c in s.body.iter() {
+            occupied[idx(c)] = true;
+        }
+    }
+    let mut dist = vec![None; w * h];
+    dist[idx(start)] = Some(0);
+    let mut queue = std::collections::VecDeque::from([start]);
+    while let Some(cur) = queue.pop_front() {
+        let d = dist[idx(cur)].expect("queued cells have distances");
+        for (dx, dy) in CARDINALS {
+            let p = Point::new(cur.x + dx, cur.y + dy);
+            if b.in_bounds(p) && !occupied[idx(p)] && dist[idx(p)].is_none() {
+                dist[idx(p)] = Some(d + 1);
+                queue.push_back(p);
+            }
+        }
+    }
+    dist
 }
 
 /// Tunable shape of a synthetic mid-game position — the shared engine most
@@ -256,7 +323,34 @@ mod tests {
             let healthy = b.snakes.iter().filter(|s| s.health >= 40).count();
             assert!((1..=2).contains(&victims), "victims: {victims}");
             assert_eq!(victims + healthy, 4, "no snake in the dead zone between");
-            assert!((1..=3).contains(&b.food.len()));
+            // Base 1-3, plus up to one placed per victim to guarantee a
+            // reachable meal.
+            assert!((1..=5).contains(&b.food.len()), "foods: {}", b.food.len());
+        }
+    }
+
+    /// No doomed victims: every hungry snake must be dealt a SOLVABLE puzzle —
+    /// at least one food statically reachable (free-space BFS through spawn
+    /// bodies) within its health budget. A victim that cannot possibly eat
+    /// only teaches "hunger = death"; the contrast case is the point.
+    #[test]
+    fn hunger_victims_can_always_reach_food() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(23);
+        for i in 0..500 {
+            let b = (scenario("hunger").unwrap().generate)(11, 11, 4, &mut rng);
+            let idx = |p: Point| (p.y as usize) * (b.width as usize) + p.x as usize;
+            for (si, s) in b.snakes.iter().enumerate() {
+                if s.health > 30 {
+                    continue; // not a victim
+                }
+                let dist = free_space_bfs(&b, s.head());
+                let best = b.food.iter().filter_map(|&f| dist[idx(f)]).min();
+                assert!(
+                    best.is_some_and(|d| d <= (s.health - 1) as u32),
+                    "board {i}: victim {si} (h={}) has no reachable food within budget (best {best:?})",
+                    s.health
+                );
+            }
         }
     }
 
