@@ -42,7 +42,12 @@ pub fn obvious_immediate_death(board: &Board, snake_idx: usize, mv: Move) -> boo
         if i == snake_idx || !other.alive() {
             continue;
         }
-        for j in 1..other.len().saturating_sub(1) {
+        // Index 0 (the opponent's CURRENT head cell) is certain death too:
+        // whatever move the opponent makes, its neck replaces its head there —
+        // and a simultaneously-dying opponent's body still kills. Only the
+        // tail (last index) reliably vacates; a just-ate duplicate is covered
+        // because the doubled segment also sits at len-2.
+        for j in 0..other.len().saturating_sub(1) {
             if other.body.get(j) == next {
                 return true;
             }
@@ -1448,5 +1453,29 @@ mod tests {
             0,
             Move::Right
         ));
+    }
+
+    /// Moving onto an opponent's CURRENT head cell is certain death — its neck
+    /// replaces the head no matter what it plays (and a dying snake still
+    /// kills). Moving merely ADJACENT to where its head might go is a
+    /// head-to-head gamble, not certain, and must NOT be masked. Regression
+    /// for a live game where a snake walked onto a longer opponent's head cell
+    /// with 9.7% policy mass because index 0 was skipped by the mask.
+    #[test]
+    fn obvious_immediate_death_includes_opponent_head_cell() {
+        let mut b = Board::new(7, 7);
+        // Me: head (3,3) moving down toward the opponent's head at (3,2).
+        b.add_snake(&[Point::new(3, 3), Point::new(3, 4), Point::new(3, 5)]);
+        b.add_snake(&[Point::new(3, 2), Point::new(4, 2), Point::new(5, 2)]);
+        assert!(
+            obvious_immediate_death(&b, 0, Move::Down),
+            "opponent's current head cell is a certain body collision"
+        );
+        // (2,3) is empty but adjacent to the opponent's head — a potential
+        // head-to-head, probabilistic, must remain a candidate.
+        assert!(
+            !obvious_immediate_death(&b, 0, Move::Left),
+            "cells the opponent's head might move to are not certain death"
+        );
     }
 }
