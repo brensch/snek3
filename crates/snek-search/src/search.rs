@@ -87,3 +87,99 @@ pub(crate) fn terminal_values_with_draw(board: &Board, draw_value: f32) -> [f32;
     }
     v
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcts::obvious_immediate_death;
+    use snek_core::{EliminatedCause, Move, Point};
+
+    // The suicide mask is the last line of defence between the τ-softened
+    // equilibrium and certain death — every gap here becomes real blunders in
+    // self-play (58% of le-4 deaths; the opponent-head-cell gap in le-6).
+    // Battery over every "certain vs merely dangerous" distinction.
+
+    fn me(cells: &[(i8, i8)]) -> Board {
+        let mut b = Board::new(7, 7);
+        b.add_snake(&cells.iter().map(|&(x, y)| Point::new(x, y)).collect::<Vec<_>>());
+        b
+    }
+
+    fn with_opponent(mut b: Board, cells: &[(i8, i8)]) -> Board {
+        b.add_snake(&cells.iter().map(|&(x, y)| Point::new(x, y)).collect::<Vec<_>>());
+        b
+    }
+
+    #[test]
+    fn walls_are_certain_death() {
+        // Head in the bottom-left corner: both wall moves masked, others not.
+        let b = me(&[(0, 0), (1, 0), (2, 0)]);
+        assert!(obvious_immediate_death(&b, 0, Move::Down));
+        assert!(obvious_immediate_death(&b, 0, Move::Left));
+        assert!(!obvious_immediate_death(&b, 0, Move::Up));
+    }
+
+    #[test]
+    fn own_body_is_certain_death_but_own_tail_vacates() {
+        // Coil: head (2,2), body up over (2,3),(3,3),(3,2); tail (3,2) vacates.
+        let b = me(&[(2, 2), (2, 3), (3, 3), (3, 2)]);
+        assert!(obvious_immediate_death(&b, 0, Move::Up), "own neck");
+        assert!(
+            !obvious_immediate_death(&b, 0, Move::Right),
+            "own tail vacates this turn — legal"
+        );
+    }
+
+    #[test]
+    fn own_tail_after_eating_does_not_vacate() {
+        // Same coil but the tail segment is DUPLICATED (just ate): the pop
+        // removes one twin, the cell stays occupied — certain death.
+        let b = me(&[(2, 2), (2, 3), (3, 3), (3, 2), (3, 2)]);
+        assert!(obvious_immediate_death(&b, 0, Move::Right));
+    }
+
+    #[test]
+    fn opponent_tail_after_eating_does_not_vacate() {
+        let b = me(&[(2, 2), (2, 1), (1, 1)]);
+        // Opponent tail at (3,2), duplicated (just ate) — moving there dies.
+        let b = with_opponent(b, &[(5, 2), (4, 2), (3, 2), (3, 2)]);
+        assert!(obvious_immediate_death(&b, 0, Move::Right));
+        // Un-duplicated control: tail vacates, move is legal.
+        let b2 = me(&[(2, 2), (2, 1), (1, 1)]);
+        let b2 = with_opponent(b2, &[(5, 2), (4, 2), (3, 2)]);
+        assert!(!obvious_immediate_death(&b2, 0, Move::Right));
+    }
+
+    #[test]
+    fn dead_opponents_do_not_block() {
+        let b = me(&[(2, 2), (2, 1), (1, 1)]);
+        let mut b = with_opponent(b, &[(3, 2), (4, 2), (5, 2)]);
+        b.snakes[1].eliminated = Some(EliminatedCause::Collision);
+        assert!(!obvious_immediate_death(&b, 0, Move::Right));
+    }
+
+    #[test]
+    fn le_candidates_excludes_certain_deaths() {
+        // Head (2,2): up = own neck (excluded by candidates already), right =
+        // opponent mid-body (masked), left/down open.
+        let b = me(&[(2, 2), (2, 3), (2, 4)]);
+        let b = with_opponent(b, &[(3, 3), (3, 2), (3, 1), (4, 1)]);
+        let c = le_candidates(&b, 0);
+        assert!(c.contains(&Move::Left) && c.contains(&Move::Down));
+        assert!(!c.contains(&Move::Right), "opponent standing body masked");
+        assert!(!c.contains(&Move::Up), "neck reversal excluded");
+    }
+
+    #[test]
+    fn le_candidates_trapped_falls_back_to_nonempty() {
+        // Corner cell with own body sealing both open sides: every move is
+        // fatal, but the candidate set must never be empty (no NaN policies —
+        // the doomed snake still plays a move).
+        let b = me(&[(0, 0), (0, 1), (1, 1), (1, 0), (2, 0)]);
+        let c = le_candidates(&b, 0);
+        assert!(!c.is_empty());
+        for m in &c {
+            assert!(obvious_immediate_death(&b, 0, *m), "trapped: all fatal");
+        }
+    }
+}
