@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { getEvalGameFile, getGameFile } from "../api/proto";
 import { GameTile } from "../components/GameTile";
-import type { GameFile } from "../gen/viewer_pb";
+import type { Frame, Game, GameFile } from "../gen/viewer_pb";
+import { MOVE_ARROW } from "../lib/moves";
 import { playerColor, snakeColor } from "../lib/palette";
 import { playerName, playerNameLong } from "../lib/players";
 
@@ -54,19 +55,32 @@ export function GameView({ kind }: { kind: "selfplay" | "eval" }) {
   }, [evalMeta]);
 
   // Fit the board to the viewport: the tile carries ~150px of chrome below the
-  // board and the page ~120px above it. Clamped so tiny boards don't balloon.
+  // board and the page ~120px above it; the odds panel takes ~250px on the
+  // right when there's room. Clamped so tiny boards don't balloon.
   const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
   useEffect(() => {
     const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+  const sideBySide = viewport.w >= 880;
   const frame0 = game?.frames[0];
   const cell = frame0
-    ? Math.max(14, Math.min(52, Math.floor(Math.min((viewport.w - 64) / frame0.width, (viewport.h - 290) / frame0.height))))
+    ? Math.max(
+        14,
+        Math.min(
+          52,
+          Math.floor(
+            Math.min((viewport.w - 64 - (sideBySide ? 250 : 0)) / frame0.width, (viewport.h - 290) / frame0.height),
+          ),
+        ),
+      )
     : 32;
 
-  const [fps, setFps] = useState(8);
+  // Default to 70% playback speed so there's time to read the odds live.
+  const [fps, setFps] = useState(14);
+  const [frameIdx, setFrameIdx] = useState(0);
+  const onFrame = useCallback((i: number) => setFrameIdx(i), []);
   const [copied, setCopied] = useState(false);
   const copyLink = async () => {
     try {
@@ -147,11 +161,81 @@ export function GameView({ kind }: { kind: "selfplay" | "eval" }) {
         )}
         {file && !game && <div className="py-16 text-sm text-ink-3">This file has no game at index {idxNum}.</div>}
         {game && (
-          <div style={{ width: frame0 ? frame0.width * cell + 20 : undefined }} className="max-w-full">
-            <GameTile game={game} intervalMs={Math.round(1000 / fps)} cell={cell} colors={colors} />
+          <div className={`flex max-w-full gap-4 ${sideBySide ? "flex-row items-start" : "flex-col items-center"}`}>
+            <div style={{ width: frame0 ? frame0.width * cell + 20 : undefined }} className="max-w-full">
+              <GameTile game={game} intervalMs={Math.round(1000 / fps)} cell={cell} colors={colors} onFrame={onFrame} />
+            </div>
+            <OddsPanel game={game} frame={game.frames[Math.min(frameIdx, game.frames.length - 1)]} colors={colors} />
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+// Live per-direction odds for every snake at the displayed turn: the search's
+// equilibrium policy as horizontal bars, the played move marked, plus the
+// search value. Follows the replay frame-by-frame — the "what was it
+// thinking" readout the hover popover can't give while the game plays.
+function OddsPanel({ game, frame, colors }: { game: Game; frame: Frame; colors?: string[] }) {
+  const isHeuristic = (i: number): boolean => ((game.heurMask >> i) & 1) === 1;
+  return (
+    <div className="w-full shrink-0 space-y-2 sm:w-[15rem]">
+      {frame.snakes.map((s, i) => {
+        const color = colors?.[i] ?? snakeColor(i);
+        const best = Math.max(...s.policy.map((p) => p ?? 0), 0);
+        return (
+          <div key={i} className={`card p-2 ${s.alive ? "" : "opacity-40"}`}>
+            <div className="mb-1 flex items-center gap-1.5 text-[11px]">
+              <span
+                className="h-2.5 w-2.5 shrink-0 rounded-full"
+                style={{ background: color, boxShadow: isHeuristic(i) ? "0 0 0 1.5px #fff" : undefined }}
+              />
+              <span className="font-mono text-ink-2">
+                snake {i}
+                {isHeuristic(i) && <span className="text-ink-3"> · voronoi</span>}
+              </span>
+              <span
+                className={`ml-auto font-mono tabular-nums ${s.value >= 0 ? "text-good" : "text-bad"}`}
+                title="search value for this snake"
+              >
+                {s.value >= 0 ? "+" : ""}
+                {s.value.toFixed(2)}
+              </span>
+            </div>
+            {s.alive ? (
+              [0, 1, 2, 3].map((m) => {
+                const p = s.policy[m] ?? 0;
+                const played = s.chosenMove === m;
+                return (
+                  <div key={m} className="flex items-center gap-1.5 py-px text-[11px]">
+                    <span className={`w-3 text-center ${played ? "font-semibold text-ink" : "text-ink-3"}`}>
+                      {MOVE_ARROW[m]}
+                    </span>
+                    <span className="relative h-2 min-w-0 flex-1 overflow-hidden rounded bg-inset">
+                      <span
+                        className="absolute inset-y-0 left-0 rounded"
+                        style={{
+                          width: `${Math.round(Math.max(0, Math.min(1, p)) * 100)}%`,
+                          background: color,
+                          opacity: played ? 1 : p === best && best > 0 ? 0.75 : 0.35,
+                        }}
+                      />
+                    </span>
+                    <span
+                      className={`w-9 text-right font-mono tabular-nums ${played ? "text-ink" : "text-ink-3"}`}
+                    >
+                      {(p * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="text-[10px] text-ink-3">dead</div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

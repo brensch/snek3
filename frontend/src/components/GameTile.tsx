@@ -17,11 +17,15 @@ export function GameTile({
   intervalMs,
   cell,
   colors,
+  onFrame,
 }: {
   game: Game;
   intervalMs: number;
   cell: number;
   colors?: string[];
+  /** Reports the currently displayed frame index (fullscreen view renders a
+      synced odds panel from it). */
+  onFrame?: (idx: number) => void;
 }) {
   const frames = game.frames;
   const len = frames.length;
@@ -37,8 +41,12 @@ export function GameTile({
     return () => window.clearInterval(timer);
   }, [playing, intervalMs, cycle, len]);
 
+  const idx = Math.min(phase, Math.max(0, len - 1));
+  useEffect(() => {
+    onFrame?.(idx);
+  }, [idx, onFrame]);
+
   if (len === 0) return null;
-  const idx = Math.min(phase, len - 1);
   const frame = frames[idx];
 
   // Which seats a built-in heuristic (voronoi) plays this game, from the
