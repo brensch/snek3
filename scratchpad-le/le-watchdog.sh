@@ -37,6 +37,10 @@ last_gen_change=$(date +%s)
 log "watchdog started (pid $$)"
 while true; do
   if ! port_up; then
+    # A dead PROCESS is the only thing we auto-revive: a graceful "running:
+    # false" can only come from the API (a deliberate stop by the user or the
+    # agent) and must stick. Crashes kill the whole server, so relaunch+resume
+    # here covers every real failure without overriding intentional stops.
     launch_server
     sleep 20
     resume_run
@@ -48,9 +52,10 @@ while true; do
   gen=$(echo "$s" | grep -o '"generation":[0-9]*' | cut -d: -f2)
   now=$(date +%s)
   if [ "$running" != "true" ]; then
-    resume_run
+    # Intentional stop (see above) — just note it and keep watching.
+    if [ $((now % 600)) -lt 120 ]; then log "run stopped (intentional) — not resuming"; fi
     last_gen=-1; last_gen_change=$now
-    sleep 60; continue
+    sleep 120; continue
   fi
   if [ -n "${gen:-}" ] && [ "$gen" != "$last_gen" ]; then
     last_gen=$gen; last_gen_change=$now
