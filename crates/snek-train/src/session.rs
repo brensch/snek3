@@ -51,9 +51,9 @@ struct SessionSnap {
     /// Games finished in the current generation, awaiting the sample target.
     #[serde(default)]
     finished: Vec<GameJson>,
-    /// Per-game episode τ (parallel to `boards`), Logit-Equilibrium mode only.
+    /// Per-game, per-seat episode τ (parallel to `boards`), LE mode only.
     #[serde(default)]
-    temp: Vec<f32>,
+    temp: Vec<[f32; snek_core::MAX_SNAKES]>,
     /// Curriculum scenario per in-flight game (parallel to `boards`; empty =
     /// standard start), Logit-Equilibrium mode only.
     #[serde(default)]
@@ -130,12 +130,22 @@ pub fn save(path: &Path, state: &SelfPlayState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Load a saved session, or `None` if there is no snapshot.
+/// Load a saved session, or `None` if there is no snapshot — or if the
+/// snapshot predates the current schema (e.g. per-game → per-seat τ). A
+/// session is only in-flight games; dropping it costs a few games' worth of
+/// play, never training data, so an unreadable file must degrade to a fresh
+/// session rather than kill the resume.
 pub fn load(path: &Path) -> anyhow::Result<Option<SelfPlayState>> {
     if !path.exists() {
         return Ok(None);
     }
-    let snap: SessionSnap = serde_json::from_slice(&std::fs::read(path)?)?;
+    let snap: SessionSnap = match serde_json::from_slice(&std::fs::read(path)?) {
+        Ok(snap) => snap,
+        Err(err) => {
+            tracing::warn!(%err, "session snapshot unreadable (old schema?) — starting fresh games");
+            return Ok(None);
+        }
+    };
     Ok(Some(SelfPlayState {
         boards: snap.boards.iter().map(BoardSnap::to_board).collect(),
         turns: snap.turns,

@@ -201,6 +201,9 @@ struct MetricJson {
     lr: Option<f64>,
     le_ff_winrate: Option<f64>,
     le_vor_winrate: Option<f64>,
+    le_vor_incumbent: Option<f64>,
+    le_vor_probe: Option<f64>,
+    gate_promoted: Option<bool>,
 }
 
 fn metrics(root: &Path) -> Vec<proto::MetricRow> {
@@ -236,11 +239,15 @@ fn metrics(root: &Path) -> Vec<proto::MetricRow> {
                 gpu_busy_pct: row.gpu_busy_pct.unwrap_or(0.0),
                 avg_game_turn: row.avg_game_turn.unwrap_or(0.0),
                 lr: row.lr.unwrap_or(0.0),
-                // Both baselines are written together on eval gens; presence of
-                // the floodfill rate marks the row as an eval gen.
+                // Gate rates are written together on gate gens; presence of
+                // the floodfill rate marks the row as a gate gen.
                 le_ff_winrate: row.le_ff_winrate.unwrap_or(0.0),
                 le_vor_winrate: row.le_vor_winrate.unwrap_or(0.0),
                 has_le_eval: row.le_ff_winrate.is_some(),
+                le_vor_incumbent: row.le_vor_incumbent.unwrap_or(0.0),
+                le_vor_probe: row.le_vor_probe.unwrap_or(0.0),
+                has_probe: row.le_vor_probe.is_some(),
+                gate_promoted: row.gate_promoted.unwrap_or(false),
             })
         })
         .collect()

@@ -47,22 +47,22 @@ pub fn train_steps(
     Ok(last)
 }
 
-// The LR schedule's shape is owned by the code: Adam(W) starts at LR_BASE (a
-// rate the net demonstrably trains well at from scratch), smoothly halves
-// every `cfg.lr_half_life_samples` so late-run updates settle instead of
-// orbiting the optimum, and never drops below LR_FLOOR — self-play data is
-// non-stationary, so training must keep tracking it indefinitely rather than
-// freezing. Only the half-life is a config knob (it decides *when* the run
-// reaches fine-tuning rates, the lever run-over-run experiments need).
+// The LR schedule: Adam(W) starts at LR_BASE (a rate the net demonstrably
+// trains well at from scratch), smoothly halves every
+// `cfg.lr_half_life_samples`, and never drops below `cfg.lr_floor` —
+// self-play data is non-stationary, so training must keep tracking it rather
+// than freezing. The floor matters more than it looks: snek3-le-6 sat at a
+// 1e-4 floor for ~2,400 gens and its weights random-walked a constant ~3.7%
+// L2 per 32 gens forever (±40-point strength churn, mean erosion). A floor is
+// a permanent step size; pick one small enough to consolidate.
 const LR_BASE: f64 = 1e-3;
-const LR_FLOOR: f64 = 1e-4;
 
 /// Learning rate at a point in the run, keyed by total training samples seen.
 /// Applied by the trainer every generation, so it survives pauses/resumes (it
 /// is a pure function of the persisted `samples_seen`).
 pub fn lr_for(cfg: &RunConfig, samples_seen: u64) -> f64 {
     let half_life = cfg.lr_half_life_samples.max(1.0);
-    (LR_BASE * 0.5f64.powf(samples_seen as f64 / half_life)).max(LR_FLOOR)
+    (LR_BASE * 0.5f64.powf(samples_seen as f64 / half_life)).max(cfg.lr_floor)
 }
 
 pub fn build_optimizer(vs: &nn::VarStore, cfg: &RunConfig) -> anyhow::Result<nn::Optimizer> {

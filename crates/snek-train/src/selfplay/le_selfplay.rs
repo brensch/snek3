@@ -7,16 +7,17 @@
 //! turn is: one [`EqForest::build`] over all live games → encode every leaf once
 //! per seat with the τ-conditioned value net → one batched value forward → one
 //! per-node LE backup → record the root mixed policy + per-player value into the
-//! frame → mix uniform exploration and sample the played move → step.
+//! frame → sample the played move from the mix (sharpened after the opening)
+//! → step.
 //!
-//! τ is per-**game** (assigned at game start, constant for the game's life,
-//! carried in `SelfPlayState::temp`), because games persist across generations
-//! here.
+//! τ is per-**seat**, assigned at game start and constant for the game's life
+//! (carried in `SelfPlayState::temp`): seats draw independently, so the
+//! equilibrium teaches sharp seats to exploit soft ones (SBRLE).
 
 use super::materialize::{
     game_matches_shape, game_sample_count, in_flight_matches_shape, materialize_le_game,
 };
-use super::rules::mix_root_dirichlet;
+use super::rules::sharpen_policy;
 use super::{assign_heur_seats, GenOutcome, SelfPlayNet, SelfPlayState};
 use crate::config::RunConfig;
 use crate::metrics::Metrics;
@@ -28,20 +29,20 @@ use rayon::prelude::*;
 use snek_core::{
     encode_into_temp, obs_side, standard_start, Move, MAX_SNAKES, NUM_CHANNELS, NUM_CHANNELS_TEMP,
 };
-use snek_search::{obvious_immediate_death, EqForest};
+use snek_search::EqForest;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tch::{no_grad, Device, Tensor};
 
-/// Sample a per-episode inverse temperature τ ~ U[tau_min, tau_max].
-fn sample_tau(cfg: &RunConfig, rng: &mut impl Rng) -> f32 {
+/// Sample per-SEAT episode inverse temperatures, each i.i.d. τ ~ U[tau_min,
+/// tau_max]. Independent draws make most games rationality-asymmetric, so the
+/// equilibrium targets teach sharp seats to exploit soft ones — the SBRLE
+/// skill the held-out eval actually measures (net at serve-τ vs a fixed
+/// heuristic), which same-τ-for-all-seats games never demonstrate.
+fn sample_taus(cfg: &RunConfig, rng: &mut impl Rng) -> [f32; MAX_SNAKES] {
     let lo = cfg.tau_min.min(cfg.tau_max);
     let hi = cfg.tau_max.max(cfg.tau_min);
-    if hi <= lo {
-        lo
-    } else {
-        rng.gen_range(lo..=hi)
-    }
+    std::array::from_fn(|_| if hi <= lo { lo } else { rng.gen_range(lo..=hi) })
 }
 
 /// Sample a move index from a 4-way distribution (Up if degenerate/dead).
@@ -230,7 +231,7 @@ pub fn generate_le(
     // Realign τ + scenario tags to the board count (fresh run: empty; resume:
     // reuse; new slots get fresh values / a standard-start tag).
     while state.temp.len() < state.boards.len() {
-        let t = sample_tau(cfg, &mut rng);
+        let t = sample_taus(cfg, &mut rng);
         state.temp.push(t);
     }
     state.temp.truncate(state.boards.len());
@@ -263,7 +264,7 @@ pub fn generate_le(
         state.boards.push(b);
         state.turns.push(0);
         state.rec.push(Vec::new());
-        let t = sample_tau(cfg, &mut rng);
+        let t = sample_taus(cfg, &mut rng);
         state.temp.push(t);
         state.scen.push(scen.to_string());
     }
@@ -296,8 +297,8 @@ pub fn generate_le(
         let build_depth = if cfg.le_top_k > 0 { 1 } else { depth };
         let mut forest = EqForest::build(&state.boards, build_depth, cfg.draw_value);
         t_build += tb.elapsed().as_micros();
-        let tau_pg: Vec<[f32; MAX_SNAKES]> =
-            state.temp.iter().map(|&t| [t; MAX_SNAKES]).collect();
+        // Per-seat τ flows straight into the solve: hetero-rationality games.
+        let tau_pg: Vec<[f32; MAX_SNAKES]> = state.temp.clone();
         let num_eval = forest.eval_boards().len();
         let rows = num_eval * n;
 
@@ -322,9 +323,9 @@ pub fn generate_le(
                 let buf = stage.slice(padded * l15);
                 buf[r * l15..].fill(0.0); // pad rows only; encode overwrites the rest
                 buf[..r * l15].par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
-                    let tau = temp_snapshot[eg[e] as usize];
+                    let taus = temp_snapshot[eg[e] as usize];
                     for s in 0..n {
-                        encode_into_temp(&eb[e], s, tau, &mut chunk[s * l15..(s + 1) * l15]);
+                        encode_into_temp(&eb[e], s, taus[s], &mut chunk[s * l15..(s + 1) * l15]);
                     }
                 });
                 forward_values_staged(gpu_net, device, stage.tensor(), r, padded, side, chunk)
@@ -332,9 +333,9 @@ pub fn generate_le(
                 // Legacy path (le_fwd_chunk=0): one variable-shape forward.
                 let mut obs = vec![0.0f32; r * l15];
                 obs.par_chunks_mut(n * l15).enumerate().for_each(|(e, chunk)| {
-                    let tau = temp_snapshot[eg[e] as usize];
+                    let taus = temp_snapshot[eg[e] as usize];
                     for s in 0..n {
-                        encode_into_temp(&eb[e], s, tau, &mut chunk[s * l15..(s + 1) * l15]);
+                        encode_into_temp(&eb[e], s, taus[s], &mut chunk[s * l15..(s + 1) * l15]);
                     }
                 });
                 forward_values(gpu_net, device, &obs, r, side, side)
@@ -381,38 +382,20 @@ pub fn generate_le(
                 values[s] = eq.value[s];
                 // Played distribution = the clean LE policy, SAMPLED (never
                 // argmax — a mixed equilibrium must stay mixed to be
-                // non-exploitable). For the opening `sample_turns` moves we add
-                // AlphaZero-style root Dirichlet noise for off-policy opening
-                // diversity; after that it's the raw equilibrium. The TRAINING
-                // target (`policy`, set above) is always the clean LE policy —
-                // exploration noise never touches the label.
+                // non-exploitable). The opening `sample_turns` moves sample the
+                // raw mix for state diversity (per-seat τ + curriculum seeders
+                // carry the exploration burden — root Dirichlet was removed:
+                // applied to the PLAYED move only, it never touched the search
+                // or the target, so it was redundant state noise that also
+                // forced uncorrected blunders). After the opening the played
+                // distribution is SHARPENED (p^κ): soft-τ seats otherwise play
+                // near-random to the very end, and with a 90%-outcome value
+                // target that made half the buffer's value labels near-random
+                // too. The TRAINING target (`policy`, set above) is always the
+                // clean LE policy — play shaping never touches the label.
                 let mut play = eq.policy[s];
-                if state.turns[g] < cfg.sample_turns {
-                    mix_root_dirichlet(
-                        &mut play,
-                        4,
-                        cfg.dirichlet_frac,
-                        cfg.dirichlet_alpha,
-                        &mut rng,
-                    );
-                    // Keep the suicide mask intact under opening noise: Dirichlet
-                    // must not resurrect a certain-death move the search pruned.
-                    // If EVERY move is fatal (trapped), the masked policy sums to
-                    // ~0 — fall back to the noised policy so the doomed snake
-                    // still has a valid distribution (never all-zero => no NaN).
-                    let mut masked = play;
-                    for m in 0..4 {
-                        if obvious_immediate_death(&state.boards[g], s, Move::from_index(m)) {
-                            masked[m] = 0.0;
-                        }
-                    }
-                    let sum: f32 = masked.iter().sum();
-                    if sum > 1e-6 {
-                        for p in masked.iter_mut() {
-                            *p /= sum;
-                        }
-                        play = masked;
-                    }
+                if state.turns[g] >= cfg.sample_turns {
+                    sharpen_policy(&mut play, cfg.play_sharpness);
                 }
                 play_pols[s] = play;
                 actions[s] = sample_move(&play, &mut rng);
@@ -452,7 +435,7 @@ pub fn generate_le(
                 winner: winner.map(|x| x as i32),
                 num_turns,
                 heur_mask: state.boards[g].heur_mask,
-                temp: state.temp[g],
+                temps: state.temp[g][..n].to_vec(),
                 scenario: std::mem::take(&mut state.scen[g]),
             };
             samples_total += game_sample_count(&game, n);
@@ -462,7 +445,7 @@ pub fn generate_le(
             state.boards[g] = b;
             state.scen[g] = scen.to_string();
             state.turns[g] = 0;
-            state.temp[g] = sample_tau(cfg, &mut rng);
+            state.temp[g] = sample_taus(cfg, &mut rng);
         }
 
         t_step += tstep.elapsed().as_micros();
@@ -584,6 +567,13 @@ mod tests {
             .temp
             .iter()
             .all(|&t| t >= cfg.tau_min - 1e-3 && t <= cfg.tau_max + 1e-3));
+        // Per-seat τ: seats draw independently, so even a single game's
+        // samples span multiple distinct τ (a per-game-shared τ would give
+        // exactly one distinct value per game; a global τ exactly one total).
+        let mut taus: Vec<f32> = samples.temp.clone();
+        taus.sort_by(f32::total_cmp);
+        taus.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        assert!(taus.len() > 1, "hetero per-seat τ present (got {} distinct)", taus.len());
 
         // The whole point: policies are *mixed* distributions summing to ~1,
         // and at least some are genuinely mixed (not collapsed one-hots).

@@ -221,6 +221,28 @@ pub(crate) fn argmax_move(policy: &[f32]) -> Move {
     Move::from_index(best)
 }
 
+/// Sharpen a played distribution in place: `p ← p^κ / Σ p^κ`. κ = 1 is a
+/// no-op; κ > 1 concentrates mass on the equilibrium's preferred moves without
+/// ever resurrecting a zero (so masks survive). Used by LE self-play after the
+/// opening window: a soft-τ seat's mix stays the TRAINING target, but playing
+/// it verbatim to the end of the game makes endgames near-random — and with a
+/// mostly-outcome value target, near-random outcomes are label noise.
+pub(crate) fn sharpen_policy(p: &mut [f32; 4], kappa: f32) {
+    if kappa == 1.0 {
+        return;
+    }
+    let mut sum = 0.0f32;
+    for x in p.iter_mut() {
+        *x = if *x > 0.0 { x.powf(kappa) } else { 0.0 };
+        sum += *x;
+    }
+    if sum > 1e-12 {
+        for x in p.iter_mut() {
+            *x /= sum;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +275,22 @@ mod tests {
         let mut lone = [0.0, 1.0, 0.0, 0.0];
         mix_root_dirichlet(&mut lone, 4, 0.25, 0.3, &mut rng);
         assert_eq!(lone, [0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn sharpen_concentrates_preserves_zeros_and_normalizes() {
+        let mut p = [0.6, 0.3, 0.1, 0.0];
+        sharpen_policy(&mut p, 2.0);
+        let sum: f32 = p.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6);
+        assert!(p[0] > 0.6, "top move gains mass: {p:?}");
+        assert!(p[2] < 0.1, "tail move loses mass: {p:?}");
+        assert_eq!(p[3], 0.0, "zeros (masked moves) stay zero");
+
+        // kappa = 1 is exactly a no-op.
+        let mut q = [0.25, 0.25, 0.4, 0.1];
+        let before = q;
+        sharpen_policy(&mut q, 1.0);
+        assert_eq!(q, before);
     }
 }

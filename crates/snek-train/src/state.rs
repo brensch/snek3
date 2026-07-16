@@ -35,6 +35,11 @@ pub struct RunPaths {
     /// The persisted self-play session (in-flight games + finished-game buffer).
     /// Keeps the historical `selfplay.json` name for backward compatibility.
     pub session: PathBuf,
+    /// The gated data-generator's weights (see `gate`): frozen between
+    /// promotions; what self-play plays and serving publishes.
+    pub incumbent: PathBuf,
+    /// Gate bookkeeping (incumbent gen, promotion count, next paired seed).
+    pub gate: PathBuf,
 }
 
 impl RunPaths {
@@ -49,6 +54,8 @@ impl RunPaths {
             metrics: root.join("metrics.jsonl"),
             games: root.join("games"),
             session: root.join("selfplay.json"),
+            incumbent: root.join("incumbent.safetensors"),
+            gate: root.join("gate.json"),
             root,
         }
     }

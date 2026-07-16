@@ -247,6 +247,38 @@ impl TrainerHandle {
         } else {
             load_trainer_state(&paths.trainer_state)?
         };
+        // Gating (LE mode): the INCUMBENT is a second, frozen net that
+        // generates all self-play data and is what serving publishes; the live
+        // net (`vs`/`net`) is the candidate, a pure learner between gates.
+        // Promotion is the only way weights flow candidate -> incumbent. See
+        // `gate` module docs for why (regressed nets poisoning their own data).
+        let gating = cfg.le_mode && cfg.gate_gens > 0;
+        let mut vs_inc = nn::VarStore::new(device);
+        let net_inc =
+            snek_tch::AZNet::new(&vs_inc.root(), in_ch, cfg.trunk_channels, cfg.trunk_blocks);
+        let mut gate_meta = if gating && !fresh && paths.incumbent.exists() {
+            vs_inc.load(&paths.incumbent)?;
+            crate::gate::GateMeta::load(&paths.gate).unwrap_or_else(|| {
+                crate::gate::GateMeta::founding(state.generation, state.seed ^ 0x6A7E)
+            })
+        } else {
+            // Founding incumbent = the live weights (fresh init or resume of a
+            // pre-gating run). Persist immediately so serving/resume see it.
+            vs_inc.copy(&vs)?;
+            let meta = crate::gate::GateMeta::founding(state.generation, state.seed ^ 0x6A7E);
+            if gating {
+                vs_inc.save(&paths.incumbent)?;
+                meta.save(&paths.gate)?;
+            }
+            meta
+        };
+        if gating {
+            self.log(format!(
+                "gating ON: incumbent gen {} ({} promotions), gate every {} gens ({} games/side vs voronoi-{}), probe every {} gens (voronoi-{})",
+                gate_meta.incumbent_gen, gate_meta.promotions, cfg.gate_gens, cfg.gate_games,
+                cfg.gate_sims, cfg.probe_gens, cfg.probe_sims,
+            ));
+        }
         if !fresh {
             self.log(format!("resuming run '{run_id}': restoring replay buffer…"));
         }
@@ -305,7 +337,9 @@ impl TrainerHandle {
             let counters = self.metrics.counters();
             let gen_start = Instant::now();
             let inf_before = counters.inferences.load(Ordering::Relaxed);
-            let sp_net = SelfPlayNet { net: &net, device };
+            // Under gating the frozen incumbent generates the data; the live
+            // net only ever sees it through the training loss.
+            let sp_net = SelfPlayNet { net: if gating { &net_inc } else { &net }, device };
             let seed = state.seed + state.generation as u64;
             let outcome = if cfg.le_mode {
                 crate::selfplay::generate_le(&sp_net, &cfg, seed, &self.metrics, &self.stop, &mut sp)?
@@ -376,77 +410,120 @@ impl TrainerHandle {
             vs.save(&paths.net)?;
             // Also archive this generation's weights, kept forever.
             vs.save(paths.checkpoint_net(state.generation))?;
-            // Mirror the freshest net into the repo's tracked serving slot and
-            // commit + push it, so the snek3-api image always builds with the
-            // latest weights. Best-effort: git trouble never takes training down.
-            if let Err(err) = publish_serving(&paths.net, run_id, state.generation, &cfg) {
+            // Serving publishes the net we'd actually deploy: the incumbent
+            // when gating (promotion-guarded), else the live net.
+            let serving_src = if gating { &paths.incumbent } else { &paths.net };
+            if let Err(err) = publish_serving(serving_src, run_id, state.generation, &cfg) {
                 self.log(format!("serving publish failed: {err:#}"));
             }
-            // Held-out LE strength eval (the AZ league is disabled in LE mode):
-            // the net plays its equilibrium search at serve-τ against heuristics
-            // it never trains against. This is the "is it working" signal — run
-            // it before the metrics row so the win rates persist in the same
-            // record and chart on the dashboard (not just an ephemeral log line).
-            let (le_ff_winrate, le_vor_winrate) = if cfg.le_mode
-                && cfg.league_entrant_gens > 0
-                && (state.generation as usize).is_multiple_of(cfg.league_entrant_gens)
+            // GATE (LE mode): every `gate_gens`, the candidate and the
+            // incumbent play the same start seeds vs voronoi-`gate_sims`; the
+            // candidate is promoted to data generator + serving only if it
+            // wins strictly more. Also a floodfill sanity line, and every
+            // `probe_gens` the incumbent faces voronoi-`probe_sims` — the
+            // "super-heuristic" goal line. All rates land in the metrics row.
+            let mut le_ff_winrate = None;
+            let mut le_vor_winrate = None;
+            let mut le_vor_incumbent = None;
+            let mut le_vor_probe = None;
+            let mut gate_promoted = None;
+            if gating
+                && (state.generation as usize).is_multiple_of(cfg.gate_gens)
                 && !self.stop.load(Ordering::Relaxed)
             {
                 self.metrics.set_phase(crate::proto::Phase::Arena);
-                let games = cfg.league_games.max(8);
-                let stau = cfg.response_tau;
-                // Drive the dashboard's ARENA progress meter: two opponents,
-                // `games` each, accumulating into arena_done across both calls.
                 let counters = self.metrics.counters();
-                counters
-                    .arena_target
-                    .store((2 * games) as u32, Ordering::Relaxed);
-                counters.arena_done.store(0, Ordering::Relaxed);
-                let ff = snek_heuristic::Baseline::parse("floodfill").unwrap();
-                let vor = snek_heuristic::Baseline::parse("voronoi").unwrap();
-                // Record a handful of games per opponent so the actual play is
-                // auditable in the frontend (the win rate alone can lie).
-                let rec_n = 4usize;
-                let gen_id = state.generation;
-                let (vff, rec_ff) = crate::le_eval::eval_le_vs_baseline(
-                    &net, device, &cfg, ff, 0, games, stau, state.seed ^ 0xE3E3,
-                    Some(&counters.arena_done), gen_id, crate::eval::HEURISTIC_GEN, rec_n,
+                let ff_games = 16usize;
+                let probe_due = cfg.probe_gens > 0
+                    && (state.generation as usize).is_multiple_of(cfg.probe_gens);
+                let probe_games = if probe_due { 32 } else { 0 };
+                counters.arena_target.store(
+                    (2 * cfg.gate_games.max(8) + ff_games + probe_games) as u32,
+                    Ordering::Relaxed,
                 );
-                let (vvor, rec_vor) = crate::le_eval::eval_le_vs_baseline(
-                    &net, device, &cfg, vor, cfg.eval_sims.max(8), games, stau,
-                    state.seed ^ 0xE7E7, Some(&counters.arena_done), gen_id,
-                    crate::eval::VORONOI_GEN, rec_n,
-                );
-                // Clear the meter so it doesn't linger into the next gen.
-                counters.arena_target.store(0, Ordering::Relaxed);
                 counters.arena_done.store(0, Ordering::Relaxed);
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                if let Err(e) =
-                    crate::le_eval::write_eval_games(&paths.root, 0, now_ms, &rec_ff)
-                {
-                    self.log(format!("LE eval: failed to record floodfill games: {e}"));
+
+                // Floodfill sanity (greedy, cheap): the "is it not broken" line.
+                let ff = snek_heuristic::Baseline::parse("floodfill").unwrap();
+                let (vff, rec_ff) = crate::le_eval::eval_le_vs_baseline(
+                    &net, device, &cfg, ff, 0, ff_games, cfg.response_tau,
+                    state.seed ^ 0xE3E3, Some(&counters.arena_done),
+                    state.generation, crate::eval::HEURISTIC_GEN, 2,
+                );
+                le_ff_winrate = Some(vff);
+                if let Err(e) = crate::le_eval::write_eval_games(&paths.root, 0, now_ms, &rec_ff) {
+                    self.log(format!("gate: failed to record floodfill games: {e}"));
+                }
+
+                let report = crate::gate::run_gate(
+                    &net, &net_inc, device, &cfg, &mut gate_meta, state.generation,
+                    Some(&counters.arena_done), 4,
+                );
+                le_vor_winrate = Some(report.candidate_vor);
+                le_vor_incumbent = Some(report.incumbent_vor);
+                gate_promoted = Some(report.promoted);
+                if report.promoted {
+                    vs_inc.copy(&vs)?;
+                    vs_inc.save(&paths.incumbent)?;
+                    if let Err(err) =
+                        publish_serving(&paths.incumbent, run_id, state.generation, &cfg)
+                    {
+                        self.log(format!("serving publish failed: {err:#}"));
+                    }
+                }
+                if let Err(e) = gate_meta.save(&paths.gate) {
+                    self.log(format!("gate: failed to save gate.json: {e}"));
                 }
                 if let Err(e) = crate::le_eval::write_eval_games(
                     &paths.root,
-                    cfg.eval_sims.max(8) as u32,
+                    cfg.gate_sims as u32,
                     now_ms,
-                    &rec_vor,
+                    &report.recorded,
                 ) {
-                    self.log(format!("LE eval: failed to record voronoi games: {e}"));
+                    self.log(format!("gate: failed to record gate games: {e}"));
                 }
                 self.log(format!(
-                    "LE eval gen {gen}: vs floodfill {ff:.0}% · vs voronoi {vor:.0}% (serve τ={stau:.1}, {games} games/opp)",
+                    "GATE gen {gen}: candidate {cw}/{n} vs incumbent(gen {ig}) {iw}/{n} vs voronoi-{sims} → {verdict} · ff {ff:.0}%",
                     gen = state.generation,
+                    cw = report.candidate_wins,
+                    iw = report.incumbent_wins,
+                    n = report.games,
+                    ig = if report.promoted { state.generation } else { gate_meta.incumbent_gen },
+                    sims = cfg.gate_sims,
+                    verdict = if report.promoted { "PROMOTED" } else { "kept incumbent" },
                     ff = vff * 100.0,
-                    vor = vvor * 100.0,
                 ));
-                (Some(vff), Some(vvor))
-            } else {
-                (None, None)
-            };
+
+                if probe_due {
+                    let (probe, rec_probe) = crate::gate::run_probe(
+                        &net_inc, device, &cfg, &gate_meta, probe_games,
+                        state.seed ^ 0xF00D ^ state.generation as u64,
+                        Some(&counters.arena_done),
+                    );
+                    le_vor_probe = Some(probe);
+                    if let Err(e) = crate::le_eval::write_eval_games(
+                        &paths.root,
+                        cfg.probe_sims as u32,
+                        now_ms,
+                        &rec_probe,
+                    ) {
+                        self.log(format!("gate: failed to record probe games: {e}"));
+                    }
+                    self.log(format!(
+                        "PROBE gen {gen}: incumbent(gen {ig}) vs voronoi-{sims}: {p:.0}%",
+                        gen = state.generation,
+                        ig = gate_meta.incumbent_gen,
+                        sims = cfg.probe_sims,
+                        p = probe * 100.0,
+                    ));
+                }
+                counters.arena_target.store(0, Ordering::Relaxed);
+                counters.arena_done.store(0, Ordering::Relaxed);
+            }
             append_metric(
                 &paths.metrics,
                 &GenRecord {
@@ -480,6 +557,9 @@ impl TrainerHandle {
                     avg_game_turn,
                     le_ff_winrate,
                     le_vor_winrate,
+                    le_vor_incumbent,
+                    le_vor_probe,
+                    gate_promoted,
                 },
             )?;
             self.log(format!(
@@ -591,12 +671,22 @@ struct GenRecord {
     avg_game_turn: f64,
     /// Held-out LE strength (win rate 0..1) vs heuristics the net never trains
     /// against — the "is it actually getting stronger" signal. Only present on
-    /// eval gens (every `league_entrant_gens`); omitted otherwise so the
-    /// dashboard plots a point per measurement instead of a flat zero.
+    /// gate gens (every `gate_gens`); omitted otherwise so the dashboard plots
+    /// a point per measurement instead of a flat zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     le_ff_winrate: Option<f64>,
+    /// Candidate vs voronoi-`gate_sims` (the gate match).
     #[serde(skip_serializing_if = "Option::is_none")]
     le_vor_winrate: Option<f64>,
+    /// Incumbent's same-seed rate in the same gate match.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    le_vor_incumbent: Option<f64>,
+    /// Incumbent vs voronoi-`probe_sims` — the super-heuristic goal line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    le_vor_probe: Option<f64>,
+    /// Whether this gate promoted the candidate to incumbent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gate_promoted: Option<bool>,
 }
 
 /// Copy the current net to `checkpoints/serving.safetensors` (+ provenance

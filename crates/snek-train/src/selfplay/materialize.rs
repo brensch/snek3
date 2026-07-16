@@ -225,7 +225,7 @@ pub(crate) fn materialize_le_game(
             let outcome = terminal_value(winner, s, n, draw_value);
             let bootstrap = sn.value as f32;
             out.z.push((1.0 - lambda) * bootstrap + lambda * outcome);
-            out.temp.push(g.temp);
+            out.temp.push(g.temps.get(s).copied().unwrap_or(0.0));
             out.turn.push(f.turn);
         }
     }

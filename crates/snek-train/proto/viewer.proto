@@ -49,10 +49,14 @@ message MetricRow {
   double avg_game_turn = 17;    // mean game turn across all buffered samples
   double lr = 18;               // learning rate trained at (0 for old runs)
   // LE held-out strength eval (the Elo replacement), only on eval gens.
-  double le_ff_winrate = 19;    // sole-survival rate vs floodfill baseline
-  double le_vor_winrate = 20;   // sole-survival rate vs voronoi baseline
-  bool has_le_eval = 21;        // true only on generations that ran the LE eval
+  double le_ff_winrate = 19;    // candidate vs floodfill-greedy (sanity line)
+  double le_vor_winrate = 20;   // candidate vs voronoi@gate_sims (the gate match)
+  bool has_le_eval = 21;        // true only on generations that ran a gate
   double net_entropy = 22;      // entropy (nats) of the net's own policy output
+  double le_vor_incumbent = 23; // incumbent's same-seed rate in the same gate
+  double le_vor_probe = 24;     // incumbent vs voronoi@probe_sims (goal line)
+  bool has_probe = 25;          // true when le_vor_probe was measured this gen
+  bool gate_promoted = 26;      // candidate promoted to incumbent this gate
 }
 
 // A generation that has recorded self-play sample games on disk.

@@ -55,6 +55,11 @@ pub struct RunConfig {
     /// Old run configs deserialize to the 5M they trained with.
     #[serde(default = "default_lr_half_life_samples")]
     pub lr_half_life_samples: f64,
+    /// LR never decays below this. A floor is a PERMANENT Adam step size — too
+    /// high and late-run weights random-walk instead of consolidating (le-6:
+    /// 1e-4 floor => constant ~3.7%/32-gen weight churn, ±40pt strength swings).
+    #[serde(default = "default_lr_floor")]
+    pub lr_floor: f64,
     pub search_threads: usize,
     /// How many self-play games to record as browsable samples each generation.
     #[serde(default = "default_sample_games")]
@@ -110,6 +115,32 @@ pub struct RunConfig {
     /// Stochastic-fictitious-play iterations per equilibrium solve.
     #[serde(default = "default_le_iters")]
     pub le_iters: usize,
+    /// Checkpoint gating cadence in generations (LE mode; 0 disables gating —
+    /// the live net then generates its own data, the pre-gating behaviour that
+    /// let a regressed net poison its own training data).
+    #[serde(default = "default_gate_gens")]
+    pub gate_gens: usize,
+    /// Games PER SIDE in a gate match (candidate and incumbent both play the
+    /// same start seeds vs the gate opponent — paired comparison).
+    #[serde(default = "default_gate_games")]
+    pub gate_games: usize,
+    /// Extra games the candidate must win beyond the incumbent to be promoted
+    /// (0 = strictly more wins).
+    #[serde(default)]
+    pub gate_margin: usize,
+    /// Voronoi search budget for the gate opponent. Pick where win rates land
+    /// mid-range (~30-60%): that's where a paired gate has the most signal.
+    #[serde(default = "default_gate_sims")]
+    pub gate_sims: usize,
+    /// Cadence of the strong-probe eval (incumbent vs voronoi at `probe_sims`)
+    /// in generations; 0 disables. This is the "super-heuristic" goal line.
+    #[serde(default = "default_probe_gens")]
+    pub probe_gens: usize,
+    /// Voronoi search budget for the strong probe. 20k sims ≈ the historical
+    /// AZ-league voronoi anchor ("the strongest heuristic we know how to
+    /// build"); voronoi-64 by contrast is barely deeper than 1-ply greedy.
+    #[serde(default = "default_probe_sims")]
+    pub probe_sims: usize,
     /// Fraction of NEW self-play games seeded from a curriculum scenario
     /// (snek_core::scenario) instead of the official start. 0 disables.
     #[serde(default)]
@@ -118,9 +149,17 @@ pub struct RunConfig {
     /// scenario. Unknown names are ignored with a log line.
     #[serde(default)]
     pub scenarios: Vec<String>,
-    /// Per-episode inverse-temperature (rationality) range the proxy is
-    /// conditioned on: high = rational/Nash-like, low = near-uniform. A τ is
-    /// sampled uniformly from [tau_min, tau_max] each game.
+    /// Post-opening play sharpening exponent κ: the played move is sampled
+    /// from `policy^κ` (renormalized) once a game is past `sample_turns`. 1.0
+    /// plays the raw mix to the very end — which makes soft-τ endgames
+    /// near-random and, with a mostly-outcome value target, turns their value
+    /// labels into noise. κ never touches the TRAINING target.
+    #[serde(default = "default_play_sharpness")]
+    pub play_sharpness: f32,
+    /// Per-episode, per-SEAT inverse-temperature (rationality) range the proxy
+    /// is conditioned on: high = rational/Nash-like, low = near-uniform. Each
+    /// seat draws independently from U[tau_min, tau_max] at game start, so
+    /// most games are rationality-asymmetric (the SBRLE exploit signal).
     #[serde(default = "default_tau_min")]
     pub tau_min: f32,
     #[serde(default = "default_tau_max")]
@@ -187,6 +226,24 @@ fn default_le_depth() -> u32 {
 fn default_le_iters() -> usize {
     120
 }
+fn default_play_sharpness() -> f32 {
+    2.0
+}
+fn default_gate_gens() -> usize {
+    64
+}
+fn default_gate_games() -> usize {
+    48
+}
+fn default_gate_sims() -> usize {
+    256
+}
+fn default_probe_gens() -> usize {
+    128
+}
+fn default_probe_sims() -> usize {
+    20_000
+}
 fn default_tau_min() -> f32 {
     0.5
 }
@@ -243,6 +300,9 @@ fn default_burst_games() -> usize {
     256
 }
 
+fn default_lr_floor() -> f64 {
+    2.5e-5
+}
 fn default_lr_half_life_samples() -> f64 {
     // The schedule runs at this half-life. Pre-knob it lived in train.rs as
     // LR_HALF_LIFE_SAMPLES = 5M; old configs (no field) must keep training at
@@ -304,6 +364,7 @@ impl Default for RunConfig {
             // ~125 gens per halving at 12k samples/gen: near-base LR through
             // the fast-improvement phase, ~1e-4 (the floor) past gen ~400.
             lr_half_life_samples: 1_500_000.0,
+            lr_floor: default_lr_floor(),
             search_threads: 0,
             sample_games: default_sample_games(),
             league_entrant_gens: default_league_entrant_gens(),
@@ -321,6 +382,13 @@ impl Default for RunConfig {
             le_top_k: 0,
             le_fwd_chunk: 0,
             le_iters: default_le_iters(),
+            play_sharpness: default_play_sharpness(),
+            gate_gens: default_gate_gens(),
+            gate_games: default_gate_games(),
+            gate_margin: 0,
+            gate_sims: default_gate_sims(),
+            probe_gens: default_probe_gens(),
+            probe_sims: default_probe_sims(),
             scenario_prob: 0.0,
             scenarios: Vec::new(),
             tau_min: default_tau_min(),

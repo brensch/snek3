@@ -2,6 +2,7 @@ mod api;
 mod bench;
 mod config;
 mod eval;
+mod gate;
 mod le_eval;
 mod metrics;
 mod proto;
@@ -88,6 +89,16 @@ struct Args {
     /// Uses `--run-id` (default snek3-21) for the checkpoint dir, then exits.
     #[arg(long)]
     rr: Option<String>,
+    /// LE checkpoint sweep (comma-separated gens): each checkpoint plays the
+    /// run's gate opponent (voronoi@gate_sims) from the SAME start seeds and
+    /// its win rate is printed — used to pick the strongest historical net as
+    /// the gating incumbent. Uses `--run-id` for checkpoints + config, then
+    /// exits.
+    #[arg(long)]
+    le_sweep: Option<String>,
+    /// Games per checkpoint in the LE sweep.
+    #[arg(long, default_value_t = 64)]
+    le_sweep_games: usize,
     /// Games in the round-robin.
     #[arg(long, default_value_t = 160)]
     rr_games: usize,
@@ -114,6 +125,16 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(net) = args.sl_eval_only.clone() {
         return sl_pretrain::eval_only(&net, args.sl_eval_games, args.sl_eval_ms);
+    }
+    if let Some(spec) = args.le_sweep.clone() {
+        let gens: Vec<u32> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        let run_id = args.run_id.clone().ok_or_else(|| anyhow::anyhow!("--le-sweep needs --run-id"))?;
+        anyhow::ensure!(tch::Cuda::is_available(), "le-sweep needs CUDA");
+        return gate::sweep(
+            &state::RunPaths::new(&args.runs_dir, &run_id),
+            &gens,
+            args.le_sweep_games,
+        );
     }
     if let Some(spec) = args.rr.clone() {
         let gens: Vec<u32> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();

@@ -60,10 +60,13 @@ pub struct SelfPlayState {
     /// Full frame history of each in-flight game, from its turn 0. The single
     /// source of truth for both training samples and browsable replays.
     pub rec: Vec<Vec<FrameJson>>,
-    /// Per-game episode inverse-temperature τ (parallel to `boards`), for the
-    /// Logit-Equilibrium mode — assigned at game start, constant for the game's
-    /// life. Empty/unused in the AZ path.
-    pub temp: Vec<f32>,
+    /// Per-game, PER-SEAT episode inverse-temperature τ (parallel to
+    /// `boards`), for the Logit-Equilibrium mode — assigned at game start,
+    /// constant for the game's life. Seats draw independently, so most games
+    /// are rationality-asymmetric: the equilibrium teaches sharp seats to
+    /// EXPLOIT soft ones (the SBRLE skill the held-out eval measures), not
+    /// just to coexist with equals. Empty/unused in the AZ path.
+    pub temp: Vec<[f32; snek_core::MAX_SNAKES]>,
     /// Curriculum scenario each in-flight game was seeded from (parallel to
     /// `boards`; empty string = standard start). LE mode only.
     pub scen: Vec<String>,

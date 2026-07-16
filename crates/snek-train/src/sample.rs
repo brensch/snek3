@@ -41,11 +41,12 @@ pub struct GameJson {
     /// sparring partner, never to imitate it). 0 for ordinary net-vs-net games.
     #[serde(default)]
     pub heur_mask: u8,
-    /// Per-episode inverse-temperature τ for Logit-Equilibrium self-play. The
-    /// game's LE policy/value targets (stored in each `SnakeJson`) were computed
-    /// at this τ, and it conditions the net at materialisation. 0 for AZ games.
+    /// Per-SEAT episode inverse-temperature τ for Logit-Equilibrium
+    /// self-play (index = seat). The game's LE policy/value targets were
+    /// computed at these τ, and each seat's τ conditions the net at
+    /// materialisation. Empty for AZ games.
     #[serde(default)]
-    pub temp: f32,
+    pub temps: Vec<f32>,
     /// Curriculum scenario this game was seeded from (snek_core::scenario name),
     /// empty for a standard start. Display-only: lets the viewer badge seeded
     /// games so the curriculum is auditable.
