@@ -204,6 +204,7 @@ struct MetricJson {
     le_vor_incumbent: Option<f64>,
     le_vor_probe: Option<f64>,
     gate_promoted: Option<bool>,
+    le_h2h_share: Option<f64>,
 }
 
 fn metrics(root: &Path) -> Vec<proto::MetricRow> {
@@ -248,6 +249,8 @@ fn metrics(root: &Path) -> Vec<proto::MetricRow> {
                 le_vor_probe: row.le_vor_probe.unwrap_or(0.0),
                 has_probe: row.le_vor_probe.is_some(),
                 gate_promoted: row.gate_promoted.unwrap_or(false),
+                le_h2h_share: row.le_h2h_share.unwrap_or(0.0),
+                has_h2h: row.le_h2h_share.is_some(),
             })
         })
         .collect()

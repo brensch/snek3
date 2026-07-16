@@ -4,6 +4,7 @@ mod config;
 mod eval;
 mod gate;
 mod le_eval;
+mod le_h2h;
 mod metrics;
 mod proto;
 mod replay;

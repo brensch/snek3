@@ -36,7 +36,7 @@ pub struct RecordedEvalGame {
     pub winner: Option<i32>,
 }
 
-fn argmax4(p: &[f32; 4]) -> Move {
+pub(crate) fn argmax4(p: &[f32; 4]) -> Move {
     let mut bi = 0usize;
     let mut bv = p[0];
     for (i, &v) in p.iter().enumerate().skip(1) {
@@ -282,40 +282,9 @@ pub fn eval_le_vs_baseline(
     // seat by `opponent_gen`.
     let recorded: Vec<RecordedEvalGame> = (0..record_games)
         .map(|g| {
-            let survived_key = |s: usize| -> u32 {
-                if boards[g].snakes[s].alive() {
-                    u32::MAX
-                } else {
-                    death_turn[g][s].unwrap_or(0)
-                }
-            };
-            let mut order: Vec<usize> = (0..n).collect();
-            order.sort_by_key(|&s| std::cmp::Reverse(survived_key(s)));
-            let mut placements = vec![
-                Placement {
-                    gen: 0,
-                    seat: 0,
-                    rank: 0,
-                    death_turn: None,
-                };
-                n
-            ];
-            let mut rank = 0u32;
-            let mut prev_key: Option<u32> = None;
-            for (i, &s) in order.iter().enumerate() {
-                let key = survived_key(s);
-                // Standard competition ranking: equal survival shares a rank.
-                if prev_key != Some(key) {
-                    rank = i as u32 + 1;
-                    prev_key = Some(key);
-                }
-                placements[s] = Placement {
-                    gen: if s == net_seat[g] { net_gen } else { opponent_gen },
-                    seat: s as u32,
-                    rank,
-                    death_turn: death_turn[g][s],
-                };
-            }
+            let placements = survival_placements(&boards[g], &death_turn[g], n, |s| {
+                if s == net_seat[g] { net_gen } else { opponent_gen }
+            });
             let winner = boards[g].winner().map(|s| s as i32);
             RecordedEvalGame {
                 frames: std::mem::take(&mut rec_frames[g]),
@@ -327,6 +296,47 @@ pub fn eval_le_vs_baseline(
         .collect();
 
     (win_rate, recorded)
+}
+
+/// Rank a finished game's seats by survival (alive best, later deaths next;
+/// equal survival shares a rank — standard competition ranking) and label each
+/// seat's player via `seat_gen`. Shared by the baseline arena and the
+/// head-to-head gate so every recorded game ranks identically.
+pub(crate) fn survival_placements(
+    board: &Board,
+    death_turn: &[Option<u32>; MAX_SNAKES],
+    n: usize,
+    seat_gen: impl Fn(usize) -> u32,
+) -> Vec<Placement> {
+    let survived_key = |s: usize| -> u32 {
+        if board.snakes[s].alive() {
+            u32::MAX
+        } else {
+            death_turn[s].unwrap_or(0)
+        }
+    };
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&s| std::cmp::Reverse(survived_key(s)));
+    let mut placements = vec![
+        Placement { gen: 0, seat: 0, rank: 0, death_turn: None };
+        n
+    ];
+    let mut rank = 0u32;
+    let mut prev_key: Option<u32> = None;
+    for (i, &s) in order.iter().enumerate() {
+        let key = survived_key(s);
+        if prev_key != Some(key) {
+            rank = i as u32 + 1;
+            prev_key = Some(key);
+        }
+        placements[s] = Placement {
+            gen: seat_gen(s),
+            seat: s as u32,
+            rank,
+            death_turn: death_turn[s],
+        };
+    }
+    placements
 }
 
 /// Write recorded held-out games into `<root>/eval/` in the same format the

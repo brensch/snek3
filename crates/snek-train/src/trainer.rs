@@ -427,6 +427,7 @@ impl TrainerHandle {
             let mut le_vor_incumbent = None;
             let mut le_vor_probe = None;
             let mut gate_promoted = None;
+            let mut le_h2h_share = None;
             if gating
                 && (state.generation as usize).is_multiple_of(cfg.gate_gens)
                 && !self.stop.load(Ordering::Relaxed)
@@ -459,13 +460,21 @@ impl TrainerHandle {
                     self.log(format!("gate: failed to record floodfill games: {e}"));
                 }
 
-                let report = crate::gate::run_gate(
-                    &net, &net_inc, device, &cfg, &mut gate_meta, state.generation,
-                    Some(&counters.arena_done), 4,
-                );
+                let report = if cfg.gate_h2h {
+                    crate::gate::run_gate_h2h(
+                        &net, &net_inc, device, &cfg, &mut gate_meta, state.generation,
+                        Some(&counters.arena_done), 4,
+                    )
+                } else {
+                    crate::gate::run_gate(
+                        &net, &net_inc, device, &cfg, &mut gate_meta, state.generation,
+                        Some(&counters.arena_done), 4,
+                    )
+                };
                 le_vor_winrate = Some(report.candidate_vor);
                 le_vor_incumbent = Some(report.incumbent_vor);
                 gate_promoted = Some(report.promoted);
+                le_h2h_share = report.h2h_share;
                 if report.promoted {
                     vs_inc.copy(&vs)?;
                     vs_inc.save(&paths.incumbent)?;
@@ -487,14 +496,15 @@ impl TrainerHandle {
                     self.log(format!("gate: failed to record gate games: {e}"));
                 }
                 self.log(format!(
-                    "GATE gen {gen}: candidate {cw}/{n} vs incumbent(gen {ig}) {iw}/{n} vs voronoi-{sims} → {verdict} · ff {ff:.0}%",
+                    "GATE gen {gen}: candidate {cw} vs incumbent(gen {ig}) {iw} ({mode}, {n} games) → {verdict} · cand-vor {cv:.0}% · ff {ff:.0}%",
                     gen = state.generation,
                     cw = report.candidate_wins,
                     iw = report.incumbent_wins,
                     n = report.games,
                     ig = if report.promoted { state.generation } else { gate_meta.incumbent_gen },
-                    sims = cfg.gate_sims,
+                    mode = if cfg.gate_h2h { "head-to-head" } else { "vs-baseline" },
                     verdict = if report.promoted { "PROMOTED" } else { "kept incumbent" },
+                    cv = report.candidate_vor * 100.0,
                     ff = vff * 100.0,
                 ));
 
@@ -560,6 +570,7 @@ impl TrainerHandle {
                     le_vor_incumbent,
                     le_vor_probe,
                     gate_promoted,
+                    le_h2h_share,
                 },
             )?;
             self.log(format!(
@@ -687,6 +698,9 @@ struct GenRecord {
     /// Whether this gate promoted the candidate to incumbent.
     #[serde(skip_serializing_if = "Option::is_none")]
     gate_promoted: Option<bool>,
+    /// Candidate's share of decisive head-to-head gate games (0.5 = parity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    le_h2h_share: Option<f64>,
 }
 
 /// Copy the current net to `checkpoints/serving.safetensors` (+ provenance

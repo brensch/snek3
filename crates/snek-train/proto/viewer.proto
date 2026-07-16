@@ -57,6 +57,8 @@ message MetricRow {
   double le_vor_probe = 24;     // incumbent vs voronoi@probe_sims (goal line)
   bool has_probe = 25;          // true when le_vor_probe was measured this gen
   bool gate_promoted = 26;      // candidate promoted to incumbent this gate
+  double le_h2h_share = 27;     // candidate's share of decisive head-to-head gate games (0.5 = parity)
+  bool has_h2h = 28;            // true when this gen ran a head-to-head gate
 }
 
 // A generation that has recorded self-play sample games on disk.

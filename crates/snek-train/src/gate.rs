@@ -49,11 +49,23 @@ pub struct GateMeta {
     pub failed_gates: u32,
     /// Seed for the NEXT gate's paired games; advanced every gate.
     pub next_seed: u64,
+    /// The candidate's external (vs voronoi@gate_sims) rate at the moment it
+    /// was promoted — the anti-drift floor for the NEXT promotion (see
+    /// [`promote_h2h`]). 0 for pre-h2h metas: the floor then trivially passes
+    /// until the first h2h promotion records a real level.
+    #[serde(default)]
+    pub inc_vor_at_promotion: f64,
 }
 
 impl GateMeta {
     pub fn founding(gen: u32, seed: u64) -> Self {
-        GateMeta { incumbent_gen: gen, promotions: 0, failed_gates: 0, next_seed: seed }
+        GateMeta {
+            incumbent_gen: gen,
+            promotions: 0,
+            failed_gates: 0,
+            next_seed: seed,
+            inc_vor_at_promotion: 0.0,
+        }
     }
 
     pub fn load(path: &Path) -> Option<Self> {
@@ -70,14 +82,22 @@ impl GateMeta {
 
 /// Everything one gate produced, for logs/metrics/the promotion decision.
 pub struct GateReport {
+    /// The promotion-deciding match's wins per side (h2h mode: head-to-head
+    /// games; legacy mode: paired games vs the gate baseline).
     pub candidate_wins: usize,
     pub incumbent_wins: usize,
     pub games: usize,
     pub promoted: bool,
-    /// Candidate's win rates for the strength chart.
+    /// Candidate vs voronoi@gate_sims — the external chart line (and, in h2h
+    /// mode, the anti-drift floor measurement).
     pub candidate_vor: f64,
+    /// Incumbent's external level: measured directly in legacy mode; in h2h
+    /// mode its rate at promotion time (flat between promotions by
+    /// construction — the incumbent is frozen).
     pub incumbent_vor: f64,
-    /// Candidate's recorded games (viewer audit trail).
+    /// Candidate's share of decisive h2h games (NaN-free: 0.5 when none).
+    pub h2h_share: Option<f64>,
+    /// Recorded games for the viewer audit trail (gate + h2h).
     pub recorded: Vec<RecordedEvalGame>,
 }
 
@@ -86,6 +106,27 @@ pub struct GateReport {
 /// point, and the candidate gets another `gate_gens` of training either way.
 pub fn promote(candidate_wins: usize, incumbent_wins: usize, margin: usize) -> bool {
     candidate_wins > incumbent_wins + margin
+}
+
+/// External-floor tolerance for h2h promotions: ~2σ of a 48-game rate, so a
+/// genuine external collapse blocks promotion but sampling noise never does.
+const H2H_VOR_FLOOR_TOLERANCE: f64 = 0.15;
+
+/// The head-to-head promotion rule: the candidate side must strictly out-win
+/// the incumbent side in the paired match, AND its external (vs voronoi) rate
+/// must not have collapsed below the level the incumbent had when IT was
+/// promoted. Head-to-head never saturates (a relative measure stays mid-range
+/// forever), but two nets can co-evolve private strategies that beat each
+/// other while losing to the world — the floor makes that unpromotable.
+pub fn promote_h2h(
+    cand_h2h_wins: usize,
+    inc_h2h_wins: usize,
+    margin: usize,
+    cand_vor: f64,
+    floor_vor: f64,
+) -> bool {
+    promote(cand_h2h_wins, inc_h2h_wins, margin)
+        && cand_vor >= floor_vor - H2H_VOR_FLOOR_TOLERANCE
 }
 
 /// Play one gate: candidate and incumbent each play `gate_games` vs voronoi at
@@ -135,6 +176,70 @@ pub fn run_gate(
         promoted,
         candidate_vor: cand_rate,
         incumbent_vor: inc_rate,
+        h2h_share: None,
+        recorded,
+    }
+}
+
+/// Gate v2: head-to-head promotion with an external anti-drift floor.
+///
+/// 1. Candidate and incumbent play `gate_games` DIRECT games (2v2 seats,
+///    parity-alternating, paired seed) — the promotion-deciding match. A
+///    relative match never saturates, so gate discrimination stays maximal at
+///    every skill level (the voronoi gate saturated at 92%v90%).
+/// 2. The candidate also plays `gate_games` vs voronoi@gate_sims — the
+///    external chart line AND the floor input: promotion additionally
+///    requires the candidate hasn't collapsed externally (see [`promote_h2h`]).
+#[allow(clippy::too_many_arguments)]
+pub fn run_gate_h2h(
+    candidate: &snek_tch::AZNet,
+    incumbent: &snek_tch::AZNet,
+    device: Device,
+    cfg: &RunConfig,
+    meta: &mut GateMeta,
+    gen: u32,
+    progress: Option<&AtomicU32>,
+    record_games: usize,
+) -> GateReport {
+    let vor = Baseline::parse("voronoi").expect("voronoi baseline exists");
+    let games = cfg.gate_games.max(8);
+    let seed = meta.next_seed;
+
+    let h2h = crate::le_h2h::play_h2h(
+        candidate, incumbent, gen, meta.incumbent_gen, device, cfg, games,
+        cfg.response_tau, seed, progress, record_games,
+    );
+    let (cand_vor, rec_vor) = eval_le_vs_baseline(
+        candidate, device, cfg, vor, cfg.gate_sims, games, cfg.response_tau, seed,
+        progress, gen, crate::eval::VORONOI_GEN, record_games.min(2),
+    );
+
+    let decisive = h2h.a_wins + h2h.b_wins;
+    let h2h_share = if decisive > 0 { h2h.a_wins as f64 / decisive as f64 } else { 0.5 };
+    let promoted = promote_h2h(
+        h2h.a_wins, h2h.b_wins, cfg.gate_margin, cand_vor, meta.inc_vor_at_promotion,
+    );
+
+    meta.next_seed = meta.next_seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(gen as u64);
+    if promoted {
+        meta.incumbent_gen = gen;
+        meta.promotions += 1;
+        meta.failed_gates = 0;
+        meta.inc_vor_at_promotion = cand_vor;
+    } else {
+        meta.failed_gates += 1;
+    }
+
+    let mut recorded = h2h.recorded;
+    recorded.extend(rec_vor);
+    GateReport {
+        candidate_wins: h2h.a_wins,
+        incumbent_wins: h2h.b_wins,
+        games,
+        promoted,
+        candidate_vor: cand_vor,
+        incumbent_vor: meta.inc_vor_at_promotion,
+        h2h_share: Some(h2h_share),
         recorded,
     }
 }
@@ -213,6 +318,21 @@ mod tests {
         assert!(!promote(11, 10, 1), "margin raises the bar");
         assert!(promote(12, 10, 1));
         assert!(!promote(0, 0, 0), "0-0 keeps the incumbent");
+    }
+
+    #[test]
+    fn h2h_promotion_needs_win_and_external_floor() {
+        // Clear h2h win + external level held: promote.
+        assert!(promote_h2h(20, 15, 0, 0.60, 0.60));
+        // h2h win but external collapse beyond tolerance: blocked (the
+        // co-evolution guard — beats the incumbent, loses to the world).
+        assert!(!promote_h2h(20, 15, 0, 0.40, 0.60));
+        // Small external dip within 2σ tolerance: sampling noise, promote.
+        assert!(promote_h2h(20, 15, 0, 0.50, 0.60));
+        // h2h tie: never promotes regardless of external strength.
+        assert!(!promote_h2h(15, 15, 0, 0.90, 0.10));
+        // Founding/legacy meta (floor 0): floor trivially passes.
+        assert!(promote_h2h(20, 15, 0, 0.05, 0.0));
     }
 
     #[test]

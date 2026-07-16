@@ -23,6 +23,8 @@ export function StrengthHero({ metrics }: { metrics: MetricRow[] }) {
   // (the chart skips NaN points).
   const probeByGen = new Map(probes.map((m) => [m.generation, m.leVorProbe * 100]));
   const probe = gates.map((m) => probeByGen.get(m.generation) ?? NaN);
+  // Head-to-head gate share: >50 = candidate ahead of the frozen incumbent.
+  const h2h = gates.map((m) => (m.hasH2h ? m.leH2hShare * 100 : NaN));
   const promotions = gates.filter((m) => m.gatePromoted).length;
 
   return (
@@ -49,8 +51,9 @@ export function StrengthHero({ metrics }: { metrics: MetricRow[] }) {
           domain={[0, 100]}
           format={(v) => `${v.toFixed(0)}%`}
           series={[
-            { name: "candidate", color: series.magenta, values: cand },
-            { name: "incumbent", color: series.blue, values: inc },
+            { name: "candidate vs voronoi", color: series.magenta, values: cand },
+            { name: "incumbent vs voronoi", color: series.blue, values: inc },
+            { name: "h2h share (50 = parity)", color: series.violet, values: h2h },
             { name: "vs strong voronoi", color: series.orange, values: probe },
           ]}
           xValues={gens}

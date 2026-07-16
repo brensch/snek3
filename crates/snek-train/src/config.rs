@@ -120,6 +120,12 @@ pub struct RunConfig {
     /// let a regressed net poison its own training data).
     #[serde(default = "default_gate_gens")]
     pub gate_gens: usize,
+    /// Gate v2: promote on a DIRECT candidate-vs-incumbent match (2v2 seats,
+    /// paired seeds) with an external anti-drift floor, instead of comparing
+    /// both sides' rates vs the gate baseline. A relative match never
+    /// saturates; the floor blocks co-evolutionary drift. See gate::run_gate_h2h.
+    #[serde(default = "default_gate_h2h")]
+    pub gate_h2h: bool,
     /// Games PER SIDE in a gate match (candidate and incumbent both play the
     /// same start seeds vs the gate opponent — paired comparison).
     #[serde(default = "default_gate_games")]
@@ -231,6 +237,9 @@ fn default_play_sharpness() -> f32 {
 }
 fn default_gate_gens() -> usize {
     64
+}
+fn default_gate_h2h() -> bool {
+    true
 }
 fn default_gate_games() -> usize {
     48
@@ -384,6 +393,7 @@ impl Default for RunConfig {
             le_iters: default_le_iters(),
             play_sharpness: default_play_sharpness(),
             gate_gens: default_gate_gens(),
+            gate_h2h: default_gate_h2h(),
             gate_games: default_gate_games(),
             gate_margin: 0,
             gate_sims: default_gate_sims(),
