@@ -55,6 +55,53 @@ fn measure(
     ((calls * rows) as f64 / el, el * 1000.0 / calls as f64)
 }
 
+/// Load a checkpoint and print the value head's output on a spread of real
+/// boards (all seats, serve-τ). Diagnostic for a dead/saturated value head:
+/// healthy nets spread values with the position; a tanh-saturated head pins
+/// |v| ≈ 1 everywhere and its gradient is ~0, so it never trains.
+pub fn value_probe(paths: &RunPaths, ckpt: &std::path::Path) -> anyhow::Result<()> {
+    let cfg = RunConfig::load(&paths.config)?;
+    let device = Device::Cuda(0);
+    let side = obs_side(cfg.board as usize) as i64;
+    let n = cfg.num_snakes;
+    let mut vs = nn::VarStore::new(device);
+    let net = snek_tch::AZNet::new(
+        &vs.root(),
+        NUM_CHANNELS_TEMP as i64,
+        cfg.trunk_channels,
+        cfg.trunk_blocks,
+    );
+    vs.load(ckpt)?;
+    let l15 = NUM_CHANNELS_TEMP * (side * side) as usize;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xB0A2D);
+    let mut boards = vec![snek_core::standard_start(cfg.board, cfg.board, n, &mut rng)];
+    for sc in snek_core::scenario::SCENARIOS.iter().take(3) {
+        boards.push((sc.generate)(cfg.board, cfg.board, n, &mut rng));
+    }
+    let rows = boards.len() * n;
+    let mut stage = PinnedStage::new(device);
+    let buf = stage.slice(rows * l15);
+    for (bi, b) in boards.iter().enumerate() {
+        for s in 0..n {
+            snek_core::encode_into_temp(
+                b,
+                s,
+                cfg.response_tau,
+                &mut buf[(bi * n + s) * l15..(bi * n + s + 1) * l15],
+            );
+        }
+    }
+    let vals = forward_values_staged(&net, device, stage.tensor(), rows, rows, side, rows);
+    println!("value probe: {} (τ={})", ckpt.display(), cfg.response_tau);
+    for (bi, chunk) in vals.chunks(n).enumerate() {
+        let line: Vec<String> = chunk.iter().map(|v| format!("{v:+.3}")).collect();
+        println!("  board {bi}: [{}]", line.join(", "));
+    }
+    let sat = vals.iter().filter(|v| v.abs() > 0.99).count();
+    println!("  |v|>0.99: {}/{} — saturated head if ~all", sat, vals.len());
+    Ok(())
+}
+
 /// Sweep chunk sizes on the run's net shape and print a decision table.
 /// `big_rows`/`small_rows` approximate the two real per-turn forwards (deepen
 /// and root); the combined column is the per-turn effective rate that actually

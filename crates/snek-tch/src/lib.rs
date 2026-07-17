@@ -90,6 +90,18 @@ pub fn init_orthogonal(vs: &nn::VarStore, gain: f64) {
             if dims.len() < 2 {
                 continue; // GroupNorm weight stays at 1
             }
+            // Final value layer starts at ZERO: v = tanh(0) = 0, where tanh'
+            // is 1 and the head can actually learn. Orthogonal x gain here
+            // put the fresh 192x12 net's pre-tanh in the saturation zone; the
+            // 0.25-weighted value gradient then slid it onto the -1 rail
+            // (tanh' ~ 0) and the head froze at random for 31 gens while the
+            // policy-driven trunk kept moving (snek3-le-8 post-mortem). The
+            // biases vh2 feeds on are nonzero, so the zero layer un-sticks
+            // after one step — the standard AlphaZero-style value-head init.
+            if name.ends_with("vh2.weight") {
+                let _ = w.zero_();
+                continue;
+            }
             let rows = dims[0];
             let cols: i64 = dims[1..].iter().product();
             // QR on CPU: init-time only, and keeping linalg off the GPU lets the
@@ -284,5 +296,25 @@ mod tests {
         let (p, v) = net.forward(&x);
         assert_eq!(p.size(), vec![6, 4]);
         assert_eq!(v.size(), vec![6]);
+    }
+
+    /// A fresh net must start with a LIVE value head: v ~ 0 on any input, so
+    /// tanh' ~ 1 and value gradients flow from step one. The snek3-le-8
+    /// failure mode was the opposite — orthogonal init at target-class width
+    /// put the pre-tanh in the saturation zone, the head pinned to a rail,
+    /// and it stayed frozen at random for the whole run.
+    #[test]
+    fn fresh_value_head_is_unsaturated() {
+        let vs = nn::VarStore::new(tch::Device::Cpu);
+        // Target-class shape (small batch keeps the test fast on CPU).
+        let net = AZNet::new(&vs.root(), 15, 192, 12);
+        init_orthogonal(&vs, 2f64.sqrt());
+        let x = Tensor::randn([4, 15, 11, 11], (Kind::Float, tch::Device::Cpu));
+        let (_p, v) = net.forward(&x);
+        let vals: Vec<f32> = v.try_into().unwrap();
+        assert!(
+            vals.iter().all(|v| v.abs() < 0.05),
+            "fresh value head must output ~0 (got {vals:?})"
+        );
     }
 }
