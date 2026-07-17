@@ -11,7 +11,7 @@ cd /home/brensch/snek3
 LOG=scratchpad-le/boot.log
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
-RUN=snek3-le-6
+RUN=snek3-le-8
 
 # Most recent control marker wins: a later resume-style line overrides a stop.
 last_stop=$(grep -n 'INTENTIONAL STOP' scratchpad-le/experiments.log | tail -1 | cut -d: -f1)

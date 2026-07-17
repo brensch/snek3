@@ -8,7 +8,7 @@
 set -uo pipefail
 cd /home/brensch/snek3
 LOG=/home/brensch/snek3/scratchpad-le/watchdog.log
-RUN=snek3-le-6
+RUN=snek3-le-8
 API=http://127.0.0.1:8050
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
