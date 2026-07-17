@@ -108,8 +108,10 @@ pub struct RunConfig {
     pub le_top_k: usize,
     /// Leaf-eval forward chunk size in ROWS (board-seats). 0 = one big forward
     /// (old behaviour). >0 splits each turn's value forward into fixed-size,
-    /// benchmark-friendly chunks near the GPU throughput sweet spot (~512),
-    /// pipelined so the GPU stays fed. See docs/le-throughput.md.
+    /// benchmark-friendly chunks, pipelined so the GPU stays fed. Sweet spot
+    /// is measurable with `--fwd-bench` and net-shape dependent: 128-384 all
+    /// tie on a 192x12 net (512 is ~15% slower, >=768 ~20%); 256 is the
+    /// robust pick. See docs/le-throughput.md.
     #[serde(default)]
     pub le_fwd_chunk: usize,
     /// Stochastic-fictitious-play iterations per equilibrium solve.
