@@ -471,8 +471,15 @@ impl TrainerHandle {
                         Some(&counters.arena_done), 4,
                     )
                 };
-                le_vor_winrate = Some(report.candidate_vor);
+                le_vor_winrate = report.candidate_vor;
                 le_vor_incumbent = Some(report.incumbent_vor);
+                if report.candidate_vor.is_none() {
+                    // Skipped voronoi leg: snap the arena meter to complete so
+                    // the dashboard doesn't end a gate at 112/160.
+                    counters
+                        .arena_target
+                        .store(counters.arena_done.load(Ordering::Relaxed), Ordering::Relaxed);
+                }
                 gate_promoted = Some(report.promoted);
                 le_h2h_share = report.h2h_share;
                 if report.promoted {
@@ -496,7 +503,7 @@ impl TrainerHandle {
                     self.log(format!("gate: failed to record gate games: {e}"));
                 }
                 self.log(format!(
-                    "GATE gen {gen}: candidate {cw} vs incumbent(gen {ig}) {iw} ({mode}, {n} games) → {verdict} · cand-vor {cv:.0}% · ff {ff:.0}%",
+                    "GATE gen {gen}: candidate {cw} vs incumbent(gen {ig}) {iw} ({mode}, {n} games) → {verdict} · cand-vor {cv} · ff {ff:.0}%",
                     gen = state.generation,
                     cw = report.candidate_wins,
                     iw = report.incumbent_wins,
@@ -504,7 +511,10 @@ impl TrainerHandle {
                     ig = if report.promoted { state.generation } else { gate_meta.incumbent_gen },
                     mode = if cfg.gate_h2h { "head-to-head" } else { "vs-baseline" },
                     verdict = if report.promoted { "PROMOTED" } else { "kept incumbent" },
-                    cv = report.candidate_vor * 100.0,
+                    cv = report
+                        .candidate_vor
+                        .map(|v| format!("{:.0}%", v * 100.0))
+                        .unwrap_or_else(|| "skipped (h2h lost)".into()),
                     ff = vff * 100.0,
                 ));
 

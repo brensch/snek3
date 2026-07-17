@@ -89,8 +89,10 @@ pub struct GateReport {
     pub games: usize,
     pub promoted: bool,
     /// Candidate vs voronoi@gate_sims — the external chart line (and, in h2h
-    /// mode, the anti-drift floor measurement).
-    pub candidate_vor: f64,
+    /// mode, the anti-drift floor measurement). None when the h2h leg already
+    /// failed: the floor can't rescue a lost match, so the 48 voronoi games
+    /// (a third of the arena's wall clock) are skipped entirely.
+    pub candidate_vor: Option<f64>,
     /// Incumbent's external level: measured directly in legacy mode; in h2h
     /// mode its rate at promotion time (flat between promotions by
     /// construction — the incumbent is frozen).
@@ -174,7 +176,7 @@ pub fn run_gate(
         incumbent_wins,
         games,
         promoted,
-        candidate_vor: cand_rate,
+        candidate_vor: Some(cand_rate),
         incumbent_vor: inc_rate,
         h2h_share: None,
         recorded,
@@ -209,23 +211,32 @@ pub fn run_gate_h2h(
         candidate, incumbent, gen, meta.incumbent_gen, device, cfg, games,
         cfg.response_tau, seed, progress, record_games,
     );
-    let (cand_vor, rec_vor) = eval_le_vs_baseline(
-        candidate, device, cfg, vor, cfg.gate_sims, games, cfg.response_tau, seed,
-        progress, gen, crate::eval::VORONOI_GEN, record_games.min(2),
-    );
-
     let decisive = h2h.a_wins + h2h.b_wins;
     let h2h_share = if decisive > 0 { h2h.a_wins as f64 / decisive as f64 } else { 0.5 };
-    let promoted = promote_h2h(
-        h2h.a_wins, h2h.b_wins, cfg.gate_margin, cand_vor, meta.inc_vor_at_promotion,
-    );
+
+    // The voronoi leg exists to feed the anti-drift floor (and the chart), and
+    // the floor can only BLOCK a promotion the h2h match already earned — so
+    // when the h2h leg failed, skip those `games` voronoi games entirely
+    // (roughly a third of a no-probe arena's wall clock).
+    let h2h_pass = promote(h2h.a_wins, h2h.b_wins, cfg.gate_margin);
+    let (cand_vor, rec_vor) = if h2h_pass {
+        let (v, r) = eval_le_vs_baseline(
+            candidate, device, cfg, vor, cfg.gate_sims, games, cfg.response_tau, seed,
+            progress, gen, crate::eval::VORONOI_GEN, record_games.min(2),
+        );
+        (Some(v), r)
+    } else {
+        (None, Vec::new())
+    };
+    let promoted = h2h_pass
+        && cand_vor.is_some_and(|v| v >= meta.inc_vor_at_promotion - H2H_VOR_FLOOR_TOLERANCE);
 
     meta.next_seed = meta.next_seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(gen as u64);
     if promoted {
         meta.incumbent_gen = gen;
         meta.promotions += 1;
         meta.failed_gates = 0;
-        meta.inc_vor_at_promotion = cand_vor;
+        meta.inc_vor_at_promotion = cand_vor.expect("promotion requires the vor leg");
     } else {
         meta.failed_gates += 1;
     }
