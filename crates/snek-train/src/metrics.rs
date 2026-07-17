@@ -110,18 +110,26 @@ impl Metrics {
     }
 
     pub async fn run_samplers(self) {
-        let mut last_at = Instant::now();
-        let mut last_inf = 0u64;
         let mut last_games = 0u64;
         let mut last_turns = 0u64;
         let mut last_fwd_us = 0u64;
         let mut last_rows = 0u64;
         let mut last_reqs = 0u64;
-        let mut inf_rate_ema = 0.0;
-        let mut games_rate_ema = 0.0;
         let mut gpu_busy_ema = 0.0;
         let mut avg_turn_ema = 0.0;
         let mut initialized = false;
+        // Throughput counters advance only when a batch RETURNS: one lump per
+        // leaf forward (~1-3s apart at 192ch depth-2 — the whole lockstep turn
+        // is GPU forward), and games finish in bursts at turn boundaries. Any
+        // short EMA of 250ms deltas therefore seesaws with the turn cadence
+        // (the old α=0.08 EMA decayed ~50% between lumps: a sawtooth on the
+        // chart that isn't in the throughput). Rates are instead computed over
+        // a sliding window spanning several turn periods — an exact box
+        // average that reads steady and still tracks phase changes within
+        // ~10s. (Instant, inferences, completed_games) snapshots.
+        const RATE_WINDOW: Duration = Duration::from_secs(10);
+        let mut rate_hist: std::collections::VecDeque<(Instant, u64, u64)> =
+            std::collections::VecDeque::new();
         // Device utilization straight from NVML — the same counter nvidia-smi
         // and task manager show. The trainer requires CUDA, so NVML is a hard
         // requirement too. The versioned lib name matters: WSL (and most
@@ -143,15 +151,31 @@ impl Metrics {
             self.counters.gpu_util_sum.fetch_add(gpu_util_sample as u64, Ordering::Relaxed);
             self.counters.gpu_util_n.fetch_add(1, Ordering::Relaxed);
             let now = Instant::now();
-            let dt = now.duration_since(last_at).as_secs_f64().max(1e-9);
             let inf = self.counters.inferences.load(Ordering::Relaxed);
             let games = self.counters.completed_games.load(Ordering::Relaxed);
             let turns = self.counters.completed_turns.load(Ordering::Relaxed);
             let fwd_us = self.counters.gpu_forward_us.load(Ordering::Relaxed);
             let rows = self.counters.gpu_rows.load(Ordering::Relaxed);
             let reqs = self.counters.gpu_requests.load(Ordering::Relaxed);
-            let raw_inf_rate = (inf - last_inf) as f64 / dt;
-            let raw_games_rate = (games - last_games) as f64 / dt;
+            // Windowed rates (see RATE_WINDOW above): delta against the oldest
+            // snapshot still inside the window.
+            let (inf_rate, games_rate) = match rate_hist.front() {
+                Some(&(t0, inf0, games0)) => {
+                    let wdt = now.duration_since(t0).as_secs_f64().max(1e-9);
+                    (
+                        inf.saturating_sub(inf0) as f64 / wdt,
+                        games.saturating_sub(games0) as f64 / wdt,
+                    )
+                }
+                None => (0.0, 0.0),
+            };
+            rate_hist.push_back((now, inf, games));
+            while rate_hist
+                .front()
+                .is_some_and(|&(t0, _, _)| now.duration_since(t0) > RATE_WINDOW)
+            {
+                rate_hist.pop_front();
+            }
             let fwd_delta_us = fwd_us.saturating_sub(last_fwd_us);
             let raw_gpu_busy = gpu_util_sample;
             // Mean length of games completing this window; only updated when
@@ -162,20 +186,13 @@ impl Metrics {
             } else {
                 avg_turn_ema
             };
-            // At depth-2 the inference counter advances in ~turn-sized lumps
-            // (~0.5s apart), so a fast EMA over 250ms ticks genuinely seesaws
-            // between "caught a lump" and "caught none" (30k↔60k on screen).
-            // τ ≈ ticks·Δt/α ≈ 3s smooths the display to the true average
-            // while still tracking phase changes within a few seconds.
+            // NVML utilization and mean game length are already slow-moving;
+            // a light EMA just knocks the sampling jitter off them.
             let alpha = 0.08;
             if initialized {
-                inf_rate_ema = alpha * raw_inf_rate + (1.0 - alpha) * inf_rate_ema;
-                games_rate_ema = alpha * raw_games_rate + (1.0 - alpha) * games_rate_ema;
                 gpu_busy_ema = alpha * raw_gpu_busy + (1.0 - alpha) * gpu_busy_ema;
                 avg_turn_ema = alpha * raw_avg_turn + (1.0 - alpha) * avg_turn_ema;
             } else {
-                inf_rate_ema = raw_inf_rate;
-                games_rate_ema = raw_games_rate;
                 gpu_busy_ema = raw_gpu_busy;
                 avg_turn_ema = raw_avg_turn;
                 initialized = true;
@@ -201,8 +218,8 @@ impl Metrics {
                 t_unix_ms: unix_ms(),
                 generation: self.counters.generation.load(Ordering::Relaxed),
                 phase: phase_from_u32(self.counters.phase.load(Ordering::Relaxed)) as i32,
-                inferences_per_sec: inf_rate_ema,
-                games_per_sec: games_rate_ema,
+                inferences_per_sec: inf_rate,
+                games_per_sec: games_rate,
                 completed_games_total: games,
                 samples_collected: self.counters.samples_collected.load(Ordering::Relaxed),
                 samples_target: self.counters.samples_target.load(Ordering::Relaxed),
@@ -221,8 +238,6 @@ impl Metrics {
                 arena_done: self.counters.arena_done.load(Ordering::Relaxed),
                 arena_target: self.counters.arena_target.load(Ordering::Relaxed),
             };
-            last_at = now;
-            last_inf = inf;
             last_games = games;
             last_turns = turns;
             last_fwd_us = fwd_us;
