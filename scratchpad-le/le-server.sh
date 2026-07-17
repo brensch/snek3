@@ -11,6 +11,7 @@ NV=$(find "$TORCH_SITE/nvidia" -name lib -type d 2>/dev/null | tr '\n' ':')
 export LD_PRELOAD="$TORCH_LIB/libtorch_global_deps.so:$TORCH_LIB/libtorch_cuda.so${LD_PRELOAD:+:$LD_PRELOAD}"
 export LD_LIBRARY_PATH="$TORCH_LIB:$NV${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export SNEK_NO_PUBLISH=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export RUST_LOG="snek=info,warn"
 
 exec ./crates/snek-train/target/release/snek-train \
